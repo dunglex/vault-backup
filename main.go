@@ -14,14 +14,14 @@ import (
 )
 
 type Arguments struct {
-	Url           string
-	User          string
-	Pass          string
-	EnginePath    string
-	SecretPath    string
-	OutputPath    string
-	OutputFormat  string
-	PrintToStdout bool
+	Url          string
+	User         string
+	Pass         string
+	EnginePath   string
+	SecretPath   string
+	OutputMode   string
+	OutputFormat string
+	OutputPath   string
 }
 
 func main() {
@@ -37,7 +37,7 @@ func main() {
 	}
 
 	// Authenticate with LDAP username/password
-	data := map[string]interface{}{
+	data := map[string]any{
 		"password": arguments.Pass,
 	}
 	loginPath := fmt.Sprintf("auth/ldap/login/%s", arguments.User)
@@ -55,7 +55,7 @@ func main() {
 		if err != nil || list == nil || list.Data == nil {
 			log.Fatalf("Failed to list secrets in folder %s: %v", arguments.SecretPath, err)
 		}
-		keys, ok := list.Data["keys"].([]interface{})
+		keys, ok := list.Data["keys"].([]any)
 		if !ok {
 			log.Fatalf("Unexpected data format when listing folder %s", arguments.SecretPath)
 		}
@@ -71,7 +71,7 @@ func main() {
 				log.Printf("Failed to read secret %s: %v (maybe a folder)", arguments.SecretPath+keyStr, err)
 				continue
 			}
-			secrets := map[string]interface{}{
+			secrets := map[string]any{
 				"key":  fullPath,
 				"data": secretData.Data["data"],
 			}
@@ -81,7 +81,7 @@ func main() {
 			if err := os.MkdirAll(outputPath, 0755); err != nil {
 				log.Fatalf("Failed to create output directory: %v", err)
 			}
-			writeOutput(secrets, outputPath, arguments.OutputFormat, keyStr, arguments.PrintToStdout)
+			writeOutput(secrets, outputPath, arguments.OutputFormat, keyStr, arguments.OutputMode)
 		}
 	} else {
 		// Read a single secret
@@ -90,7 +90,7 @@ func main() {
 		if err != nil || secretData == nil || secretData.Data == nil {
 			log.Printf("Failed to read secret %s: %v (invalid path or maybe a folder)", arguments.SecretPath, err)
 		}
-		secrets := map[string]interface{}{
+		secrets := map[string]any{
 			"key":  fullPath,
 			"data": secretData.Data["data"],
 		}
@@ -98,7 +98,7 @@ func main() {
 		// Obmit the folder structure, only keep the last part of the path
 		lastIndex := len(strings.Split(arguments.SecretPath, "/")) - 1
 		fileName := strings.Split(arguments.SecretPath, "/")[lastIndex]
-		writeOutput(secrets, arguments.OutputPath, arguments.OutputFormat, fileName, arguments.PrintToStdout)
+		writeOutput(secrets, arguments.OutputPath, arguments.OutputFormat, fileName, arguments.OutputMode)
 	}
 }
 
@@ -111,7 +111,7 @@ func parseArguments() Arguments {
 	pflag.String("secret_path", "", "Vault secret path")
 	pflag.String("output_path", ".", "Output file name or folder name (optional, if not provided, keep as is)")
 	pflag.String("output_format", "json", "Output format: json, yaml, ini, env (optional, default: json)")
-	pflag.Bool("print_to_stdout", false, "Print output to stdout instead of file (optional, default: false)")
+	pflag.String("outputMode", "all", "Print output: to outputMode instead of file (optional, default: None)")
 	pflag.Parse()
 
 	// Bind flags to viper
@@ -122,7 +122,7 @@ func parseArguments() Arguments {
 	viper.BindPFlag("secret_path", pflag.Lookup("secret_path"))
 	viper.BindPFlag("output_path", pflag.Lookup("output_path"))
 	viper.BindPFlag("output_format", pflag.Lookup("output_format"))
-	viper.BindPFlag("print_to_stdout", pflag.Lookup("print_to_stdout"))
+	viper.BindPFlag("output_mode", pflag.Lookup("output_mode"))
 
 	// Bind environment variables (upper case, underscores)
 	viper.SetEnvPrefix("VAULT")
@@ -134,7 +134,7 @@ func parseArguments() Arguments {
 	viper.BindEnv("secret_path")
 	viper.BindEnv("output_path")
 	viper.BindEnv("output_format")
-	viper.BindEnv("print_to_stdout")
+	viper.BindEnv("output_mode")
 
 	// Get values from viper
 	vaultAddr := viper.GetString("url")
@@ -144,7 +144,7 @@ func parseArguments() Arguments {
 	secretPath := viper.GetString("secret_path")
 	outputPath := viper.GetString("output_path")
 	outputFormat := viper.GetString("output_format")
-	printToStdOut := viper.GetBool("print_to_stdout")
+	outputMode := viper.GetString("output_mode")
 
 	// Validate arguments
 	if vaultAddr == "" || username == "" || password == "" || secretPath == "" {
@@ -158,78 +158,80 @@ func parseArguments() Arguments {
 	outputPath = strings.TrimSuffix(outputPath, "/")
 
 	return Arguments{
-		Url:           vaultAddr,
-		User:          username,
-		Pass:          password,
-		EnginePath:    enginePath,
-		SecretPath:    secretPath,
-		OutputPath:    outputPath,
-		OutputFormat:  outputFormat,
-		PrintToStdout: printToStdOut,
+		Url:          vaultAddr,
+		User:         username,
+		Pass:         password,
+		EnginePath:   enginePath,
+		SecretPath:   secretPath,
+		OutputMode:   outputMode,
+		OutputFormat: outputFormat,
+		OutputPath:   outputPath,
 	}
 }
 
-func writeOutput(data map[string]interface{}, outputPath, outputFormat string, fileName string, printToStdout bool) {
+// outputMode: "all" (console, key+data), "data" (console, only data), "file" (write to file)
+func writeOutput(data map[string]any, outputPath, outputFormat, fileName, outputMode string) {
 	var outputData string
 
-	// Output to console
-	if printToStdout {
-		switch strings.ToLower(outputFormat) {
+	format := strings.ToLower(outputFormat)
+	getFormatted := func(d map[string]any) string {
+		switch format {
 		case "ini", ".ini":
-			outputData = toINI(data)
+			return toINI(d)
 		case "env", ".env":
-			outputData = toENV(data)
+			return toENV(d)
 		case "json", ".json":
-			outputData = toJSON(data)
+			return toJSON(d)
 		case "yml", "yaml", ".yml", ".yaml":
-			outputData = toYAML(data)
+			return toYAML(d)
 		default:
-			jsonBytes, _ := json.MarshalIndent(data, "", "  ")
-			outputData = string(jsonBytes)
+			jsonBytes, _ := json.MarshalIndent(d, "", "  ")
+			return string(jsonBytes)
+		}
+	}
+
+	switch outputMode {
+	case "all":
+		outputData = getFormatted(data)
+		fmt.Println(outputData)
+		return
+	case "data":
+		if d, ok := data["data"].(map[string]any); ok {
+			outputData = getFormatted(d)
+		} else {
+			log.Fatalf("Expected 'data' key in secret map")
 		}
 		fmt.Println(outputData)
 		return
-	}
-
-	// Output to file
-	switch strings.ToLower(outputFormat) {
-	case "ini", ".ini":
-		outputData = toINI(data["data"].(map[string]interface{}))
-	case "env", ".env":
-		outputData = toENV(data["data"].(map[string]interface{}))
-	case "json", ".json":
-		outputData = toJSON(data["data"].(map[string]interface{}))
-	case "yml", "yaml", ".yml", ".yaml":
-		outputData = toYAML(data["data"].(map[string]interface{}))
+	case "file":
+		if d, ok := data["data"].(map[string]any); ok {
+			outputData = getFormatted(d)
+		} else {
+			log.Fatalf("Expected 'data' key in secret map")
+		}
+		filePath := outputPath + "/" + fileName
+		if err := os.MkdirAll(outputPath, 0755); err != nil {
+			log.Fatalf("Failed to create output directory: %v", err)
+		}
+		if !strings.HasSuffix(fileName, ".ini") &&
+			!strings.HasSuffix(fileName, ".env") &&
+			!strings.HasSuffix(fileName, ".json") &&
+			!strings.HasSuffix(fileName, ".yml") &&
+			!strings.HasSuffix(fileName, ".yaml") {
+			filePath = filePath + "." + strings.Replace(outputFormat, ".", "", -1)
+		}
+		err := os.WriteFile(filePath, []byte(outputData), 0644)
+		if err != nil {
+			log.Fatalf("Failed to write to file: %v", err)
+		}
+		fmt.Printf("Secrets written to %s\n", filePath)
+		return
 	default:
-		jsonBytes, _ := json.MarshalIndent(data, "", "  ")
-		outputData = string(jsonBytes)
+		log.Fatalf("Unknown output mode: %s", outputMode)
 	}
-
-	filePath := outputPath + "/" + fileName
-	// Ensure the output directory exists
-	if err := os.MkdirAll(outputPath, 0755); err != nil {
-		log.Fatalf("Failed to create output directory: %v", err)
-	}
-
-	// If fileName does not end with a file extension, append the output format
-	if !strings.HasSuffix(fileName, ".ini") &&
-		!strings.HasSuffix(fileName, ".env") &&
-		!strings.HasSuffix(fileName, ".json") &&
-		!strings.HasSuffix(fileName, ".yml") &&
-		!strings.HasSuffix(fileName, ".yaml") {
-		filePath = filePath + "." + strings.Replace(outputFormat, ".", "", -1)
-	}
-
-	// Write to file
-	err := os.WriteFile(filePath, []byte(outputData), 0644)
-	if err != nil {
-		log.Fatalf("Failed to write to file: %v", err)
-	}
-	fmt.Printf("Secrets written to %s\n", filePath)
 }
 
-func toINI(data map[string]interface{}) string {
+func toINI(data map[string]any) string {
 	var sb strings.Builder
 	for k, v := range data {
 		sb.WriteString(fmt.Sprintf("%s=%v\n", k, v))
@@ -237,7 +239,7 @@ func toINI(data map[string]interface{}) string {
 	return sb.String()
 }
 
-func toENV(data map[string]interface{}) string {
+func toENV(data map[string]any) string {
 	var sb strings.Builder
 	for k, v := range data {
 		sb.WriteString(fmt.Sprintf("%s=%v\n", strings.ToUpper(k), v))
@@ -245,7 +247,7 @@ func toENV(data map[string]interface{}) string {
 	return sb.String()
 }
 
-func toJSON(data map[string]interface{}) string {
+func toJSON(data map[string]any) string {
 	jsonBytes, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
 		log.Fatalf("Failed to marshal data to JSON: %v", err)
@@ -253,7 +255,7 @@ func toJSON(data map[string]interface{}) string {
 	return string(jsonBytes)
 }
 
-func toYAML(data map[string]interface{}) string {
+func toYAML(data map[string]any) string {
 	yamlBytes, err := yaml.Marshal(data)
 	if err != nil {
 		log.Fatalf("Failed to marshal data to YAML: %v", err)
