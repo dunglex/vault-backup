@@ -24,80 +24,6 @@ type Arguments struct {
 	OutputPath   string
 }
 
-func main() {
-	// Get arguments from command line or environment variables
-	arguments := parseArguments()
-
-	// Connect to Vault
-	config := vault.DefaultConfig()
-	config.Address = arguments.Url
-	client, err := vault.NewClient(config)
-	if err != nil {
-		log.Fatalf("Failed to create Vault client: %v", err)
-	}
-
-	// Authenticate with LDAP username/password
-	data := map[string]any{
-		"password": arguments.Pass,
-	}
-	loginPath := fmt.Sprintf("auth/ldap/login/%s", arguments.User)
-	secret, err := client.Logical().Write(loginPath, data)
-	if err != nil || secret == nil || secret.Auth == nil {
-		log.Fatalf("Failed to authenticate with LDAP: %v", err)
-	}
-	client.SetToken(secret.Auth.ClientToken)
-
-	// Read secrets or list folder
-	if strings.HasSuffix(arguments.SecretPath, "/") {
-		// List keys in the folder
-		metadataPath := arguments.SecretName + "/metadata/" + arguments.SecretPath
-		list, err := client.Logical().List(metadataPath)
-		if err != nil || list == nil || list.Data == nil {
-			log.Fatalf("Failed to list secrets in folder %s: %v", arguments.SecretPath, err)
-		}
-		keys, ok := list.Data["keys"].([]any)
-		if !ok {
-			log.Fatalf("Unexpected data format when listing folder %s", arguments.SecretPath)
-		}
-		for _, key := range keys {
-			keyStr, ok := key.(string)
-			if !ok {
-				continue
-			}
-			keyStr = strings.TrimPrefix(keyStr, "/")
-			fullPath := arguments.SecretName + "/data/" + arguments.SecretPath + keyStr
-			secretData, err := client.Logical().Read(fullPath)
-			if err != nil || secretData == nil || secretData.Data == nil {
-				log.Printf("Failed to read secret %s: %v (maybe a folder)", arguments.SecretPath+keyStr, err)
-				continue
-			}
-			secrets := map[string]any{
-				"key":  fullPath,
-				"data": secretData.Data["data"],
-			}
-			// Preseve folder structure in file name
-			outputPath := arguments.OutputPath + "/" + strings.TrimSuffix(arguments.SecretPath, "/")
-			writeOutput(secrets, arguments.OutputMode, arguments.OutputFormat, outputPath, keyStr)
-		}
-	} else {
-		// Read a single secret
-		fullPath := arguments.SecretName + "/data/" + arguments.SecretPath
-		secretData, err := client.Logical().Read(fullPath)
-		if err != nil || secretData == nil || secretData.Data == nil {
-			log.Printf("Failed to read secret %s: %v (invalid path or maybe a folder)", arguments.SecretPath, err)
-		}
-		secrets := map[string]any{
-			"key":  fullPath,
-			"data": secretData.Data["data"],
-		}
-		// Get file name from secret path
-		// Obmit the folder structure, only keep the last part of the path
-		lastIndex := len(strings.Split(arguments.SecretPath, "/")) - 1
-		fileName := strings.Split(arguments.SecretPath, "/")[lastIndex]
-		writeOutput(secrets, arguments.OutputMode, arguments.OutputFormat, arguments.OutputPath, fileName)
-	}
-}
-
 func parseArguments() Arguments {
 	// Define flags
 	pflag.StringP("url", "h", "", "Vault server host url (required)")
@@ -257,4 +183,78 @@ func toYAML(data map[string]any) string {
 		log.Fatalf("Failed to marshal data to YAML: %v", err)
 	}
 	return string(yamlBytes)
+}
+
+func main() {
+	// Get arguments from command line or environment variables
+	arguments := parseArguments()
+
+	// Connect to Vault
+	config := vault.DefaultConfig()
+	config.Address = arguments.Url
+	client, err := vault.NewClient(config)
+	if err != nil {
+		log.Fatalf("Failed to create Vault client: %v", err)
+	}
+
+	// Authenticate with LDAP username/password
+	data := map[string]any{
+		"password": arguments.Pass,
+	}
+	loginPath := fmt.Sprintf("auth/ldap/login/%s", arguments.User)
+	secret, err := client.Logical().Write(loginPath, data)
+	if err != nil || secret == nil || secret.Auth == nil {
+		log.Fatalf("Failed to authenticate with LDAP: %v", err)
+	}
+	client.SetToken(secret.Auth.ClientToken)
+
+	// Read secrets or list folder
+	if strings.HasSuffix(arguments.SecretPath, "/") {
+		// List keys in the folder
+		metadataPath := arguments.SecretName + "/metadata/" + arguments.SecretPath
+		list, err := client.Logical().List(metadataPath)
+		if err != nil || list == nil || list.Data == nil {
+			log.Fatalf("Failed to list secrets in folder %s: %v", arguments.SecretPath, err)
+		}
+		keys, ok := list.Data["keys"].([]any)
+		if !ok {
+			log.Fatalf("Unexpected data format when listing folder %s", arguments.SecretPath)
+		}
+		for _, key := range keys {
+			keyStr, ok := key.(string)
+			if !ok {
+				continue
+			}
+			keyStr = strings.TrimPrefix(keyStr, "/")
+			fullPath := arguments.SecretName + "/data/" + arguments.SecretPath + keyStr
+			secretData, err := client.Logical().Read(fullPath)
+			if err != nil || secretData == nil || secretData.Data == nil {
+				log.Printf("Failed to read secret %s: %v (maybe a folder)", arguments.SecretPath+keyStr, err)
+				continue
+			}
+			secrets := map[string]any{
+				"key":  fullPath,
+				"data": secretData.Data["data"],
+			}
+			// Preseve folder structure in file name
+			outputPath := arguments.OutputPath + "/" + strings.TrimSuffix(arguments.SecretPath, "/")
+			writeOutput(secrets, arguments.OutputMode, arguments.OutputFormat, outputPath, keyStr)
+		}
+	} else {
+		// Read a single secret
+		fullPath := arguments.SecretName + "/data/" + arguments.SecretPath
+		secretData, err := client.Logical().Read(fullPath)
+		if err != nil || secretData == nil || secretData.Data == nil {
+			log.Printf("Failed to read secret %s: %v (invalid path or maybe a folder)", arguments.SecretPath, err)
+		}
+		secrets := map[string]any{
+			"key":  fullPath,
+			"data": secretData.Data["data"],
+		}
+		// Get file name from secret path
+		// Obmit the folder structure, only keep the last part of the path
+		lastIndex := len(strings.Split(arguments.SecretPath, "/")) - 1
+		fileName := strings.Split(arguments.SecretPath, "/")[lastIndex]
+		writeOutput(secrets, arguments.OutputMode, arguments.OutputFormat, arguments.OutputPath, fileName)
+	}
 }
