@@ -17,7 +17,7 @@ type Arguments struct {
 	Url          string
 	User         string
 	Pass         string
-	EnginePath   string
+	SecretName   string
 	SecretPath   string
 	OutputMode   string
 	OutputFormat string
@@ -50,7 +50,7 @@ func main() {
 	// Read secrets or list folder
 	if strings.HasSuffix(arguments.SecretPath, "/") {
 		// List keys in the folder
-		metadataPath := arguments.EnginePath + "/metadata/" + arguments.SecretPath
+		metadataPath := arguments.SecretName + "/metadata/" + arguments.SecretPath
 		list, err := client.Logical().List(metadataPath)
 		if err != nil || list == nil || list.Data == nil {
 			log.Fatalf("Failed to list secrets in folder %s: %v", arguments.SecretPath, err)
@@ -65,7 +65,7 @@ func main() {
 				continue
 			}
 			keyStr = strings.TrimPrefix(keyStr, "/")
-			fullPath := arguments.EnginePath + "/data/" + arguments.SecretPath + keyStr
+			fullPath := arguments.SecretName + "/data/" + arguments.SecretPath + keyStr
 			secretData, err := client.Logical().Read(fullPath)
 			if err != nil || secretData == nil || secretData.Data == nil {
 				log.Printf("Failed to read secret %s: %v (maybe a folder)", arguments.SecretPath+keyStr, err)
@@ -77,15 +77,11 @@ func main() {
 			}
 			// Preseve folder structure in file name
 			outputPath := arguments.OutputPath + "/" + strings.TrimSuffix(arguments.SecretPath, "/")
-			// Ensure the output directory exists
-			if err := os.MkdirAll(outputPath, 0755); err != nil {
-				log.Fatalf("Failed to create output directory: %v", err)
-			}
-			writeOutput(secrets, outputPath, arguments.OutputFormat, keyStr, arguments.OutputMode)
+			writeOutput(secrets, arguments.OutputMode, arguments.OutputFormat, outputPath, keyStr)
 		}
 	} else {
 		// Read a single secret
-		fullPath := arguments.EnginePath + "/data/" + arguments.SecretPath
+		fullPath := arguments.SecretName + "/data/" + arguments.SecretPath
 		secretData, err := client.Logical().Read(fullPath)
 		if err != nil || secretData == nil || secretData.Data == nil {
 			log.Printf("Failed to read secret %s: %v (invalid path or maybe a folder)", arguments.SecretPath, err)
@@ -98,31 +94,31 @@ func main() {
 		// Obmit the folder structure, only keep the last part of the path
 		lastIndex := len(strings.Split(arguments.SecretPath, "/")) - 1
 		fileName := strings.Split(arguments.SecretPath, "/")[lastIndex]
-		writeOutput(secrets, arguments.OutputPath, arguments.OutputFormat, fileName, arguments.OutputMode)
+		writeOutput(secrets, arguments.OutputMode, arguments.OutputFormat, arguments.OutputPath, fileName)
 	}
 }
 
 func parseArguments() Arguments {
 	// Define flags
-	pflag.String("url", "", "Vault server URL")
-	pflag.String("user", "", "Vault username")
-	pflag.String("pass", "", "Vault password")
-	pflag.String("engine_path", "", "Vault engine path")
-	pflag.String("secret_path", "", "Vault secret path")
-	pflag.String("output_path", ".", "Output file name or folder name (optional, if not provided, keep as is)")
-	pflag.String("output_format", "json", "Output format: json, yaml, ini, env (optional, default: json)")
-	pflag.String("outputMode", "all", "Print output: to outputMode instead of file (optional, default: None)")
+	pflag.StringP("url", "h", "", "Vault server host url (required)")
+	pflag.StringP("user", "u", "", "Vault username (required)")
+	pflag.StringP("pass", "p", "", "Vault password (required)")
+	pflag.StringP("secret_name", "n", "", "Vault secret name")
+	pflag.StringP("secret_path", "s", "", "Vault secret path")
+	pflag.StringP("output_mode", "m", "all", "Print mode: all/data/file (optional, default: all)")
+	pflag.StringP("output_format", "f", "json", "Output format: json, yaml, ini, env (optional, default: json)")
+	pflag.StringP("output_path", "o", ".", "Output file name or folder name (optional, works only with file mode, default: current directory)")
 	pflag.Parse()
 
 	// Bind flags to viper
 	viper.BindPFlag("url", pflag.Lookup("url"))
 	viper.BindPFlag("user", pflag.Lookup("user"))
 	viper.BindPFlag("pass", pflag.Lookup("pass"))
-	viper.BindPFlag("engine_path", pflag.Lookup("engine_path"))
+	viper.BindPFlag("secret_name", pflag.Lookup("secret_name"))
 	viper.BindPFlag("secret_path", pflag.Lookup("secret_path"))
-	viper.BindPFlag("output_path", pflag.Lookup("output_path"))
-	viper.BindPFlag("output_format", pflag.Lookup("output_format"))
 	viper.BindPFlag("output_mode", pflag.Lookup("output_mode"))
+	viper.BindPFlag("output_format", pflag.Lookup("output_format"))
+	viper.BindPFlag("output_path", pflag.Lookup("output_path"))
 
 	// Bind environment variables (upper case, underscores)
 	viper.SetEnvPrefix("VAULT")
@@ -130,30 +126,30 @@ func parseArguments() Arguments {
 	viper.BindEnv("url")
 	viper.BindEnv("user")
 	viper.BindEnv("pass")
-	viper.BindEnv("engine_path")
+	viper.BindEnv("secret_name")
 	viper.BindEnv("secret_path")
-	viper.BindEnv("output_path")
-	viper.BindEnv("output_format")
 	viper.BindEnv("output_mode")
+	viper.BindEnv("output_format")
+	viper.BindEnv("output_path")
 
 	// Get values from viper
 	vaultAddr := viper.GetString("url")
 	username := viper.GetString("user")
 	password := viper.GetString("pass")
-	enginePath := viper.GetString("engine_path")
+	secretName := viper.GetString("secret_name")
 	secretPath := viper.GetString("secret_path")
-	outputPath := viper.GetString("output_path")
-	outputFormat := viper.GetString("output_format")
 	outputMode := viper.GetString("output_mode")
+	outputFormat := viper.GetString("output_format")
+	outputPath := viper.GetString("output_path")
 
 	// Validate arguments
 	if vaultAddr == "" || username == "" || password == "" || secretPath == "" {
 		log.Fatal("All of url, user, pass, and path are required (via flag or environment variable)")
 	}
 
-	// Allow enginePath to be a full path or a relative path
-	enginePath = strings.TrimPrefix(enginePath, "/v1/")
-	enginePath = strings.TrimSuffix(enginePath, "/")
+	// Allow secretName to be a full path or a relative path
+	secretName = strings.TrimPrefix(secretName, "/v1/")
+	secretName = strings.TrimSuffix(secretName, "/")
 	secretPath = strings.TrimPrefix(secretPath, "/")
 	outputPath = strings.TrimSuffix(outputPath, "/")
 
@@ -161,7 +157,7 @@ func parseArguments() Arguments {
 		Url:          vaultAddr,
 		User:         username,
 		Pass:         password,
-		EnginePath:   enginePath,
+		SecretName:   secretName,
 		SecretPath:   secretPath,
 		OutputMode:   outputMode,
 		OutputFormat: outputFormat,
@@ -170,7 +166,7 @@ func parseArguments() Arguments {
 }
 
 // outputMode: "all" (console, key+data), "data" (console, only data), "file" (write to file)
-func writeOutput(data map[string]any, outputPath, outputFormat, fileName, outputMode string) {
+func writeOutput(data map[string]any, outputMode, outputFormat, outputPath, fileName string) {
 	var outputData string
 
 	format := strings.ToLower(outputFormat)
