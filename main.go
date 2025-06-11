@@ -13,6 +13,17 @@ import (
 	yaml "gopkg.in/yaml.v3"
 )
 
+type Arguments struct {
+	Url           string
+	User          string
+	Pass          string
+	EnginePath    string
+	SecretPath    string
+	OutputPath    string
+	OutputFormat  string
+	PrintToStdout bool
+}
+
 func main() {
 	// Get arguments from command line or environment variables
 	arguments := parseArguments()
@@ -53,10 +64,11 @@ func main() {
 			if !ok {
 				continue
 			}
+			keyStr = strings.TrimPrefix(keyStr, "/")
 			fullPath := arguments.EnginePath + "/data/" + arguments.SecretPath + keyStr
 			secretData, err := client.Logical().Read(fullPath)
 			if err != nil || secretData == nil || secretData.Data == nil {
-				log.Printf("Failed to read secret %s: %v", arguments.SecretPath+keyStr, err)
+				log.Printf("Failed to read secret %s: %v (maybe a folder)", arguments.SecretPath+keyStr, err)
 				continue
 			}
 			secrets := map[string]interface{}{
@@ -64,7 +76,7 @@ func main() {
 				"data": secretData.Data["data"],
 			}
 			// Preseve folder structure in file name
-			outputPath := arguments.OutputPath + "/" + arguments.SecretPath
+			outputPath := arguments.OutputPath + "/" + strings.TrimSuffix(arguments.SecretPath, "/")
 			// Ensure the output directory exists
 			if err := os.MkdirAll(outputPath, 0755); err != nil {
 				log.Fatalf("Failed to create output directory: %v", err)
@@ -76,7 +88,7 @@ func main() {
 		fullPath := arguments.EnginePath + "/data/" + arguments.SecretPath
 		secretData, err := client.Logical().Read(fullPath)
 		if err != nil || secretData == nil || secretData.Data == nil {
-			log.Fatalf("Failed to read secrets from path %s: %v", arguments.SecretPath, err)
+			log.Printf("Failed to read secret %s: %v (invalid path or maybe a folder)", arguments.SecretPath, err)
 		}
 		secrets := map[string]interface{}{
 			"key":  fullPath,
@@ -84,20 +96,10 @@ func main() {
 		}
 		// Get file name from secret path
 		// Obmit the folder structure, only keep the last part of the path
-		fileName := strings.Split(arguments.SecretPath, "/")[len(strings.Split(arguments.SecretPath, "/"))-1]
+		lastIndex := len(strings.Split(arguments.SecretPath, "/")) - 1
+		fileName := strings.Split(arguments.SecretPath, "/")[lastIndex]
 		writeOutput(secrets, arguments.OutputPath, arguments.OutputFormat, fileName, arguments.PrintToStdout)
 	}
-}
-
-type Arguments struct {
-	Url           string
-	User          string
-	Pass          string
-	EnginePath    string
-	SecretPath    string
-	OutputPath    string
-	OutputFormat  string
-	PrintToStdout bool
 }
 
 func parseArguments() Arguments {
@@ -204,7 +206,7 @@ func writeOutput(data map[string]interface{}, outputPath, outputFormat string, f
 		outputData = string(jsonBytes)
 	}
 
-	filePath := outputPath + fileName
+	filePath := outputPath + "/" + fileName
 	// Ensure the output directory exists
 	if err := os.MkdirAll(outputPath, 0755); err != nil {
 		log.Fatalf("Failed to create output directory: %v", err)
