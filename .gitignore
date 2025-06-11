@@ -1,0 +1,9 @@
+.vs
+*.ini
+*.json
+*.yaml
+*.yml
+*.env
+*.log
+vault-backup*
+backup.cmd
