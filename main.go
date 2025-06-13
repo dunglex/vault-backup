@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 
 	vault "github.com/hashicorp/vault/api"
@@ -77,7 +78,6 @@ func parseArguments() Arguments {
 	secretName = strings.TrimPrefix(secretName, "/v1/")
 	secretName = strings.TrimSuffix(secretName, "/")
 	secretPath = strings.TrimPrefix(secretPath, "/")
-	outputPath = strings.TrimSuffix(outputPath, "/")
 
 	return Arguments{
 		Url:          vaultAddr,
@@ -236,8 +236,15 @@ func main() {
 				"key":  fullPath,
 				"data": secretData.Data["data"],
 			}
+			var outputPath string
+			// Because we are exporting a folder, so treat outputPath as a folder
+			// If OutputPath does not end with "/", add it
 			// Preseve folder structure in file name
-			outputPath := arguments.OutputPath + "/" + strings.TrimSuffix(arguments.SecretPath, "/")
+			if !strings.HasSuffix(arguments.OutputPath, "/") {
+				outputPath = arguments.OutputPath + "/" + strings.TrimSuffix(arguments.SecretPath, "/")
+			} else {
+				outputPath = arguments.OutputPath + strings.TrimSuffix(arguments.SecretPath, "/")
+			}
 			writeOutput(secrets, arguments.OutputMode, arguments.OutputFormat, outputPath, keyStr)
 		}
 	} else {
@@ -251,10 +258,23 @@ func main() {
 			"key":  fullPath,
 			"data": secretData.Data["data"],
 		}
-		// Get file name from secret path
-		// Obmit the folder structure, only keep the last part of the path
-		lastIndex := len(strings.Split(arguments.SecretPath, "/")) - 1
-		fileName := strings.Split(arguments.SecretPath, "/")[lastIndex]
-		writeOutput(secrets, arguments.OutputMode, arguments.OutputFormat, arguments.OutputPath, fileName)
+		// Because we are exporting a single secret, so treat outputPath as a file if it does not end with "/"
+		// If outputPath ends with "/", it is treated as a folder, concat actual file name to it
+		// To get file name from secret path, obmit the folder structure, only keep the last part of the path
+		var outputPath, fileName string
+		if strings.HasSuffix(arguments.OutputPath, "/") {
+			outputPath = strings.TrimSuffix(arguments.OutputPath, "/")
+			lastIndex := len(strings.Split(arguments.SecretPath, "/")) - 1
+			fileName = strings.Split(arguments.SecretPath, "/")[lastIndex]
+		} else {
+			outputPath, fileName = filepath.Split(arguments.OutputPath)
+			if outputPath == "" {
+				outputPath = "."
+			}
+			if fileName == "" {
+				fileName = strings.TrimSuffix(arguments.SecretPath, "/")
+			}
+		}
+		writeOutput(secrets, arguments.OutputMode, arguments.OutputFormat, outputPath, fileName)
 	}
 }
