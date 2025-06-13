@@ -271,9 +271,11 @@ func main() {
 			if outputPath == "" {
 				outputPath = "."
 			}
+			outputPath = strings.TrimSuffix(outputPath, "/")
 			if fileName == "" {
 				fileName = strings.TrimSuffix(arguments.SecretPath, "/")
 			}
+			fileName = strings.TrimPrefix(fileName, "/")
 		}
 		writeOutput(secrets, arguments.OutputMode, arguments.OutputFormat, outputPath, fileName)
 	}
