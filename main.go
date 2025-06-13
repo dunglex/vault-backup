@@ -70,8 +70,8 @@ func parseArguments() Arguments {
 	outputPath := viper.GetString("output_path")
 
 	// Validate arguments
-	if vaultAddr == "" || username == "" || password == "" || secretPath == "" {
-		log.Fatal("All of url, user, pass, and path are required (via flag or environment variable)")
+	if vaultAddr == "" || username == "" || password == "" || secretName == "" || secretPath == "" {
+		log.Fatal("All of url, user, pass, secret_name and secret_path are required (via flag or environment variable)")
 	}
 
 	// Allow secretName to be a full path or a relative path
