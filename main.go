@@ -180,34 +180,83 @@ func writeOutput(data map[string]any, outputMode, outputFormat, outputPath, file
 
 func toINI(data map[string]any) string {
 	var sb strings.Builder
-	for k, v := range data {
-		sb.WriteString(fmt.Sprintf("%s=%v\n", k, v))
+	// Extract and sort keys alphabetically
+	keys := make([]string, 0, len(data))
+	for key := range data {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	// Write each key and its value in sorted order
+	for _, k := range keys {
+		sb.WriteString(fmt.Sprintf("%s=%v\n", k, data[k]))
 	}
 	return sb.String()
 }
 
 func toENV(data map[string]any) string {
 	var sb strings.Builder
-	for k, v := range data {
-		sb.WriteString(fmt.Sprintf("%s=%v\n", strings.ToUpper(k), v))
+	// Extract and sort keys alphabetically
+	keys := make([]string, 0, len(data))
+	for key := range data {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	// Write each key and its value in sorted order
+	for _, k := range keys {
+		sb.WriteString(fmt.Sprintf("%s=%v\n", strings.ToUpper(k), data[k]))
 	}
 	return sb.String()
 }
 
 func toJSON(data map[string]any) string {
-	jsonBytes, err := json.MarshalIndent(data, "", "  ")
-	if err != nil {
-		log.Fatalf("Failed to marshal data to JSON: %v", err)
+	keys := make([]string, 0, len(data))
+	for k := range data {
+		keys = append(keys, k)
 	}
-	return string(jsonBytes)
+	sort.Strings(keys)
+
+	var sb strings.Builder
+	sb.WriteString("{\n")
+	for i, k := range keys {
+		valBytes, err := json.MarshalIndent(data[k], "  ", "  ")
+		if err != nil {
+			log.Fatalf("Failed to marshal key %q: %v", k, err)
+		}
+		sb.WriteString(fmt.Sprintf("  %q: %s", k, valBytes))
+		if i < len(keys)-1 {
+			sb.WriteString(",\n")
+		} else {
+			sb.WriteString("\n")
+		}
+	}
+	sb.WriteString("}")
+	return sb.String()
 }
 
 func toYAML(data map[string]any) string {
-	yamlBytes, err := yaml.Marshal(data)
-	if err != nil {
-		log.Fatalf("Failed to marshal data to YAML: %v", err)
+	keys := make([]string, 0, len(data))
+	for k := range data {
+		keys = append(keys, k)
 	}
-	return string(yamlBytes)
+	sort.Strings(keys)
+
+	var sb strings.Builder
+	sb.WriteString("{\n")
+	for i, k := range keys {
+		valBytes, err := yaml.Marshal(data[k])
+		if err != nil {
+			log.Fatalf("Failed to marshal key %q: %v", k, err)
+		}
+		sb.WriteString(fmt.Sprintf("  %q: %s", k, valBytes))
+		if i < len(keys)-1 {
+			sb.WriteString(",\n")
+		} else {
+			sb.WriteString("\n")
+		}
+	}
+	sb.WriteString("}")
+	return sb.String()
 }
 
 func main() {
