@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	vault "github.com/hashicorp/vault/api"
@@ -91,6 +92,19 @@ func parseArguments() Arguments {
 	}
 }
 
+func sortMapKeys(data map[string]any) []string {
+	// Extract keys from the map
+	keys := make([]string, 0, len(data))
+	for key := range data {
+		keys = append(keys, key)
+	}
+
+	// Sort the keys alphabetically
+	sort.Strings(keys)
+
+	return keys
+}
+
 // outputMode: "all" (console, key+data), "data" (console, only data), "file" (write to file)
 func writeOutput(data map[string]any, outputMode, outputFormat, outputPath, fileName string) {
 	var outputData string
@@ -118,8 +132,14 @@ func writeOutput(data map[string]any, outputMode, outputFormat, outputPath, file
 		fmt.Println(outputData)
 		return
 	case "data":
+
 		if d, ok := data["data"].(map[string]any); ok {
-			outputData = getFormatted(d)
+			sortedKeys := sortMapKeys(d)
+			sortedData := make(map[string]any)
+			for _, key := range sortedKeys {
+				sortedData[key] = d[key]
+			}
+			outputData = getFormatted(sortedData)
 		} else {
 			log.Fatalf("Expected 'data' key in secret map")
 		}
@@ -127,7 +147,12 @@ func writeOutput(data map[string]any, outputMode, outputFormat, outputPath, file
 		return
 	case "file":
 		if d, ok := data["data"].(map[string]any); ok {
-			outputData = getFormatted(d)
+			sortedKeys := sortMapKeys(d)
+			sortedData := make(map[string]any)
+			for _, key := range sortedKeys {
+				sortedData[key] = d[key]
+			}
+			outputData = getFormatted(sortedData)
 		} else {
 			log.Fatalf("Expected 'data' key in secret map")
 		}
