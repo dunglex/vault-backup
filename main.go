@@ -186,10 +186,14 @@ func toINI(data map[string]any) string {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-
 	// Write each key and its value in sorted order
 	for _, k := range keys {
-		sb.WriteString(fmt.Sprintf("%s=%v\n", k, data[k]))
+		value := fmt.Sprintf("%v", data[k])
+		// Quote the value if it contains spaces
+		if strings.Contains(value, " ") {
+			value = fmt.Sprintf("\"%s\"", value)
+		}
+		sb.WriteString(fmt.Sprintf("%s=%s\r\n", k, value))
 	}
 	return sb.String()
 }
@@ -204,7 +208,12 @@ func toENV(data map[string]any) string {
 	sort.Strings(keys)
 	// Write each key and its value in sorted order
 	for _, k := range keys {
-		sb.WriteString(fmt.Sprintf("%s=%v\n", strings.ToUpper(k), data[k]))
+		value := fmt.Sprintf("%v", data[k])
+		// Quote the value if it contains spaces
+		if strings.Contains(value, " ") {
+			value = fmt.Sprintf("\"%s\"", value)
+		}
+		sb.WriteString(fmt.Sprintf("%s=%s\r\n", strings.ToUpper(k), value))
 	}
 	return sb.String()
 }
@@ -217,7 +226,7 @@ func toJSON(data map[string]any) string {
 	sort.Strings(keys)
 
 	var sb strings.Builder
-	sb.WriteString("{\n")
+	sb.WriteString("{\r\n")
 	for i, k := range keys {
 		valBytes, err := json.MarshalIndent(data[k], "  ", "  ")
 		if err != nil {
@@ -225,9 +234,9 @@ func toJSON(data map[string]any) string {
 		}
 		sb.WriteString(fmt.Sprintf("  %q: %s", k, valBytes))
 		if i < len(keys)-1 {
-			sb.WriteString(",\n")
+			sb.WriteString(",\r\n")
 		} else {
-			sb.WriteString("\n")
+			sb.WriteString("\r\n")
 		}
 	}
 	sb.WriteString("}")
@@ -242,7 +251,7 @@ func toYAML(data map[string]any) string {
 	sort.Strings(keys)
 
 	var sb strings.Builder
-	sb.WriteString("{\n")
+	sb.WriteString("{\r\n")
 	for i, k := range keys {
 		valBytes, err := yaml.Marshal(data[k])
 		if err != nil {
@@ -250,9 +259,9 @@ func toYAML(data map[string]any) string {
 		}
 		sb.WriteString(fmt.Sprintf("  %q: %s", k, valBytes))
 		if i < len(keys)-1 {
-			sb.WriteString(",\n")
+			sb.WriteString(",\r\n")
 		} else {
-			sb.WriteString("\n")
+			sb.WriteString("\r\n")
 		}
 	}
 	sb.WriteString("}")
