@@ -24,18 +24,20 @@ type Arguments struct {
 	OutputMode   string
 	OutputFormat string
 	OutputPath   string
+	Insecure     bool
 }
 
 func parseArguments() Arguments {
 	// Define flags
-	pflag.StringP("url", "h", "", "Vault server host url (required)")
-	pflag.StringP("user", "u", "", "Vault username (required)")
-	pflag.StringP("pass", "p", "", "Vault password (required)")
-	pflag.StringP("secret_name", "n", "", "Vault secret name")
-	pflag.StringP("secret_path", "s", "", "Vault secret path")
-	pflag.StringP("output_mode", "m", "all", "Print mode: all/data/file (optional, default: all)")
-	pflag.StringP("output_format", "f", "json", "Output format: json, yaml, ini, env (optional, default: json)")
-	pflag.StringP("output_path", "o", ".", "Output file name or folder name (optional, works only with file mode, default: current directory)")
+	pflag.StringP("url", "h", "", "Vault server host url (required) [env: VAULT_URL]")
+	pflag.StringP("user", "u", "", "Vault username (required) [env: VAULT_USER]")
+	pflag.StringP("pass", "p", "", "Vault password (required) [env: VAULT_PASS]")
+	pflag.StringP("secret_name", "n", "", "Vault secret name [env: VAULT_SECRET_NAME]")
+	pflag.StringP("secret_path", "s", "", "Vault secret path [env: VAULT_SECRET_PATH]")
+	pflag.StringP("output_mode", "m", "all", "Print mode: all/data/file (optional, default: all) [env: VAULT_OUTPUT_MODE]")
+	pflag.StringP("output_format", "f", "json", "Output format: json, yaml, ini, env (optional, default: json) [env: VAULT_OUTPUT_FORMAT]")
+	pflag.StringP("output_path", "o", ".", "Output file name or folder name (optional, works only with file mode, default: current directory) [env: VAULT_OUTPUT_PATH]")
+	pflag.BoolP("insecure", "k", false, "Skip TLS certificate verification (optional, default: false) [env: VAULT_INSECURE]")
 	pflag.Parse()
 
 	// Bind flags to viper
@@ -47,6 +49,7 @@ func parseArguments() Arguments {
 	viper.BindPFlag("output_mode", pflag.Lookup("output_mode"))
 	viper.BindPFlag("output_format", pflag.Lookup("output_format"))
 	viper.BindPFlag("output_path", pflag.Lookup("output_path"))
+	viper.BindPFlag("insecure", pflag.Lookup("insecure"))
 
 	// Bind environment variables (upper case, underscores)
 	viper.SetEnvPrefix("VAULT")
@@ -59,6 +62,7 @@ func parseArguments() Arguments {
 	viper.BindEnv("output_mode")
 	viper.BindEnv("output_format")
 	viper.BindEnv("output_path")
+	viper.BindEnv("insecure")
 
 	// Get values from viper
 	vaultAddr := viper.GetString("url")
@@ -69,6 +73,7 @@ func parseArguments() Arguments {
 	outputMode := viper.GetString("output_mode")
 	outputFormat := viper.GetString("output_format")
 	outputPath := viper.GetString("output_path")
+	insecure := viper.GetBool("insecure")
 
 	// Validate arguments
 	if vaultAddr == "" || username == "" || password == "" || secretName == "" || secretPath == "" {
@@ -89,6 +94,7 @@ func parseArguments() Arguments {
 		OutputMode:   outputMode,
 		OutputFormat: outputFormat,
 		OutputPath:   outputPath,
+		Insecure:     insecure,
 	}
 }
 
@@ -275,6 +281,14 @@ func main() {
 	// Connect to Vault
 	config := vault.DefaultConfig()
 	config.Address = arguments.Url
+
+	// Skip TLS verification if insecure flag is set
+	if arguments.Insecure {
+		config.ConfigureTLS(&vault.TLSConfig{
+			Insecure: true,
+		})
+	}
+
 	client, err := vault.NewClient(config)
 	if err != nil {
 		log.Fatalf("Failed to create Vault client: %v", err)
