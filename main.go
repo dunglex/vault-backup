@@ -208,9 +208,24 @@ func restoreFromFile(client *vault.Client, arguments Arguments, filePath string)
 
 	// Determine the secret path
 	var secretPath string
+	inputInfo, _ := os.Stat(arguments.InputPath)
+
 	if arguments.SecretPath != "" {
 		// Use provided secret path
-		secretPath = arguments.SecretPath
+		if inputInfo != nil && inputInfo.IsDir() {
+			// If restoring from directory, derive relative path and append to secret path
+			relPath, err := filepath.Rel(arguments.InputPath, filePath)
+			if err != nil {
+				relPath = filepath.Base(filePath)
+			}
+			// Remove file extension and append to provided secret path
+			fileName := strings.TrimSuffix(relPath, filepath.Ext(relPath))
+			fileName = strings.ReplaceAll(fileName, "\\", "/") // Convert Windows paths to Unix-style
+			secretPath = strings.TrimSuffix(arguments.SecretPath, "/") + "/" + fileName
+		} else {
+			// Single file restore, use provided path as-is
+			secretPath = arguments.SecretPath
+		}
 	} else {
 		// Derive secret path from file path relative to input path
 		relPath, err := filepath.Rel(arguments.InputPath, filePath)
