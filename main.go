@@ -67,7 +67,8 @@ func backupSecrets(client *vault.Client, arguments Arguments) {
 		metadataPath := arguments.SecretName + "/metadata/" + arguments.SecretPath
 		list, err := client.Logical().List(metadataPath)
 		if err != nil || list == nil || list.Data == nil {
-			panic(fmt.Sprintf("Failed to list secrets in folder %s: %v", arguments.SecretPath, err))
+			fmt.Printf("Failed to list secrets in folder %s: %v (maybe no item)\n", arguments.SecretPath, err)
+			return
 		}
 		keys, ok := list.Data["keys"].([]any)
 		if !ok {
@@ -82,7 +83,7 @@ func backupSecrets(client *vault.Client, arguments Arguments) {
 			fullPath := arguments.SecretName + "/data/" + arguments.SecretPath + keyStr
 			secretData, err := client.Logical().Read(fullPath)
 			if err != nil || secretData == nil || secretData.Data == nil {
-				fmt.Printf("Failed to read secret %s: %v (maybe a folder)", arguments.SecretPath+keyStr, err)
+				fmt.Printf("Failed to read secret %s: %v (maybe a folder)\n", arguments.SecretPath+keyStr, err)
 				continue
 			}
 			secrets := map[string]any{
