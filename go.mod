@@ -1,6 +1,6 @@
 module vault-backup
 
-go 1.24.0
+go 1.25.3
 
 require (
 	github.com/hashicorp/vault/api v1.20.0

@@ -3,281 +3,32 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"log"
+	"io/fs"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	vault "github.com/hashicorp/vault/api"
-	pflag "github.com/spf13/pflag"
-	viper "github.com/spf13/viper"
 	yaml "gopkg.in/yaml.v3"
 )
-
-type Arguments struct {
-	Url          string
-	User         string
-	Pass         string
-	SecretName   string
-	SecretPath   string
-	OutputMode   string
-	OutputFormat string
-	OutputPath   string
-	Insecure     bool
-}
-
-func parseArguments() Arguments {
-	// Define flags
-	pflag.StringP("url", "h", "", "Vault server host url (required) [env: VAULT_URL]")
-	pflag.StringP("user", "u", "", "Vault username (required) [env: VAULT_USER]")
-	pflag.StringP("pass", "p", "", "Vault password (required) [env: VAULT_PASS]")
-	pflag.StringP("secret_name", "n", "", "Vault secret name [env: VAULT_SECRET_NAME]")
-	pflag.StringP("secret_path", "s", "", "Vault secret path [env: VAULT_SECRET_PATH]")
-	pflag.StringP("output_mode", "m", "all", "Print mode: all/data/file (optional, default: all) [env: VAULT_OUTPUT_MODE]")
-	pflag.StringP("output_format", "f", "json", "Output format: json, yaml, ini, env (optional, default: json) [env: VAULT_OUTPUT_FORMAT]")
-	pflag.StringP("output_path", "o", ".", "Output file name or folder name (optional, works only with file mode, default: current directory) [env: VAULT_OUTPUT_PATH]")
-	pflag.BoolP("insecure", "k", false, "Skip TLS certificate verification (optional, default: false) [env: VAULT_INSECURE]")
-	pflag.Parse()
-
-	// Bind flags to viper
-	viper.BindPFlag("url", pflag.Lookup("url"))
-	viper.BindPFlag("user", pflag.Lookup("user"))
-	viper.BindPFlag("pass", pflag.Lookup("pass"))
-	viper.BindPFlag("secret_name", pflag.Lookup("secret_name"))
-	viper.BindPFlag("secret_path", pflag.Lookup("secret_path"))
-	viper.BindPFlag("output_mode", pflag.Lookup("output_mode"))
-	viper.BindPFlag("output_format", pflag.Lookup("output_format"))
-	viper.BindPFlag("output_path", pflag.Lookup("output_path"))
-	viper.BindPFlag("insecure", pflag.Lookup("insecure"))
-
-	// Bind environment variables (upper case, underscores)
-	viper.SetEnvPrefix("VAULT")
-	viper.AutomaticEnv()
-	viper.BindEnv("url")
-	viper.BindEnv("user")
-	viper.BindEnv("pass")
-	viper.BindEnv("secret_name")
-	viper.BindEnv("secret_path")
-	viper.BindEnv("output_mode")
-	viper.BindEnv("output_format")
-	viper.BindEnv("output_path")
-	viper.BindEnv("insecure")
-
-	// Get values from viper
-	vaultAddr := viper.GetString("url")
-	username := viper.GetString("user")
-	password := viper.GetString("pass")
-	secretName := viper.GetString("secret_name")
-	secretPath := viper.GetString("secret_path")
-	outputMode := viper.GetString("output_mode")
-	outputFormat := viper.GetString("output_format")
-	outputPath := viper.GetString("output_path")
-	insecure := viper.GetBool("insecure")
-
-	// Validate arguments
-	if vaultAddr == "" || username == "" || password == "" || secretName == "" || secretPath == "" {
-		log.Fatal("All of url, user, pass, secret_name and secret_path are required (via flag or environment variable)")
-	}
-
-	// Allow secretName to be a full path or a relative path
-	secretName = strings.TrimPrefix(secretName, "/v1/")
-	secretName = strings.TrimSuffix(secretName, "/")
-	secretPath = strings.TrimPrefix(secretPath, "/")
-
-	return Arguments{
-		Url:          vaultAddr,
-		User:         username,
-		Pass:         password,
-		SecretName:   secretName,
-		SecretPath:   secretPath,
-		OutputMode:   outputMode,
-		OutputFormat: outputFormat,
-		OutputPath:   outputPath,
-		Insecure:     insecure,
-	}
-}
-
-func sortMapKeys(data map[string]any) []string {
-	// Extract keys from the map
-	keys := make([]string, 0, len(data))
-	for key := range data {
-		keys = append(keys, key)
-	}
-
-	// Sort the keys alphabetically
-	sort.Strings(keys)
-
-	return keys
-}
-
-// outputMode: "all" (console, key+data), "data" (console, only data), "file" (write to file)
-func writeOutput(data map[string]any, outputMode, outputFormat, outputPath, fileName string) {
-	var outputData string
-
-	format := strings.ToLower(outputFormat)
-	getFormatted := func(d map[string]any) string {
-		switch format {
-		case "ini", ".ini":
-			return toINI(d)
-		case "env", ".env":
-			return toENV(d)
-		case "json", ".json":
-			return toJSON(d)
-		case "yml", "yaml", ".yml", ".yaml":
-			return toYAML(d)
-		default:
-			jsonBytes, _ := json.MarshalIndent(d, "", "  ")
-			return string(jsonBytes)
-		}
-	}
-
-	switch outputMode {
-	case "all":
-		outputData = getFormatted(data)
-		fmt.Println(outputData)
-		return
-	case "data":
-
-		if d, ok := data["data"].(map[string]any); ok {
-			sortedKeys := sortMapKeys(d)
-			sortedData := make(map[string]any)
-			for _, key := range sortedKeys {
-				sortedData[key] = d[key]
-			}
-			outputData = getFormatted(sortedData)
-		} else {
-			log.Fatalf("Expected 'data' key in secret map")
-		}
-		fmt.Println(outputData)
-		return
-	case "file":
-		if d, ok := data["data"].(map[string]any); ok {
-			sortedKeys := sortMapKeys(d)
-			sortedData := make(map[string]any)
-			for _, key := range sortedKeys {
-				sortedData[key] = d[key]
-			}
-			outputData = getFormatted(sortedData)
-		} else {
-			log.Fatalf("Expected 'data' key in secret map")
-		}
-		filePath := outputPath + "/" + fileName
-		if err := os.MkdirAll(outputPath, 0755); err != nil {
-			log.Fatalf("Failed to create output directory: %v", err)
-		}
-		if !strings.HasSuffix(fileName, ".ini") &&
-			!strings.HasSuffix(fileName, ".env") &&
-			!strings.HasSuffix(fileName, ".json") &&
-			!strings.HasSuffix(fileName, ".yml") &&
-			!strings.HasSuffix(fileName, ".yaml") {
-			filePath = filePath + "." + strings.Replace(outputFormat, ".", "", -1)
-		}
-		err := os.WriteFile(filePath, []byte(outputData), 0644)
-		if err != nil {
-			log.Fatalf("Failed to write to file: %v", err)
-		}
-		fmt.Printf("Secrets written to %s\n", filePath)
-		return
-	default:
-		log.Fatalf("Unknown output mode: %s", outputMode)
-	}
-}
-
-func toINI(data map[string]any) string {
-	var sb strings.Builder
-	// Extract and sort keys alphabetically
-	keys := make([]string, 0, len(data))
-	for key := range data {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	// Write each key and its value in sorted order
-	for _, k := range keys {
-		value := fmt.Sprintf("%v", data[k])
-		// Quote the value if it contains spaces
-		if strings.Contains(value, " ") {
-			value = fmt.Sprintf("\"%s\"", value)
-		}
-		sb.WriteString(fmt.Sprintf("%s=%s\r\n", k, value))
-	}
-	return sb.String()
-}
-
-func toENV(data map[string]any) string {
-	var sb strings.Builder
-	// Extract and sort keys alphabetically
-	keys := make([]string, 0, len(data))
-	for key := range data {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	// Write each key and its value in sorted order
-	for _, k := range keys {
-		value := fmt.Sprintf("%v", data[k])
-		// Quote the value if it contains spaces
-		if strings.Contains(value, " ") {
-			value = fmt.Sprintf("\"%s\"", value)
-		}
-		sb.WriteString(fmt.Sprintf("%s=%s\r\n", strings.ToUpper(k), value))
-	}
-	return sb.String()
-}
-
-func toJSON(data map[string]any) string {
-	keys := make([]string, 0, len(data))
-	for k := range data {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	var sb strings.Builder
-	sb.WriteString("{\r\n")
-	for i, k := range keys {
-		valBytes, err := json.MarshalIndent(data[k], "  ", "  ")
-		if err != nil {
-			log.Fatalf("Failed to marshal key %q: %v", k, err)
-		}
-		sb.WriteString(fmt.Sprintf("  %q: %s", k, valBytes))
-		if i < len(keys)-1 {
-			sb.WriteString(",\r\n")
-		} else {
-			sb.WriteString("\r\n")
-		}
-	}
-	sb.WriteString("}")
-	return sb.String()
-}
-
-func toYAML(data map[string]any) string {
-	keys := make([]string, 0, len(data))
-	for k := range data {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	var sb strings.Builder
-	sb.WriteString("{\r\n")
-	for i, k := range keys {
-		valBytes, err := yaml.Marshal(data[k])
-		if err != nil {
-			log.Fatalf("Failed to marshal key %q: %v", k, err)
-		}
-		sb.WriteString(fmt.Sprintf("  %q: %s", k, valBytes))
-		if i < len(keys)-1 {
-			sb.WriteString(",\r\n")
-		} else {
-			sb.WriteString("\r\n")
-		}
-	}
-	sb.WriteString("}")
-	return sb.String()
-}
 
 func main() {
 	// Get arguments from command line or environment variables
 	arguments := parseArguments()
 
+	// Connect to Vault
+	client := connectToVault(arguments)
+
+	if arguments.RestoreMode {
+		// Restore secrets from backup files to Vault
+		restoreSecrets(client, arguments)
+	} else {
+		// Backup secrets from Vault
+		backupSecrets(client, arguments)
+	}
+}
+
+func connectToVault(arguments Arguments) *vault.Client {
 	// Connect to Vault
 	config := vault.DefaultConfig()
 	config.Address = arguments.Url
@@ -291,7 +42,7 @@ func main() {
 
 	client, err := vault.NewClient(config)
 	if err != nil {
-		log.Fatalf("Failed to create Vault client: %v", err)
+		panic(fmt.Sprintf("Failed to create Vault client: %v", err))
 	}
 
 	// Authenticate with LDAP username/password
@@ -301,9 +52,14 @@ func main() {
 	loginPath := fmt.Sprintf("auth/ldap/login/%s", arguments.User)
 	secret, err := client.Logical().Write(loginPath, data)
 	if err != nil || secret == nil || secret.Auth == nil {
-		log.Fatalf("Failed to authenticate with LDAP: %v", err)
+		panic(fmt.Sprintf("Failed to authenticate with LDAP: %v", err))
 	}
 	client.SetToken(secret.Auth.ClientToken)
+	return client
+
+}
+
+func backupSecrets(client *vault.Client, arguments Arguments) {
 
 	// Read secrets or list folder
 	if strings.HasSuffix(arguments.SecretPath, "/") {
@@ -311,11 +67,11 @@ func main() {
 		metadataPath := arguments.SecretName + "/metadata/" + arguments.SecretPath
 		list, err := client.Logical().List(metadataPath)
 		if err != nil || list == nil || list.Data == nil {
-			log.Fatalf("Failed to list secrets in folder %s: %v", arguments.SecretPath, err)
+			panic(fmt.Sprintf("Failed to list secrets in folder %s: %v", arguments.SecretPath, err))
 		}
 		keys, ok := list.Data["keys"].([]any)
 		if !ok {
-			log.Fatalf("Unexpected data format when listing folder %s", arguments.SecretPath)
+			panic(fmt.Sprintf("Unexpected data format when listing folder %s", arguments.SecretPath))
 		}
 		for _, key := range keys {
 			keyStr, ok := key.(string)
@@ -326,7 +82,7 @@ func main() {
 			fullPath := arguments.SecretName + "/data/" + arguments.SecretPath + keyStr
 			secretData, err := client.Logical().Read(fullPath)
 			if err != nil || secretData == nil || secretData.Data == nil {
-				log.Printf("Failed to read secret %s: %v (maybe a folder)", arguments.SecretPath+keyStr, err)
+				fmt.Printf("Failed to read secret %s: %v (maybe a folder)", arguments.SecretPath+keyStr, err)
 				continue
 			}
 			secrets := map[string]any{
@@ -349,7 +105,7 @@ func main() {
 		fullPath := arguments.SecretName + "/data/" + arguments.SecretPath
 		secretData, err := client.Logical().Read(fullPath)
 		if err != nil || secretData == nil || secretData.Data == nil {
-			log.Printf("Failed to read secret %s: %v (invalid path or maybe a folder)", arguments.SecretPath, err)
+			fmt.Printf("Failed to read secret %s: %v (invalid path or maybe a folder)", arguments.SecretPath, err)
 		}
 		secrets := map[string]any{
 			"key":  fullPath,
@@ -376,4 +132,137 @@ func main() {
 		}
 		writeOutput(secrets, arguments.OutputMode, arguments.OutputFormat, outputPath, fileName)
 	}
+}
+
+func restoreSecrets(client *vault.Client, arguments Arguments) {
+	// Check if input path exists
+	info, err := os.Stat(arguments.InputPath)
+	if err != nil {
+		panic(fmt.Sprintf("Failed to access input path %s: %v", arguments.InputPath, err))
+	}
+
+	if info.IsDir() {
+		// Restore from directory - walk through all files
+		err := filepath.WalkDir(arguments.InputPath, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+
+			if !d.IsDir() {
+				err := restoreFromFile(client, arguments, path)
+				if err != nil {
+					fmt.Printf("Failed to restore from %s: %v\n", path, err)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			panic(fmt.Sprintf("Failed to walk directory %s: %v", arguments.InputPath, err))
+		}
+	} else {
+		// Restore from single file
+		err := restoreFromFile(client, arguments, arguments.InputPath)
+		if err != nil {
+			panic(fmt.Sprintf("Failed to restore from file %s: %v", arguments.InputPath, err))
+		}
+	}
+}
+
+func restoreFromFile(client *vault.Client, arguments Arguments, filePath string) error {
+	// Read file content
+	fileContent, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to read file: %w", err)
+	}
+
+	// Determine file format from extension
+	ext := filepath.Ext(filePath)
+	var secretData map[string]interface{}
+
+	switch strings.ToLower(ext) {
+	case ".json":
+		err = json.Unmarshal(fileContent, &secretData)
+		if err != nil {
+			return fmt.Errorf("failed to parse JSON: %w", err)
+		}
+	case ".yaml", ".yml":
+		err = yaml.Unmarshal(fileContent, &secretData)
+		if err != nil {
+			return fmt.Errorf("failed to parse YAML: %w", err)
+		}
+	case ".ini", ".env":
+		secretData, err = parseKeyValueFile(string(fileContent))
+		if err != nil {
+			return fmt.Errorf("failed to parse key-value file: %w", err)
+		}
+	default:
+		// Try JSON first, then YAML
+		err = json.Unmarshal(fileContent, &secretData)
+		if err != nil {
+			err = yaml.Unmarshal(fileContent, &secretData)
+			if err != nil {
+				return fmt.Errorf("failed to parse file as JSON or YAML: %w", err)
+			}
+		}
+	}
+
+	// Determine the secret path
+	var secretPath string
+	if arguments.SecretPath != "" {
+		// Use provided secret path
+		secretPath = arguments.SecretPath
+	} else {
+		// Derive secret path from file path relative to input path
+		relPath, err := filepath.Rel(arguments.InputPath, filePath)
+		if err != nil {
+			relPath = filepath.Base(filePath)
+		}
+		// Remove file extension and use as secret path
+		secretPath = strings.TrimSuffix(relPath, filepath.Ext(relPath))
+		secretPath = strings.ReplaceAll(secretPath, "\\", "/") // Convert Windows paths to Unix-style
+	}
+
+	// Write secret to Vault
+	fullPath := arguments.SecretName + "/data/" + secretPath
+	vaultData := map[string]interface{}{
+		"data": secretData,
+	}
+
+	_, err = client.Logical().Write(fullPath, vaultData)
+	if err != nil {
+		return fmt.Errorf("failed to write secret to Vault at %s: %w", fullPath, err)
+	}
+
+	fmt.Printf("Successfully restored secret to %s from %s\n", fullPath, filePath)
+	return nil
+}
+
+func parseKeyValueFile(content string) (map[string]interface{}, error) {
+	result := make(map[string]interface{})
+	lines := strings.Split(content, "\n")
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+
+		// Remove quotes if present
+		if len(value) >= 2 && ((value[0] == '"' && value[len(value)-1] == '"') ||
+			(value[0] == '\'' && value[len(value)-1] == '\'')) {
+			value = value[1 : len(value)-1]
+		}
+
+		result[key] = value
+	}
+
+	return result, nil
 }
