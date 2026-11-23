@@ -55,10 +55,15 @@ var pageTemplate = template.Must(template.ParseFS(embeddedFiles, "index.gohtml")
 
 func main() {
 	var (
-		addr   = flag.String("addr", envDefault("VAULT_SERVER_ADDR", "127.0.0.1:8200"), "server address")
-		dbPath = flag.String("db", envDefault("VAULT_SERVER_DB", "vault.db"), "path to database file")
+		addr    = flag.String("addr", envDefault("VAULT_SERVER_ADDR", "127.0.0.1:8200"), "server address")
+		dbPath  = flag.String("db", envDefault("VAULT_SERVER_DB", "vault.db"), "path to database file")
+		tlsCert = flag.String("tls-cert", envDefault("VAULT_SERVER_TLS_CERT", ""), "path to TLS certificate PEM")
+		tlsKey  = flag.String("tls-key", envDefault("VAULT_SERVER_TLS_KEY", ""), "path to TLS private key PEM")
 	)
 	flag.Parse()
+	if strings.TrimSpace(*tlsCert) == "" || strings.TrimSpace(*tlsKey) == "" {
+		log.Fatal("HTTPS-only startup requires --tls-cert and --tls-key (or VAULT_SERVER_TLS_CERT and VAULT_SERVER_TLS_KEY)")
+	}
 
 	resolvedDB, err := filepath.Abs(*dbPath)
 	if err != nil {
@@ -171,16 +176,8 @@ func main() {
 
 	fmt.Printf("Vault setup key: %s\n", setupKey)
 	log.Printf("Vault server listening on %s (SQLite: %s)", *addr, *dbPath)
-
-	certFile := os.Getenv("VAULT_SERVER_TLS_CERT")
-	keyFile := os.Getenv("VAULT_SERVER_TLS_KEY")
-	if certFile != "" || keyFile != "" {
-		if certFile == "" || keyFile == "" {
-			log.Fatal("both VAULT_SERVER_TLS_CERT and VAULT_SERVER_TLS_KEY are required")
-		}
-		log.Fatal(server.ListenAndServeTLS(certFile, keyFile))
-	}
-	log.Fatal(server.ListenAndServe())
+	log.Printf("Vault server serving HTTPS on %s", *addr)
+	log.Fatal(server.ListenAndServeTLS(*tlsCert, *tlsKey))
 }
 
 func envDefault(name, fallback string) string {

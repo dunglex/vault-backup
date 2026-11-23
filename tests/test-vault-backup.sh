@@ -5,7 +5,9 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 TMPDIR=$(mktemp -d)
 SERVER_PID=""
 PORT=18210
-BASE_URL="http://127.0.0.1:$PORT"
+BASE_URL="https://127.0.0.1:$PORT"
+CERT_FILE="$TMPDIR/test-cert.pem"
+KEY_FILE="$TMPDIR/test-key.pem"
 SETUP_KEY="backup-test-setup-key"
 USERNAME="admin"
 PASSWORD="backup-test-password"
@@ -36,29 +38,33 @@ cd "$ROOT"
 go build -o "$TMPDIR/vault-server" ./cmd/vault-server
 go build -o "$TMPDIR/vault-backup" ./cmd/vault-backup
 
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+  -subj '/CN=127.0.0.1' \
+  -keyout "$KEY_FILE" -out "$CERT_FILE" >/dev/null 2>&1
+
 VAULT_SERVER_ADDR="127.0.0.1:$PORT" \
 VAULT_SERVER_DB="$TMPDIR/vault.db" \
 VAULT_SERVER_SETUP_KEY="$SETUP_KEY" \
-"$TMPDIR/vault-server" >"$TMPDIR/server.log" 2>&1 &
+"$TMPDIR/vault-server" --tls-cert "$CERT_FILE" --tls-key "$KEY_FILE" >"$TMPDIR/server.log" 2>&1 &
 SERVER_PID=$!
 
-curl --fail --silent --retry 20 --retry-delay 1 --retry-connrefused \
+curl --insecure --fail --silent --retry 20 --retry-delay 1 --retry-connrefused \
   "$BASE_URL/health" >/dev/null
 
-SETUP_STATUS=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+SETUP_STATUS=$(curl --insecure --silent --output /dev/null --write-out '%{http_code}' \
   -H 'Content-Type: application/json' \
   -d '{"setup_key":"backup-test-setup-key","username":"admin","password":"backup-test-password"}' \
   "$BASE_URL/v1/setup")
 assert_status 201 "$SETUP_STATUS" "set up vault server"
 
-LOGIN_BODY=$(curl --silent --show-error --fail \
+LOGIN_BODY=$(curl --insecure --silent --show-error --fail \
   -H 'Content-Type: application/json' \
   -d '{"username":"admin","password":"backup-test-password"}' \
   "$BASE_URL/v1/auth/login")
 TOKEN=$(printf '%s' "$LOGIN_BODY" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
 [[ -n "$TOKEN" ]] || fail "obtain API token"
 
-PUT_STATUS=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+PUT_STATUS=$(curl --insecure --silent --output /dev/null --write-out '%{http_code}' \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"data":{"DATABASE_HOST":"db.example.local","DATABASE_PORT":"5432","DATABASE_USER":"backup_admin","DATABASE_PASSWORD":"s3cr3t"}}' \
@@ -68,6 +74,7 @@ assert_status 200 "$PUT_STATUS" "seed KV v2 source secret"
 rm -f "$TMPDIR/database.env"
 "$TMPDIR/vault-backup" \
   --url "$BASE_URL/api" \
+  --insecure \
   --user "$USERNAME" \
   --pass "$PASSWORD" \
   --secret_name kv \
@@ -93,6 +100,7 @@ EOF
 
 "$TMPDIR/vault-backup" \
   --url "$BASE_URL/api" \
+  --insecure \
   --user "$USERNAME" \
   --pass "$PASSWORD" \
   --secret_name kv \
@@ -100,7 +108,7 @@ EOF
   --restore \
   --input_path "$TMPDIR/restored.env"
 
-RESTORE_BODY=$(curl --silent --show-error --fail \
+RESTORE_BODY=$(curl --insecure --silent --show-error --fail \
   -H "Authorization: Bearer $TOKEN" \
   "$BASE_URL/api/v1/kv/data/app/restored")
 printf '%s' "$RESTORE_BODY" | grep -q 'restored.example.local' || fail "restore host missing"
