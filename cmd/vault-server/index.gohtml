@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Vault Server</title>
+  <style>
+    :root { color-scheme: dark; --bg:#0b1020; --panel:#151d31; --line:#293450; --text:#edf2ff; --muted:#9da9c3; --accent:#64d2a8; --danger:#ff7b86; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 system-ui,sans-serif; }
+    main { max-width:980px; margin:auto; padding:32px 20px; }
+    h1,h2 { margin-top:0; }
+    .grid { display:grid; grid-template-columns:280px 1fr; gap:20px; }
+    .panel { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:18px; }
+    input,textarea,button { width:100%; border:1px solid var(--line); border-radius:7px; padding:9px 10px; background:#0d1324; color:var(--text); }
+    textarea { min-height:220px; resize:vertical; font-family:monospace; }
+    button { cursor:pointer; background:var(--accent); color:#07150f; border:0; font-weight:700; }
+    button.secondary { background:#263452; color:var(--text); }
+    button.danger { background:var(--danger); color:#261016; }
+    .row { display:flex; gap:8px; margin-top:8px; }
+    .row input,.row button { width:auto; }
+    .row input { flex:1; }
+    .hidden { display:none; }
+    .muted { color:var(--muted); }
+    #paths { list-style:none; margin:0; padding:0; }
+    #paths li { display:flex; gap:8px; align-items:center; border-bottom:1px solid var(--line); padding:8px 0; }
+    #paths button { width:auto; }
+    #error { min-height:24px; color:var(--danger); }
+    @media(max-width:720px) { .grid { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>{{.Title}}</h1>
+  <div id="error"></div>
+
+  <section id="setup" class="panel hidden">
+    <h2>Initial setup</h2>
+    <form id="setupForm">
+      <input name="setup_key" placeholder="Setup key" required><br><br>
+      <input name="username" placeholder="Admin username" required><br><br>
+      <input name="password" type="password" placeholder="Password (12+ characters)" minlength="12" required><br>
+      <button type="submit">Create account</button>
+    </form>
+  </section>
+
+  <section id="login" class="panel hidden">
+    <h2>Login</h2>
+    <form id="loginForm">
+      <input name="username" placeholder="Username" required><br><br>
+      <input name="password" type="password" placeholder="Password" required><br>
+      <button type="submit">Login</button>
+    </form>
+  </section>
+
+  <section id="app" class="hidden">
+    <div class="grid">
+      <aside class="panel">
+        <div class="row"><input id="search" placeholder="Filter secrets"><button id="logout" class="secondary">Logout</button></div>
+        <h2>Secrets</h2>
+        <ul id="paths"></ul>
+      </aside>
+      <div class="panel">
+        <h2 id="editorTitle">New secret</h2>
+        <input id="secretPath" placeholder="Secret path, for example app/database"><br><br>
+        <textarea id="secretData" placeholder='{&#34;username&#34;:&#34;admin&#34;,&#34;password&#34;:&#34;secret&#34;}'></textarea>
+        <div class="row"><button id="save">Save secret</button><button id="delete" class="danger">Delete</button></div>
+      </div>
+    </div>
+  </section>
+</main>
+<script>
+const errorBox = document.getElementById('error');
+let secrets = [];
+
+function showError(message) { errorBox.textContent = message || ''; }
+async function api(url, options = {}) {
+  options.headers = options.headers || {};
+  options.credentials = 'same-origin';
+  const response = await fetch(url, options);
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.error || 'Request failed');
+  return body;
+}
+
+async function start() {
+  const configured = {{.Configured}};
+  let authenticated = false;
+  if (configured) {
+    try {
+      await api('/v1/session');
+      authenticated = true;
+    } catch (_) {}
+  }
+  document.getElementById('setup').classList.toggle('hidden', configured);
+  document.getElementById('login').classList.toggle('hidden', !configured || authenticated);
+  document.getElementById('app').classList.toggle('hidden', !configured || !authenticated);
+  if (authenticated) await refresh();
+}
+
+document.getElementById('setupForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = new FormData(event.target);
+  try {
+    await api('/v1/setup', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(Object.fromEntries(form))});
+    await login(form.get('username'), form.get('password'));
+  } catch (error) { showError(error.message); }
+});
+
+document.getElementById('loginForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = new FormData(event.target);
+  login(form.get('username'), form.get('password')).catch(error => showError(error.message));
+});
+
+async function login(username, password) {
+  await api('/v1/auth/login', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({username,password})});
+  location.reload();
+}
+
+document.getElementById('logout').addEventListener('click', async () => {
+  try { await api('/v1/auth/logout', {method:'POST'}); } catch (_) {}
+  location.reload();
+});
+
+document.getElementById('search').addEventListener('input', event => renderPaths(event.target.value));
+
+async function refresh() {
+  try {
+    const result = await api('/v1/secrets');
+    secrets = Array.isArray(result) ? result : [];
+    renderPaths(document.getElementById('search').value);
+  } catch (error) {
+    if (error.message === 'unauthorized') { location.reload(); }
+    else showError(error.message);
+  }
+}
+
+function renderPaths(filter = '') {
+  const list = document.getElementById('paths');
+  list.replaceChildren();
+  secrets.filter(path => path.includes(filter)).forEach(path => {
+    const li = document.createElement('li');
+    const button = document.createElement('button');
+    button.className = 'secondary';
+    button.textContent = path;
+    button.onclick = () => openSecret(path);
+    li.appendChild(button);
+    list.appendChild(li);
+  });
+}
+
+async function openSecret(path) {
+  try {
+    const body = await api('/v1/secrets/' + encodeURIComponent(path));
+    document.getElementById('secretPath').value = path;
+    document.getElementById('secretData').value = JSON.stringify(body.data, null, 2);
+    document.getElementById('editorTitle').textContent = 'Edit secret';
+    showError();
+  } catch (error) { showError(error.message); }
+}
+
+document.getElementById('save').addEventListener('click', async () => {
+  const path = document.getElementById('secretPath').value.trim().replace(/^\/+/, '').replace(/\/+$/, '');
+  try {
+    const data = JSON.parse(document.getElementById('secretData').value);
+    if (!path) throw new Error('Secret path is required');
+    await api('/v1/secrets/' + encodeURIComponent(path), {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({data})});
+    document.getElementById('editorTitle').textContent = 'Edit secret';
+    showError('Saved'); await refresh();
+  } catch (error) { showError(error.message); }
+});
+
+document.getElementById('delete').addEventListener('click', async () => {
+  const path = document.getElementById('secretPath').value.trim();
+  if (!path || !confirm('Delete ' + path + '?')) return;
+  try {
+    await api('/v1/secrets/' + encodeURIComponent(path), {method:'DELETE'});
+    document.getElementById('secretPath').value = '';
+    document.getElementById('secretData').value = '';
+    await refresh(); showError('Deleted');
+  } catch (error) { showError(error.message); }
+});
+
+start();
+</script>
+</body>
+</html>

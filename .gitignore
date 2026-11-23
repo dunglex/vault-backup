@@ -5,5 +5,5 @@
 *.yml
 *.env
 *.log
-vault-backup*
-backup.cmd
+/tests/data/
+/bin/

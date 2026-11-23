@@ -21,11 +21,23 @@ NOPUSH=${NOPUSH:-false}
 # Set the registry
 REGISTRY="registry.vn.eit.zone"
 
-IMAGE="hr-digi/vault-backup"
-$BUILDER build --progress=plain --platform linux/amd64 --tag $REGISTRY/$IMAGE:latest .
+APPS=(vault-backup vault-server)
 
-# Push images if NOPUSH is not set
-if [ "$NOPUSH" = false ]; then
-  $BUILDER login $REGISTRY
-  $BUILDER push $FORMAT_FLAG $REGISTRY/$IMAGE
-fi
+for APP in "${APPS[@]}"; do
+  IMAGE="hr-digi/$APP"
+  TARGET="$REGISTRY/$IMAGE:latest"
+
+  $BUILDER build \
+    --progress=plain \
+    --platform linux/amd64 \
+    --build-arg "APP=$APP" \
+    --tag "$TARGET" \
+    .
+
+  if [ "$NOPUSH" = false ]; then
+    if [ "$APP" = "${APPS[0]}" ]; then
+      $BUILDER login "$REGISTRY"
+    fi
+    $BUILDER push $FORMAT_FLAG "$TARGET"
+  fi
+done
