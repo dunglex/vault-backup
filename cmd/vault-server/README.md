@@ -233,3 +233,13 @@ From the repository root:
 ```
 
 The integration test creates a temporary HTTPS certificate, starts isolated HTTP and HTTPS listeners, and cleans up its data automatically.
+
+To populate a running server with dummy secrets, create a managed API token in the web panel and run:
+
+```bash
+VAULT_URL=https://vault.example:8200/api \
+VAULT_TOKEN="$VAULT_API_TOKEN" \
+./tests/generate-dummy-secrets.sh --count 1000 --prefix dummy/load-test
+```
+
+Use `--insecure-tls` only for trusted development certificates. Add `--cleanup` to delete every generated secret after verification.
