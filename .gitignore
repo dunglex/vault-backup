@@ -6,3 +6,5 @@
 /backups/
 /bin/
 /data/
+__pycache__/
+*.pyc

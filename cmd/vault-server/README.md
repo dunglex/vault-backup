@@ -64,7 +64,7 @@ On `SIGINT` or `SIGTERM`, the server stops accepting new connections, drains act
 Create a sensitive filesystem tarball containing the database, its protected key, TLS files, and optional `.env`:
 
 ```bash
-./tests/backup-vault-server.sh \
+./scripts/backup-vault-server.sh \
   --db /var/lib/vault/vault.db \
   --env-file /etc/vault/server.env \
   --tls-cert /etc/vault/tls/server.crt \
@@ -232,7 +232,7 @@ Authenticated administrators can open `/audit.html` to search and filter success
 From the repository root:
 
 ```bash
-./tests/test-vault-server.sh
+python3 ./tests/test_vault_server.py
 ```
 
 The integration test creates a temporary HTTPS certificate, starts isolated HTTP and HTTPS listeners, and cleans up its data automatically.
@@ -242,7 +242,7 @@ To populate a running server with dummy secrets, create a managed API token in t
 ```bash
 VAULT_URL=https://vault.example:8200/api \
 VAULT_TOKEN="$VAULT_API_TOKEN" \
-./tests/generate-dummy-secrets.sh --count 1000 --prefix dummy/load-test
+python3 ./tests/generate_dummy_secrets.py --count 1000 --prefix dummy/load-test
 ```
 
 Use `--insecure-tls` only for trusted development certificates. Add `--cleanup` to delete every generated secret after verification.

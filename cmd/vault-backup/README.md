@@ -102,5 +102,5 @@ Do not combine `--insecure` with custom CA or client-certificate settings.
 From the repository root:
 
 ```bash
-./tests/test-vault-backup.sh
+python3 ./tests/test_vault_backup.py
 ```
