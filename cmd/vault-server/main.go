@@ -41,6 +41,7 @@ const (
 	argonMemory       = uint32(64 * 1024)
 	argonThreads      = uint8(4)
 	apiTokenLifetime  = 30 * 24 * time.Hour
+	setupLifetime     = 20 * time.Minute
 )
 
 type encryptedKeyFile struct {
@@ -51,11 +52,12 @@ type encryptedKeyFile struct {
 }
 
 type server struct {
-	db           *sql.DB
-	setupKey     string
-	setupKeyPath string
-	adminName    string
-	aead         cipher.AEAD
+	db            *sql.DB
+	setupKey      string
+	setupKeyPath  string
+	setupDeadline time.Time
+	adminName     string
+	aead          cipher.AEAD
 
 	mu       sync.Mutex
 	sessions map[string]time.Time
@@ -63,9 +65,10 @@ type server struct {
 }
 
 type accountRequest struct {
-	SetupKey string `json:"setup_key"`
-	Username string `json:"username"`
-	Password string `json:"password"`
+	SetupKey             string `json:"setup_key"`
+	Username             string `json:"username"`
+	Password             string `json:"password"`
+	PasswordConfirmation string `json:"password_confirmation"`
 }
 
 type secretRequest struct {
@@ -157,6 +160,10 @@ func main() {
 			expires_at INTEGER NOT NULL,
 			revoked_at INTEGER
 		);
+		CREATE TABLE IF NOT EXISTS server_settings (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		);
 	`); err != nil {
 		log.Fatal(err)
 	}
@@ -183,6 +190,13 @@ func main() {
 	} else if err := os.Remove(setupKeyPath); err != nil && !os.IsNotExist(err) {
 		log.Fatal(err)
 	}
+	var setupDeadline time.Time
+	if adminName == "" {
+		setupDeadline, err = loadOrCreateSetupDeadline(db)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
 
 	applicationKey := sha256.Sum256(masterKey)
 	block, err := aes.NewCipher(applicationKey[:])
@@ -194,12 +208,30 @@ func main() {
 		log.Fatal(err)
 	}
 
-	s := &server{db: db, setupKey: setupKey, setupKeyPath: setupKeyPath, adminName: adminName, aead: aead, sessions: map[string]time.Time{}, attempts: map[string][]time.Time{}}
+	s := &server{db: db, setupKey: setupKey, setupKeyPath: setupKeyPath, setupDeadline: setupDeadline, adminName: adminName, aead: aead, sessions: map[string]time.Time{}, attempts: map[string][]time.Time{}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.health)
-	mux.HandleFunc("GET /login", s.serveLogin)
-	mux.HandleFunc("GET /401", s.serveUnauthorized)
-	mux.HandleFunc("GET /404", s.serveNotFound)
+	for _, path := range []string{"/setup", "/setup.html"} {
+		mux.HandleFunc("GET "+path, s.serveSetup)
+	}
+	for _, path := range []string{"/lock", "/lock.html"} {
+		mux.HandleFunc("GET "+path, s.serveLocked)
+	}
+	for _, path := range []string{"/login", "/login.html"} {
+		mux.HandleFunc("GET "+path, s.serveLogin)
+	}
+	for _, path := range []string{"/secret", "/secret.html"} {
+		mux.HandleFunc("GET "+path, s.serveSecrets)
+	}
+	for _, path := range []string{"/token", "/token.html"} {
+		mux.HandleFunc("GET "+path, s.serveTokens)
+	}
+	for _, path := range []string{"/401", "/401.html"} {
+		mux.HandleFunc("GET "+path, s.serveUnauthorized)
+	}
+	for _, path := range []string{"/404", "/404.html"} {
+		mux.HandleFunc("GET "+path, s.serveNotFound)
+	}
 
 	// Web endpoints: use same-origin cookie sessions.
 	mux.HandleFunc("POST /v1/setup", s.setup)
@@ -225,7 +257,7 @@ func main() {
 
 	mux.HandleFunc("/", s.serveHome)
 
-	handler := s.securityHeaders(http.MaxBytesHandler(mux, 1<<20))
+	handler := s.securityHeaders(s.setupLockAPIs(http.MaxBytesHandler(mux, 1<<20)))
 	tlsConfig := &tls.Config{
 		MinVersion: tls.VersionTLS12,
 	}
@@ -599,6 +631,28 @@ func loadOrCreateSetupKey(path string) (string, error) {
 	return setupKey, nil
 }
 
+func loadOrCreateSetupDeadline(db *sql.DB) (time.Time, error) {
+	const key = "setup_started_at"
+	now := time.Now().Unix()
+	if _, err := db.Exec(
+		"INSERT OR IGNORE INTO server_settings(key, value) VALUES (?, ?)",
+		key,
+		strconv.FormatInt(now, 10),
+	); err != nil {
+		return time.Time{}, err
+	}
+
+	var value string
+	if err := db.QueryRow("SELECT value FROM server_settings WHERE key = ?", key).Scan(&value); err != nil {
+		return time.Time{}, err
+	}
+	startedAt, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid setup start time: %w", err)
+	}
+	return time.Unix(startedAt, 0).Add(setupLifetime), nil
+}
+
 func (s *server) encrypt(plaintext []byte) (string, error) {
 	nonce := make([]byte, s.aead.NonceSize())
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
@@ -633,22 +687,41 @@ func (s *server) securityHeaders(next http.Handler) http.Handler {
 	})
 }
 
+func (s *server) setupLockAPIs(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		isAPI := strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/v1/")
+		if isAPI && s.adminName == "" && s.setupLocked() {
+			writeJSON(w, http.StatusLocked, map[string]string{"error": "setup window expired"})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (s *server) health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 func (s *server) setup(w http.ResponseWriter, r *http.Request) {
+	if s.adminName != "" {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "account already configured"})
+		return
+	}
+	if s.setupLocked() {
+		writeJSON(w, http.StatusLocked, map[string]string{"error": "setup window expired"})
+		return
+	}
 	var req accountRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
 		return
 	}
-	if s.adminName != "" {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "account already configured"})
-		return
-	}
 	if subtle.ConstantTimeCompare([]byte(req.SetupKey), []byte(s.setupKey)) != 1 {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid setup key"})
+		return
+	}
+	if subtle.ConstantTimeCompare([]byte(req.Password), []byte(req.PasswordConfirmation)) != 1 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "passwords do not match"})
 		return
 	}
 	req.Username = strings.TrimSpace(req.Username)
@@ -1143,27 +1216,80 @@ func (s *server) serveHome(w http.ResponseWriter, r *http.Request) {
 		s.serveNotFound(w, r)
 		return
 	}
-	if s.adminName != "" && !s.authorizedWeb(r) {
-		http.Redirect(w, r, "/login", http.StatusSeeOther)
+	destination := "/secret.html"
+	if s.adminName == "" {
+		destination = "/setup.html"
+		if s.setupLocked() {
+			destination = "/lock.html"
+		}
+	} else if !s.authorizedWeb(r) {
+		destination = "/login.html"
+	}
+	s.renderPage(w, "index.gohtml", http.StatusOK, map[string]string{"Destination": destination})
+}
+
+func (s *server) serveSetup(w http.ResponseWriter, r *http.Request) {
+	if s.adminName != "" {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
-	data := map[string]any{
-		"Title":      "Vault Server",
-		"Configured": s.adminName != "",
+	if s.setupLocked() {
+		s.serveLocked(w, r)
+		return
 	}
-	s.renderPage(w, "index.gohtml", http.StatusOK, data)
+	s.renderPage(w, "setup.gohtml", http.StatusOK, nil)
 }
 
 func (s *server) serveLogin(w http.ResponseWriter, r *http.Request) {
 	if s.adminName == "" {
-		http.Redirect(w, r, "/", http.StatusSeeOther)
+		destination := "/setup.html"
+		if s.setupLocked() {
+			destination = "/lock.html"
+		}
+		http.Redirect(w, r, destination, http.StatusSeeOther)
 		return
 	}
 	if s.authorizedWeb(r) {
-		http.Redirect(w, r, "/", http.StatusSeeOther)
+		http.Redirect(w, r, "/secret.html", http.StatusSeeOther)
 		return
 	}
 	s.renderPage(w, "login.gohtml", http.StatusOK, nil)
+}
+
+func (s *server) serveSecrets(w http.ResponseWriter, r *http.Request) {
+	s.serveProtectedPage(w, r, "secret.gohtml")
+}
+
+func (s *server) serveTokens(w http.ResponseWriter, r *http.Request) {
+	s.serveProtectedPage(w, r, "token.gohtml")
+}
+
+func (s *server) serveProtectedPage(w http.ResponseWriter, r *http.Request, name string) {
+	if s.adminName == "" {
+		destination := "/setup.html"
+		if s.setupLocked() {
+			destination = "/lock.html"
+		}
+		http.Redirect(w, r, destination, http.StatusSeeOther)
+		return
+	}
+	if !s.authorizedWeb(r) {
+		s.renderPage(w, "401.gohtml", http.StatusUnauthorized, nil)
+		return
+	}
+	s.renderPage(w, name, http.StatusOK, nil)
+}
+
+func (s *server) setupLocked() bool {
+	return !s.setupDeadline.IsZero() && !time.Now().Before(s.setupDeadline)
+}
+
+func (s *server) serveLocked(w http.ResponseWriter, r *http.Request) {
+	if s.adminName != "" {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	s.renderPage(w, "lock.gohtml", http.StatusLocked, nil)
 }
 
 func (s *server) serveUnauthorized(w http.ResponseWriter, r *http.Request) {

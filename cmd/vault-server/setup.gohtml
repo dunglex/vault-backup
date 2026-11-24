@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Setup - Vault Server</title>
+  <style>
+    :root { color-scheme: dark; --bg:#0b1020; --panel:#151d31; --line:#293450; --text:#edf2ff; --muted:#9da9c3; --accent:#64d2a8; --danger:#ff7b86; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-height:100vh; display:grid; place-items:center; background:var(--bg); color:var(--text); font:15px/1.5 system-ui,sans-serif; }
+    main { width:min(100% - 32px, 420px); }
+    .panel { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:28px; }
+    h1 { margin:0 0 8px; }
+    p { color:var(--muted); margin:0 0 24px; }
+    input,button { width:100%; border:1px solid var(--line); border-radius:7px; padding:11px 12px; background:#0d1324; color:var(--text); font:inherit; }
+    label { display:block; margin-bottom:16px; font-weight:600; }
+    label input { margin-top:6px; font-weight:400; }
+    button { cursor:pointer; background:var(--accent); color:#07150f; border:0; font-weight:700; }
+    #error { min-height:24px; margin:0 0 12px; color:var(--danger); }
+  </style>
+</head>
+<body>
+<main>
+  <section class="panel">
+    <h1>Initial setup</h1>
+    <p>Create the Vault Server administrator account.</p>
+    <div id="error" role="alert"></div>
+    <form id="setupForm">
+      <label>Setup key<input name="setup_key" required></label>
+      <label>Admin username<input name="username" autocomplete="username" required></label>
+      <label>Password<input name="password" type="password" autocomplete="new-password" minlength="12" required></label>
+      <label>Confirm password<input name="password_confirmation" type="password" autocomplete="new-password" minlength="12" required></label>
+      <button type="submit">Create account</button>
+    </form>
+  </section>
+</main>
+<script>
+const form = document.getElementById('setupForm');
+const errorBox = document.getElementById('error');
+
+form.addEventListener('submit', async event => {
+  event.preventDefault();
+  errorBox.textContent = '';
+  const values = Object.fromEntries(new FormData(form));
+  if (values.password !== values.password_confirmation) {
+    errorBox.textContent = 'Passwords do not match';
+    return;
+  }
+  try {
+    let response = await fetch('/v1/setup', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      credentials:'same-origin',
+      body:JSON.stringify(values)
+    });
+    let body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || 'Setup failed');
+
+    response = await fetch('/v1/auth/login', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      credentials:'same-origin',
+      body:JSON.stringify({username:values.username, password:values.password})
+    });
+    body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || 'Login failed');
+    location.assign('/secret.html');
+  } catch (error) { errorBox.textContent = error.message; }
+});
+</script>
+</body>
+</html>

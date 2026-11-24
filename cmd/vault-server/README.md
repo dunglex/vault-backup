@@ -22,6 +22,8 @@ Open `https://localhost:8200/`. The generated files are `tests/data/localhost.pe
 
 The startup script uses `tests/data/vault.db`, `tests/data/vault.db.key`, and generates a setup key only until the first account is created.
 
+An unconfigured server allows initial administrator setup for 20 minutes. The setup window is stored in the database, so restarting the server does not reset it. After expiry, the setup page returns `423 Locked` until an administrator resets the unconfigured server's database state.
+
 ## Configuration from .env
 
 By default, the server loads `.env` from the current working directory. Existing process environment variables take precedence over values in the file:

@@ -59,7 +59,7 @@ start_backup_server() {
 setup_backup_account() {
   SETUP_STATUS=$(curl --insecure --silent --output /dev/null --write-out '%{http_code}' \
     -H 'Content-Type: application/json' \
-    -d '{"setup_key":"backup-test-setup-key","username":"admin","password":"backup-test-password"}' \
+    -d '{"setup_key":"backup-test-setup-key","username":"admin","password":"backup-test-password","password_confirmation":"backup-test-password"}' \
     "$BASE_URL/v1/setup")
   assert_status 201 "$SETUP_STATUS" "set up vault server"
 }

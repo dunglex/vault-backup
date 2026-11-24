@@ -16,20 +16,26 @@ wait_for_server "$BASE_URL" "$HTTP_URL"
 
 BAD_SETUP_STATUS=$(curl --insecure --silent --output /dev/null --write-out '%{http_code}' \
   -H 'Content-Type: application/json' \
-  -d '{"setup_key":"wrong","username":"admin","password":"integration-test-password"}' \
+  -d '{"setup_key":"wrong","username":"admin","password":"integration-test-password","password_confirmation":"integration-test-password"}' \
   "$BASE_URL/v1/setup")
 assert_status 401 "$BAD_SETUP_STATUS" "reject invalid setup key"
 
+MISMATCH_SETUP_STATUS=$(curl --insecure --silent --output /dev/null --write-out '%{http_code}' \
+  -H 'Content-Type: application/json' \
+  -d '{"setup_key":"integration-test-setup-key","username":"admin","password":"integration-test-password","password_confirmation":"different-password"}' \
+  "$BASE_URL/v1/setup")
+assert_status 400 "$MISMATCH_SETUP_STATUS" "reject mismatched setup passwords"
+
 SETUP_STATUS=$(curl --insecure --silent --output "$TMPDIR/setup.json" --write-out '%{http_code}' \
   -H 'Content-Type: application/json' \
-  -d '{"setup_key":"integration-test-setup-key","username":"admin","password":"integration-test-password"}' \
+  -d '{"setup_key":"integration-test-setup-key","username":"admin","password":"integration-test-password","password_confirmation":"integration-test-password"}' \
   "$HTTP_URL/v1/setup")
 assert_status 201 "$SETUP_STATUS" "create admin account"
 grep -q '"username":"admin"' "$TMPDIR/setup.json" || fail "setup account response"
 
 SECOND_SETUP_STATUS=$(curl --insecure --silent --output /dev/null --write-out '%{http_code}' \
   -H 'Content-Type: application/json' \
-  -d '{"setup_key":"integration-test-setup-key","username":"other","password":"integration-test-password"}' \
+  -d '{"setup_key":"integration-test-setup-key","username":"other","password":"integration-test-password","password_confirmation":"integration-test-password"}' \
   "$HTTP_URL/v1/setup")
 assert_status 409 "$SECOND_SETUP_STATUS" "disable admin creation after setup"
 

@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -231,7 +233,7 @@ func connectToVault(arguments Arguments) *vault.Client {
 	loginPath := fmt.Sprintf("auth/ldap/login/%s", arguments.User)
 	secret, err := client.Logical().Write(loginPath, data)
 	if err != nil || secret == nil || secret.Auth == nil {
-		panic(fmt.Sprintf("Failed to authenticate with LDAP: %v", err))
+		panic(fmt.Sprintf("Failed to authenticate with LDAP: %s", formatVaultError(err)))
 	}
 	client.SetToken(secret.Auth.ClientToken)
 	return client
@@ -245,7 +247,7 @@ func backupSecrets(client *vault.Client, arguments Arguments) {
 		metadataPath := arguments.SecretName + "/metadata/" + arguments.SecretPath
 		list, err := client.Logical().List(metadataPath)
 		if err != nil || list == nil || list.Data == nil {
-			fmt.Printf("Failed to list secrets in folder %s: %v (maybe no item)\n", arguments.SecretPath, err)
+			fmt.Printf("Failed to list secrets in folder %s: %s (maybe no item)\n", arguments.SecretPath, formatVaultError(err))
 			return
 		}
 		keys, ok := list.Data["keys"].([]any)
@@ -265,7 +267,7 @@ func backupSecrets(client *vault.Client, arguments Arguments) {
 			fullPath := arguments.SecretName + "/data/" + arguments.SecretPath + keyStr
 			secretData, err := client.Logical().Read(fullPath)
 			if err != nil || secretData == nil || secretData.Data == nil {
-				fmt.Printf("Failed to read secret %s: %v (maybe a folder)\n", arguments.SecretPath+keyStr, err)
+				fmt.Printf("Failed to read secret %s: %s (maybe a folder)\n", arguments.SecretPath+keyStr, formatVaultError(err))
 				continue
 			}
 			secrets := map[string]any{
@@ -292,7 +294,7 @@ func backupSecrets(client *vault.Client, arguments Arguments) {
 		fullPath := arguments.SecretName + "/data/" + arguments.SecretPath
 		secretData, err := client.Logical().Read(fullPath)
 		if err != nil || secretData == nil || secretData.Data == nil {
-			fmt.Printf("Failed to read secret %s: %v (invalid path or maybe a folder)", arguments.SecretPath, err)
+			fmt.Printf("Failed to read secret %s: %s (invalid path or maybe a folder)", arguments.SecretPath, formatVaultError(err))
 		}
 		secrets := map[string]any{
 			"key":  fullPath,
@@ -467,9 +469,24 @@ func restoreFromFile(client *vault.Client, arguments Arguments, filePath string)
 
 	_, err = client.Logical().Write(fullPath, vaultData)
 	if err != nil {
-		return fmt.Errorf("failed to write secret to Vault at %s: %w", fullPath, err)
+		return fmt.Errorf("failed to write secret to Vault at %s: %s", fullPath, formatVaultError(err))
 	}
 
 	fmt.Printf("Successfully restored secret to %s from %s\n", fullPath, filePath)
 	return nil
+}
+
+func formatVaultError(err error) string {
+	if err == nil {
+		return "unknown error"
+	}
+	var responseErr *vault.ResponseError
+	if errors.As(err, &responseErr) && responseErr.StatusCode == http.StatusLocked {
+		message := strings.TrimSpace(strings.Join(responseErr.Errors, "; "))
+		if message == "" {
+			message = "initial setup window expired"
+		}
+		return "Vault setup is locked (423): " + message
+	}
+	return err.Error()
 }

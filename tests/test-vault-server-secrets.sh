@@ -16,7 +16,7 @@ wait_for_server "$BASE_URL" "$HTTP_URL"
 
 curl --insecure --silent --show-error --fail \
   -H 'Content-Type: application/json' \
-  -d '{"setup_key":"integration-test-setup-key","username":"admin","password":"integration-test-password"}' \
+  -d '{"setup_key":"integration-test-setup-key","username":"admin","password":"integration-test-password","password_confirmation":"integration-test-password"}' \
   "$HTTP_URL/v1/setup" >/dev/null
 curl --insecure --silent --show-error --fail \
   --cookie-jar "$COOKIE_JAR" \

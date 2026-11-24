@@ -7,31 +7,81 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
 
-func TestPageTemplateRendersFeatureSections(t *testing.T) {
-	var output bytes.Buffer
-	err := pageTemplate.ExecuteTemplate(&output, "index.gohtml", map[string]any{
-		"Title":      "Vault Server",
-		"Configured": true,
-	})
-	if err != nil {
-		t.Fatal(err)
+func TestPageTemplatesRenderStandalonePages(t *testing.T) {
+	tests := []struct {
+		name    string
+		markers []string
+	}{
+		{"index.gohtml", []string{"http-equiv=\"refresh\"", "/secret.html"}},
+		{"setup.gohtml", []string{`id="setupForm"`, `name="password_confirmation"`, "/v1/setup"}},
+		{"login.gohtml", []string{`id="loginForm"`, "/v1/auth/login"}},
+		{"secret.gohtml", []string{`id="paths"`, `id="secretPath"`, "async function refresh()"}},
+		{"token.gohtml", []string{`id="tokens"`, `id="createToken"`, "async function refreshTokens()"}},
+		{"401.gohtml", []string{"401", "Go to login"}},
+		{"404.gohtml", []string{"404", "Page not found"}},
+		{"lock.gohtml", []string{"423", "Setup locked"}},
 	}
 
-	for _, marker := range []string{
-		`id="paths"`,
-		`id="secretPath"`,
-		`id="tokens"`,
-		`id="createToken"`,
-		"async function refreshTokens()",
-	} {
-		if !strings.Contains(output.String(), marker) {
-			t.Errorf("rendered page does not contain %q", marker)
-		}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			data := any(nil)
+			if test.name == "index.gohtml" {
+				data = map[string]string{"Destination": "/secret.html"}
+			}
+			var output bytes.Buffer
+			if err := pageTemplate.ExecuteTemplate(&output, test.name, data); err != nil {
+				t.Fatal(err)
+			}
+			for _, marker := range test.markers {
+				if !strings.Contains(output.String(), marker) {
+					t.Errorf("rendered %s does not contain %q", test.name, marker)
+				}
+			}
+			if test.name == "index.gohtml" && strings.Contains(output.String(), `location.replace("\"`) {
+				t.Error("navigator includes quotes in the redirect URL")
+			}
+		})
+	}
+}
+
+func TestIndexNavigatesByServerState(t *testing.T) {
+	tests := []struct {
+		name          string
+		adminName     string
+		authenticated bool
+		locked        bool
+		destination   string
+	}{
+		{"setup", "", false, false, "/setup.html"},
+		{"locked", "", false, true, "/lock.html"},
+		{"login", "admin", false, false, "/login.html"},
+		{"secrets", "admin", true, false, "/secret.html"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			s := &server{adminName: test.adminName, sessions: map[string]time.Time{}}
+			if test.locked {
+				s.setupDeadline = time.Now().Add(-time.Second)
+			}
+			request := httptest.NewRequest(http.MethodGet, "/", nil)
+			if test.authenticated {
+				const token = "session-token"
+				s.sessions[token] = time.Now().Add(time.Minute)
+				request.AddCookie(&http.Cookie{Name: "vault_session", Value: token})
+			}
+			response := httptest.NewRecorder()
+			s.serveHome(response, request)
+			if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), test.destination) {
+				t.Fatalf("navigator response = status %d, destination marker %q", response.Code, test.destination)
+			}
+		})
 	}
 }
 
@@ -64,8 +114,81 @@ func TestWebPagesUseExpectedStatusAndContent(t *testing.T) {
 
 	home := httptest.NewRecorder()
 	s.serveHome(home, httptest.NewRequest(http.MethodGet, "/", nil))
-	if home.Code != http.StatusSeeOther || home.Header().Get("Location") != "/login" {
-		t.Fatalf("unauthenticated home redirect = %d %q", home.Code, home.Header().Get("Location"))
+	if home.Code != http.StatusOK || !strings.Contains(home.Body.String(), "/login.html") {
+		t.Fatalf("unauthenticated home navigator = %d %q", home.Code, home.Body.String())
+	}
+
+	secret := httptest.NewRecorder()
+	s.serveSecrets(secret, httptest.NewRequest(http.MethodGet, "/secret.html", nil))
+	if secret.Code != http.StatusUnauthorized || !strings.Contains(secret.Body.String(), "401") {
+		t.Fatalf("unauthenticated secret page = %d", secret.Code)
+	}
+}
+
+func TestSetupWindowLockResponses(t *testing.T) {
+	s := &server{setupDeadline: time.Now().Add(-time.Second)}
+
+	page := httptest.NewRecorder()
+	s.serveSetup(page, httptest.NewRequest(http.MethodGet, "/setup.html", nil))
+	if page.Code != http.StatusLocked || !strings.Contains(page.Body.String(), "Setup locked") {
+		t.Fatalf("locked setup page = status %d", page.Code)
+	}
+
+	api := httptest.NewRecorder()
+	s.setup(api, httptest.NewRequest(http.MethodPost, "/v1/setup", strings.NewReader("invalid json")))
+	if api.Code != http.StatusLocked || !strings.Contains(api.Body.String(), "setup window expired") {
+		t.Fatalf("locked setup API = status %d, body %q", api.Code, api.Body.String())
+	}
+
+	middlewareAPI := httptest.NewRecorder()
+	handler := s.setupLockAPIs(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("locked API request reached the next handler")
+	}))
+	handler.ServeHTTP(middlewareAPI, httptest.NewRequest(http.MethodGet, "/api/v1/kv/data/app/test", nil))
+	if middlewareAPI.Code != http.StatusLocked {
+		t.Fatalf("locked Vault API status = %d", middlewareAPI.Code)
+	}
+	if got := middlewareAPI.Header().Get("Content-Type"); !strings.HasPrefix(got, "application/json") {
+		t.Fatalf("locked Vault API content type = %q", got)
+	}
+	if middlewareAPI.Body.String() != "{\"error\":\"setup window expired\"}\n" {
+		t.Fatalf("locked Vault API body = %q", middlewareAPI.Body.String())
+	}
+
+	html := httptest.NewRecorder()
+	htmlHandler := s.setupLockAPIs(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	htmlHandler.ServeHTTP(html, httptest.NewRequest(http.MethodGet, "/setup.html", nil))
+	if html.Code != http.StatusNoContent {
+		t.Fatalf("HTML route passed through lock middleware with status %d", html.Code)
+	}
+}
+
+func TestSetupDeadlinePersists(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "vault.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec("CREATE TABLE server_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)"); err != nil {
+		t.Fatal(err)
+	}
+
+	const startedAt int64 = 1700000000
+	if _, err := db.Exec(
+		"INSERT INTO server_settings(key, value) VALUES (?, ?)",
+		"setup_started_at",
+		strconv.FormatInt(startedAt, 10),
+	); err != nil {
+		t.Fatal(err)
+	}
+	deadline, err := loadOrCreateSetupDeadline(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := time.Unix(startedAt, 0).Add(setupLifetime); !deadline.Equal(want) {
+		t.Fatalf("setup deadline = %v, want %v", deadline, want)
 	}
 }
 
