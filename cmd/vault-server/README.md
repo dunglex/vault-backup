@@ -103,7 +103,7 @@ curl --cookie cookies.txt \
   https://vault.example:8200/v1/tokens
 ```
 
-Use the returned token through `X-Vault-Token` or the `Authorization: Bearer` header. Username/password login creates a web session only; login credentials and the resulting web-session token cannot authorize `/api/...` endpoints.
+Use managed API tokens through `X-Vault-Token` or the `Authorization: Bearer` header. Username/password login tokens and browser cookies do not authorize `/api/...` endpoints.
 
 ## Mutual TLS
 
@@ -203,16 +203,9 @@ Recommended deployment controls:
 External API endpoints use `/api` and token authentication:
 
 ```bash
-# Authenticate
-curl --cacert /path/to/ca.pem \
-  -X PUT \
-  -H 'Content-Type: application/json' \
-  -d '{"password":"your-password"}' \
-  https://localhost:8200/api/v1/auth/ldap/login/admin
-
 # Read a KV secret
 curl --cacert /path/to/ca.pem \
-  -H 'X-Vault-Token: TOKEN' \
+  -H 'X-Vault-Token: MANAGED_API_TOKEN' \
   https://localhost:8200/api/v1/kv/data/app/database
 ```
 

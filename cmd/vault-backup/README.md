@@ -51,6 +51,8 @@ VAULT_TOKEN="$VAULT_API_TOKEN" ./bin/vault-backup \
   --output_path ./database.env
 ```
 
+For vault-server, create a managed API token in the web panel and pass it with `--token`. Username/password login credentials authorize the web session only; they do not authorize `/api/...`.
+
 For mutual TLS, configure the server CA and the backup client certificate/key:
 
 ```bash
@@ -60,8 +62,7 @@ For mutual TLS, configure the server CA and the backup client certificate/key:
   --client_cert /etc/vault/tls/backup.crt \
   --client_key /etc/vault/tls/backup.key \
   --tls_server_name vault.example \
-  --user admin \
-  --pass "$VAULT_PASSWORD" \
+  --token "$VAULT_API_TOKEN" \
   --secret_name kv \
   --secret_path app/database \
   --output_mode file \
@@ -76,8 +77,7 @@ Do not combine `--insecure` with custom CA or client-certificate settings.
 ```bash
 ./bin/vault-backup \
   --url http://vault.example:8201/api \
-  --user admin \
-  --pass "$VAULT_PASSWORD" \
+  --token "$VAULT_API_TOKEN" \
   --secret_name kv \
   --secret_path app/database \
   --output_mode file \
@@ -90,8 +90,7 @@ Do not combine `--insecure` with custom CA or client-certificate settings.
 ```bash
 ./bin/vault-backup \
   --url http://vault.example:8201/api \
-  --user admin \
-  --pass "$VAULT_PASSWORD" \
+  --token "$VAULT_API_TOKEN" \
   --secret_name kv \
   --restore \
   --input_path ./database.env

@@ -50,8 +50,20 @@ echo "PASS: login"
 
 SESSION_API_STATUS=$(curl --insecure --silent --output /dev/null --write-out '%{http_code}' \
   -H "X-Vault-Token: $TOKEN" \
-  "$BASE_URL/api/v1/kv/data/test")
+  "$BASE_URL/api/v1/kv/data/session/test")
 assert_status 401 "$SESSION_API_STATUS" "reject admin login token on API endpoints"
+
+LDAP_LOGIN_BODY=$(curl --insecure --silent --show-error --fail \
+  -H 'Content-Type: application/json' \
+  -d '{"password":"integration-test-password"}' \
+  -X PUT "$BASE_URL/api/v1/auth/ldap/login/admin")
+LDAP_TOKEN=$(printf '%s' "$LDAP_LOGIN_BODY" | sed -n 's/.*"client_token":"\([^"]*\)".*/\1/p')
+[[ -n "$LDAP_TOKEN" ]] || fail "LDAP-compatible login token"
+
+LDAP_API_STATUS=$(curl --insecure --silent --output /dev/null --write-out '%{http_code}' \
+  -H "Authorization: Bearer $LDAP_TOKEN" \
+  "$BASE_URL/api/v1/kv/data/session/test")
+assert_status 401 "$LDAP_API_STATUS" "reject LDAP login token on API endpoints"
 
 UNAUTH_STATUS=$(curl --insecure --silent --output /dev/null --write-out '%{http_code}' "$BASE_URL/v1/secrets")
 assert_status 401 "$UNAUTH_STATUS" "reject unauthorized web secret list"
