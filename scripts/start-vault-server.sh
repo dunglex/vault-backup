@@ -2,9 +2,12 @@
 
 set -euo pipefail
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-DATA_DIR=$SCRIPT_DIR/data
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+ROOT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
+DATA_DIR=$ROOT_DIR/data
+
 mkdir -p "$DATA_DIR"
+
 VAULT_SERVER_DB=$DATA_DIR/vault.db
 TLS_CERT=$DATA_DIR/localhost.pem
 TLS_KEY=$DATA_DIR/localhost-key.pem
