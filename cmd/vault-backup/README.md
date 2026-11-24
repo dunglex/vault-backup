@@ -37,6 +37,8 @@ Use HTTPS for direct TLS connections. HTTP is insecure and prints a warning when
 
 Backup files are written with mode `0600`. Output directories created by `vault-backup` use mode `0700`.
 
+Folder backups recurse through nested secret paths. Backup and restore operations exit with a non-zero status if any item fails, even when other items were processed successfully.
+
 When the administrator has created a managed API token, `vault-backup` can use it directly:
 
 ```bash

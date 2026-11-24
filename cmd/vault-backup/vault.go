@@ -29,7 +29,7 @@ func sortMapKeys(data map[string]any) []string {
 }
 
 // outputMode: "all" (console, key+data), "data" (console, only data), "file" (write to file)
-func writeOutput(data map[string]any, outputMode, outputFormat, outputPath, fileName string) {
+func writeOutput(data map[string]any, outputMode, outputFormat, outputPath, fileName string) error {
 	var outputData string
 
 	format := strings.ToLower(outputFormat)
@@ -53,7 +53,7 @@ func writeOutput(data map[string]any, outputMode, outputFormat, outputPath, file
 	case "all":
 		outputData = getFormatted(data)
 		fmt.Println(outputData)
-		return
+		return nil
 	case "data":
 
 		if d, ok := data["data"].(map[string]any); ok {
@@ -67,7 +67,7 @@ func writeOutput(data map[string]any, outputMode, outputFormat, outputPath, file
 			panic("Expected 'data' key in secret map")
 		}
 		fmt.Println(outputData)
-		return
+		return nil
 	case "file":
 		if d, ok := data["data"].(map[string]any); ok {
 			sortedKeys := sortMapKeys(d)
@@ -81,7 +81,7 @@ func writeOutput(data map[string]any, outputMode, outputFormat, outputPath, file
 		}
 		filePath := outputPath + "/" + fileName
 		if err := os.MkdirAll(outputPath, 0700); err != nil {
-			panic(fmt.Sprintf("Failed to create output directory: %v", err))
+			return fmt.Errorf("create output directory: %w", err)
 		}
 		if !strings.HasSuffix(fileName, ".ini") &&
 			!strings.HasSuffix(fileName, ".env") &&
@@ -91,12 +91,12 @@ func writeOutput(data map[string]any, outputMode, outputFormat, outputPath, file
 			filePath = filePath + "." + strings.Replace(outputFormat, ".", "", -1)
 		}
 		if err := writeSecretFile(filePath, []byte(outputData)); err != nil {
-			panic(fmt.Sprintf("Failed to write to file: %v", err))
+			return err
 		}
 		fmt.Printf("Secrets written to %s\n", filePath)
-		return
+		return nil
 	default:
-		panic(fmt.Sprintf("Unknown output mode: %s", outputMode))
+		return fmt.Errorf("unknown output mode %q", outputMode)
 	}
 }
 
@@ -260,87 +260,103 @@ func connectToVault(arguments Arguments) *vault.Client {
 
 }
 
-func backupSecrets(client *vault.Client, arguments Arguments) {
-	// Read secrets or list folder
+func backupSecrets(client *vault.Client, arguments Arguments) error {
 	if strings.HasSuffix(arguments.SecretPath, "/") {
-		// List keys in the folder
-		metadataPath := arguments.SecretName + "/metadata/" + arguments.SecretPath
-		list, err := client.Logical().List(metadataPath)
-		if err != nil || list == nil || list.Data == nil {
-			fmt.Printf("Failed to list secrets in folder %s: %s (maybe no item)\n", arguments.SecretPath, formatVaultError(err))
-			return
-		}
-		keys, ok := list.Data["keys"].([]any)
-		if !ok {
-			panic(fmt.Sprintf("Unexpected data format when listing folder %s", arguments.SecretPath))
-		}
-		for _, key := range keys {
-			keyStr, ok := key.(string)
-			if !ok {
-				continue
-			}
-			keyStr = strings.TrimPrefix(keyStr, "/")
-			if keyStr == "" || strings.Contains(keyStr, "example-secret") {
-				fmt.Println("Skip secret " + arguments.SecretPath)
-				continue
-			}
-			fullPath := arguments.SecretName + "/data/" + arguments.SecretPath + keyStr
-			secretData, err := client.Logical().Read(fullPath)
-			if err != nil || secretData == nil || secretData.Data == nil {
-				fmt.Printf("Failed to read secret %s: %s (maybe a folder)\n", arguments.SecretPath+keyStr, formatVaultError(err))
-				continue
-			}
-			secrets := map[string]any{
-				"key":  fullPath,
-				"data": secretData.Data["data"],
-			}
-			var outputPath string
-			// Because we are exporting a folder, so treat outputPath as a folder
-			// If OutputPath does not end with "/", add it
-			// Preseve folder structure in file name
-			if !strings.HasSuffix(arguments.OutputPath, "/") {
-				outputPath = arguments.OutputPath + "/" + strings.TrimSuffix(arguments.SecretPath, "/")
-			} else {
-				outputPath = arguments.OutputPath + strings.TrimSuffix(arguments.SecretPath, "/")
-			}
-			writeOutput(secrets, arguments.OutputMode, arguments.OutputFormat, outputPath, keyStr)
-		}
-	} else {
-		if arguments.SecretPath == "" || strings.Contains(arguments.SecretPath, "example-secret") {
-			fmt.Println("Skip secret " + arguments.SecretPath)
-			return
-		}
-		// Read a single secret
-		fullPath := arguments.SecretName + "/data/" + arguments.SecretPath
-		secretData, err := client.Logical().Read(fullPath)
-		if err != nil || secretData == nil || secretData.Data == nil {
-			fmt.Printf("Failed to read secret %s: %s (invalid path or maybe a folder)", arguments.SecretPath, formatVaultError(err))
-		}
-		secrets := map[string]any{
-			"key":  fullPath,
-			"data": secretData.Data["data"],
-		}
-		// Because we are exporting a single secret, so treat outputPath as a file if it does not end with "/"
-		// If outputPath ends with "/", it is treated as a folder, concat actual file name to it
-		// To get file name from secret path, obmit the folder structure, only keep the last part of the path
-		var outputPath, fileName string
-		if strings.HasSuffix(arguments.OutputPath, "/") {
-			outputPath = strings.TrimSuffix(arguments.OutputPath, "/")
-			lastIndex := len(strings.Split(arguments.SecretPath, "/")) - 1
-			fileName = strings.Split(arguments.SecretPath, "/")[lastIndex]
-		} else {
-			outputPath, fileName = filepath.Split(arguments.OutputPath)
-			if outputPath == "" {
-				outputPath = "."
-			}
-			outputPath = strings.TrimSuffix(outputPath, "/")
-			if fileName == "" {
-				fileName = strings.TrimSuffix(arguments.SecretPath, "/")
-			}
-			fileName = strings.TrimPrefix(fileName, "/")
-		}
-		writeOutput(secrets, arguments.OutputMode, arguments.OutputFormat, outputPath, fileName)
+		return backupSecretFolder(client, arguments)
 	}
+	return backupSingleSecret(client, arguments)
+}
+
+func backupSecretFolder(client *vault.Client, arguments Arguments) error {
+	metadataPath := arguments.SecretName + "/metadata/" + arguments.SecretPath
+	list, err := client.Logical().List(metadataPath)
+	if err != nil {
+		return fmt.Errorf("list folder %s: %w", arguments.SecretPath, err)
+	}
+	if list == nil || list.Data == nil {
+		return fmt.Errorf("list folder %s: empty response", arguments.SecretPath)
+	}
+	keys, ok := list.Data["keys"].([]any)
+	if !ok {
+		return fmt.Errorf("list folder %s: unexpected keys format %T", arguments.SecretPath, list.Data["keys"])
+	}
+
+	var failures []error
+	for _, key := range keys {
+		keyStr, ok := key.(string)
+		if !ok {
+			failures = append(failures, fmt.Errorf("list folder %s: unexpected key type %T", arguments.SecretPath, key))
+			continue
+		}
+		keyStr = strings.TrimPrefix(keyStr, "/")
+		if keyStr == "" || strings.Contains(keyStr, "example-secret") {
+			fmt.Println("Skip secret " + arguments.SecretPath + keyStr)
+			continue
+		}
+
+		childArguments := arguments
+		childArguments.SecretPath = arguments.SecretPath + keyStr
+		if strings.HasSuffix(keyStr, "/") {
+			if err := backupSecretFolder(client, childArguments); err != nil {
+				failures = append(failures, err)
+			}
+			continue
+		}
+		childArguments.OutputPath = arguments.OutputPath
+		if !strings.HasSuffix(childArguments.OutputPath, "/") {
+			childArguments.OutputPath += "/"
+		}
+		childArguments.OutputPath += strings.TrimSuffix(arguments.SecretPath, "/") + "/"
+		if err := backupSingleSecret(client, childArguments); err != nil {
+			failures = append(failures, err)
+		}
+	}
+	return errors.Join(failures...)
+}
+
+func backupSingleSecret(client *vault.Client, arguments Arguments) error {
+	if arguments.SecretPath == "" || strings.Contains(arguments.SecretPath, "example-secret") {
+		fmt.Println("Skip secret " + arguments.SecretPath)
+		return nil
+	}
+
+	fullPath := arguments.SecretName + "/data/" + arguments.SecretPath
+	secretData, err := client.Logical().Read(fullPath)
+	if err != nil {
+		return fmt.Errorf("read secret %s: %w", arguments.SecretPath, err)
+	}
+	if secretData == nil || secretData.Data == nil {
+		return fmt.Errorf("read secret %s: empty response", arguments.SecretPath)
+	}
+	data, ok := secretData.Data["data"]
+	if !ok {
+		return fmt.Errorf("read secret %s: response missing data", arguments.SecretPath)
+	}
+	secrets := map[string]any{
+		"key":  fullPath,
+		"data": data,
+	}
+
+	var outputPath, fileName string
+	if strings.HasSuffix(arguments.OutputPath, "/") {
+		outputPath = strings.TrimSuffix(arguments.OutputPath, "/")
+		pathParts := strings.Split(arguments.SecretPath, "/")
+		fileName = pathParts[len(pathParts)-1]
+	} else {
+		outputPath, fileName = filepath.Split(arguments.OutputPath)
+		if outputPath == "" {
+			outputPath = "."
+		}
+		outputPath = strings.TrimSuffix(outputPath, "/")
+		if fileName == "" {
+			fileName = filepath.Base(arguments.SecretPath)
+		}
+		fileName = strings.TrimPrefix(fileName, "/")
+	}
+	if err := writeOutput(secrets, arguments.OutputMode, arguments.OutputFormat, outputPath, fileName); err != nil {
+		return fmt.Errorf("write backup for %s: %w", arguments.SecretPath, err)
+	}
+	return nil
 }
 
 func parseKeyValueFile(content string) (map[string]interface{}, error) {
@@ -373,38 +389,40 @@ func parseKeyValueFile(content string) (map[string]interface{}, error) {
 	return result, nil
 }
 
-func restoreSecrets(client *vault.Client, arguments Arguments) {
+func restoreSecrets(client *vault.Client, arguments Arguments) error {
 	// Check if input path exists
 	info, err := os.Stat(arguments.InputPath)
 	if err != nil {
-		panic(fmt.Sprintf("Failed to access input path %s: %v", arguments.InputPath, err))
+		return fmt.Errorf("access input path %s: %w", arguments.InputPath, err)
 	}
 
 	if info.IsDir() {
+		var failures []error
 		// Restore from directory - walk through all files
 		err := filepath.WalkDir(arguments.InputPath, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
-				return err
+				failures = append(failures, fmt.Errorf("%s: %w", path, err))
+				return nil
 			}
 
 			if !d.IsDir() {
-				err := restoreFromFile(client, arguments, path)
-				if err != nil {
-					fmt.Printf("Failed to restore from %s: %v\n", path, err)
+				if err := restoreFromFile(client, arguments, path); err != nil {
+					failures = append(failures, fmt.Errorf("%s: %w", path, err))
 				}
 			}
 			return nil
 		})
 		if err != nil {
-			panic(fmt.Sprintf("Failed to walk directory %s: %v", arguments.InputPath, err))
+			failures = append(failures, fmt.Errorf("walk directory %s: %w", arguments.InputPath, err))
 		}
-	} else {
-		// Restore from single file
-		err := restoreFromFile(client, arguments, arguments.InputPath)
-		if err != nil {
-			panic(fmt.Sprintf("Failed to restore from file %s: %v", arguments.InputPath, err))
-		}
+		return errors.Join(failures...)
 	}
+
+	// Restore from single file
+	if err := restoreFromFile(client, arguments, arguments.InputPath); err != nil {
+		return fmt.Errorf("restore from file %s: %w", arguments.InputPath, err)
+	}
+	return nil
 }
 
 func restoreFromFile(client *vault.Client, arguments Arguments, filePath string) error {
