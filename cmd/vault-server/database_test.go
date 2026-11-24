@@ -128,6 +128,29 @@ func TestWebPagesUseExpectedStatusAndContent(t *testing.T) {
 	}
 }
 
+func TestHealthChecksDatabaseConnection(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "vault.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &server{db: db}
+
+	healthy := httptest.NewRecorder()
+	s.health(healthy, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if healthy.Code != http.StatusOK || healthy.Body.String() != "{\"ok\":true}\n" {
+		t.Fatalf("healthy response = %d %q", healthy.Code, healthy.Body.String())
+	}
+
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	unhealthy := httptest.NewRecorder()
+	s.health(unhealthy, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if unhealthy.Code != http.StatusServiceUnavailable || unhealthy.Body.String() != "{\"ok\":false}\n" {
+		t.Fatalf("unhealthy response = %d %q", unhealthy.Code, unhealthy.Body.String())
+	}
+}
+
 func TestSetupWindowLockResponses(t *testing.T) {
 	s := &server{setupDeadline: time.Now().Add(-time.Second)}
 

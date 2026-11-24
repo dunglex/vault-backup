@@ -17,6 +17,10 @@ HEALTH=$(curl --insecure --silent --show-error "$BASE_URL/health")
 [[ "$HEALTH" == '{"ok":true}' ]] || fail "health response"
 echo "PASS: health endpoint"
 
+API_HEALTH=$(curl --insecure --silent --show-error "$BASE_URL/api/health")
+[[ "$API_HEALTH" == '{"ok":true}' ]] || fail "API health response"
+echo "PASS: API health endpoint"
+
 HTTP_HEALTH=$(curl --fail --silent --show-error "$HTTP_URL/health")
 [[ "$HTTP_HEALTH" == '{"ok":true}' ]] || fail "HTTP health response"
 echo "PASS: HTTP health endpoint"

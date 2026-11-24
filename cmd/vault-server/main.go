@@ -772,6 +772,13 @@ func (s *server) setupLockAPIs(next http.Handler) http.Handler {
 }
 
 func (s *server) health(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	var result int
+	if s.db == nil || s.db.QueryRowContext(ctx, "SELECT 1").Scan(&result) != nil || result != 1 {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]bool{"ok": false})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 

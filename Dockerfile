@@ -16,7 +16,7 @@ RUN bash scripts/build.sh
 
 FROM alpine:3.19
 
-RUN apk add --no-cache ca-certificates && addgroup -S vault && adduser -S -G vault vault
+RUN apk add --no-cache ca-certificates curl && addgroup -S vault && adduser -S -G vault vault
 
 COPY --from=builder --chown=vault:vault /app/bin/vault-backup /usr/local/bin/vault-backup
 COPY --from=builder --chown=vault:vault /app/bin/vault-server /usr/local/bin/vault-server
@@ -26,7 +26,10 @@ RUN mkdir -p /data && chown -R vault:vault /data
 
 VOLUME /data
 ENV VAULT_SERVER_DB=/data/vault.db
+ENV VAULT_SERVER_HEALTHCHECK_URL=https://127.0.0.1:8200/health
 
 USER vault
 WORKDIR /app
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD curl --fail --silent --show-error --insecure "$VAULT_SERVER_HEALTHCHECK_URL" >/dev/null || exit 1
 ENTRYPOINT ["/usr/local/bin/vault-server"]
