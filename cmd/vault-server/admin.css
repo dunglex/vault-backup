@@ -152,6 +152,14 @@ textarea {
   margin-bottom: 0;
 }
 
+.editor-actions {
+  margin-top: 0.8rem;
+}
+
+.row-actions-spacer {
+  flex: 1;
+}
+
 .danger {
   background-color: var(--danger);
   border-color: var(--danger);
@@ -177,6 +185,11 @@ textarea {
 
 .muted {
   color: var(--muted);
+}
+
+.section-label {
+  color: var(--text);
+  font-weight: 700;
 }
 
 .auth-page,
@@ -228,6 +241,7 @@ textarea {
   gap: 0.8rem;
   justify-content: space-between;
   padding: 1rem 0;
+  min-width: 0;
 }
 
 #paths li:last-child,
@@ -240,11 +254,81 @@ textarea {
   margin-bottom: 0;
 }
 
-.secret-list-button {
+.secret-groups,
+.secret-list {
+  list-style: none;
   margin: 0;
-  max-width: 100%;
+  padding: 0;
+}
+
+.secret-groups li,
+.secret-list li {
+  border-bottom: 0.1rem solid var(--border);
+  padding: 0.8rem 0;
+}
+
+.secret-groups li:last-child,
+.secret-list li:last-child {
+  border-bottom: 0;
+}
+
+.group-button {
+  margin: 0;
+  text-align: left;
+  width: 100%;
+}
+
+.group-button.selected {
+  background: var(--primary);
+  color: #fff;
+}
+
+.secret-list a {
   overflow-wrap: anywhere;
+}
+
+.secret-pager {
+  border-top: 0.1rem solid var(--border);
+  margin-top: 1.6rem;
+  padding-top: 1.6rem;
+}
+
+.secret-browser-header {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  gap: 1.2rem;
+}
+
+.secret-browser-header > * {
+  margin-bottom: 0;
+}
+
+.page-size-label {
+  align-items: center;
+  display: flex;
+  gap: 0.8rem;
+  margin-right: auto;
+}
+
+.page-size-label select {
+  margin: 0;
+  width: auto;
+}
+
+.secret-list-button {
+  display: block;
+  height: auto;
+  line-height: 1.35;
+  margin: 0;
+  min-height: 3.8rem;
+  max-width: 100%;
+  padding: 0.8rem 1.2rem;
+  text-align: left;
   white-space: normal;
+  width: 100%;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .filters {

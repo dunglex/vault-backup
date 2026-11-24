@@ -220,6 +220,9 @@ curl --cacert /path/to/ca.pem \
 
 Web routes such as `/`, `/v1/setup`, `/v1/auth/login`, and `/v1/secrets/...` use an HttpOnly session cookie.
 
+Open `/secrets.html` to browse secrets grouped by their first two path segments. Each group is paginated independently, and selecting a secret opens it in the editor at `/secret.html`.
+Secret path segments are 1–127 characters and may contain only ASCII letters, digits, and hyphens. Underscores and dots are rejected. Full paths remain unique by the primary database key.
+
 ## Audit log
 
 Authenticated administrators can open `/audit.html` to search and filter successful and failed login events plus secret list, read, create, update, and delete activity from both the web panel and managed-token `/api/...` endpoints. API token identities are recorded as truncated SHA-256 fingerprints, never raw tokens. Filters cover text, actor, source, action, outcome, and date range. The backing `/v1/audit` endpoint uses the web session cookie and is limited to 500 events per response.

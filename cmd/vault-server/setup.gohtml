@@ -52,7 +52,7 @@ form.addEventListener('submit', async event => {
     });
     body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(body.error || 'Login failed');
-    location.assign('/secret.html');
+    location.assign('/secrets.html');
   } catch (error) { errorBox.textContent = error.message; }
 });
 </script>

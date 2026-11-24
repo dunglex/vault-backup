@@ -82,3 +82,13 @@ echo "PASS: audit delete event"
 AUDIT_UNAUTH=$(curl --insecure --silent --output /dev/null --write-out '%{http_code}' \
   "$BASE_URL/v1/audit")
 assert_status 401 "$AUDIT_UNAUTH" "reject unauthenticated audit access"
+
+SECRETS_PAGE_STATUS=$(curl --insecure --silent --output "$TMPDIR/secrets.html" --write-out '%{http_code}' \
+  --cookie "$COOKIE_JAR" "$BASE_URL/secrets.html")
+assert_status 200 "$SECRETS_PAGE_STATUS" "serve grouped secret browser"
+grep -q 'id="secret-groups"' "$TMPDIR/secrets.html" || fail "secret browser groups missing"
+
+BROWSER_BODY=$(curl --insecure --silent --show-error --fail --cookie "$COOKIE_JAR" \
+  "$BASE_URL/v1/secrets-browser?group=app&limit=1&offset=0")
+printf '%s' "$BROWSER_BODY" | grep -q '"groups":' || fail "secret browser groups response missing"
+echo "PASS: grouped and paginated secret browser"

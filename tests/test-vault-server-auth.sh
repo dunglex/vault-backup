@@ -113,6 +113,17 @@ TOKEN_BAD_REQUEST_STATUS=$(curl --insecure --silent --output /dev/null --write-o
   -X PUT "$BASE_URL/api/v1/kv/data/token/test")
 assert_status 400 "$TOKEN_BAD_REQUEST_STATUS" "reject invalid managed API request"
 
+INVALID_PATH_STATUS=$(curl --insecure --silent --output "$TMPDIR/invalid-path.json" --write-out '%{http_code}' \
+  -H "X-Vault-Token: $API_TOKEN" \
+  "$BASE_URL/api/v1/kv/data/invalid_path")
+assert_status 400 "$INVALID_PATH_STATUS" "reject invalid API secret path"
+grep -q 'each segment must be 1-127 characters' "$TMPDIR/invalid-path.json" || fail "invalid API path error message"
+
+INVALID_LIST_PATH_STATUS=$(curl --insecure --silent --output /dev/null --write-out '%{http_code}' \
+  -H "X-Vault-Token: $API_TOKEN" \
+  -X LIST "$BASE_URL/api/v1/kv/metadata/invalid.path")
+assert_status 400 "$INVALID_LIST_PATH_STATUS" "reject invalid API metadata path"
+
 API_AUDIT=$(curl --insecure --silent --show-error --fail --cookie "$COOKIE_JAR" \
   "$BASE_URL/v1/audit?source=api&q=token%2Ftest")
 printf '%s' "$API_AUDIT" | grep -q '"action":"create"' || fail "API create audit missing"

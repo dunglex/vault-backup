@@ -27,6 +27,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -270,6 +271,9 @@ func main() {
 	for _, path := range []string{"/secret", "/secret.html"} {
 		mux.HandleFunc("GET "+path, s.serveSecrets)
 	}
+	for _, path := range []string{"/secrets", "/secrets.html"} {
+		mux.HandleFunc("GET "+path, s.serveSecretBrowser)
+	}
 	for _, path := range []string{"/token", "/token.html"} {
 		mux.HandleFunc("GET "+path, s.serveTokens)
 	}
@@ -291,6 +295,7 @@ func main() {
 	mux.HandleFunc("PUT /v1/secrets/{path...}", s.putSecret)
 	mux.HandleFunc("DELETE /v1/secrets/{path...}", s.deleteSecret)
 	mux.HandleFunc("GET /v1/secrets", s.listSecrets)
+	mux.HandleFunc("GET /v1/secrets-browser", s.browseSecrets)
 	mux.HandleFunc("GET /v1/session", s.webSession)
 	mux.HandleFunc("POST /v1/tokens", s.createAPIToken)
 	mux.HandleFunc("GET /v1/tokens", s.listAPITokens)
@@ -1315,6 +1320,11 @@ func (s *server) revokeAPIToken(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) getKVSecret(w http.ResponseWriter, r *http.Request) {
 	source, path := "api", r.PathValue("mount")+"/"+r.PathValue("path")
+	if !validSecretPath(path) {
+		s.recordAuditEvent(r, "read", "failure", s.auditRequestActor(r, source), source, path, "invalid_secret_path")
+		writeInvalidSecretPath(w)
+		return
+	}
 	if !s.kvAuthorized(r) {
 		s.recordAuditEvent(r, "read", "failure", s.auditRequestActor(r, source), source, path, "unauthorized")
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
@@ -1344,6 +1354,11 @@ func (s *server) getKVSecret(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) putKVSecret(w http.ResponseWriter, r *http.Request) {
 	source, path := "api", r.PathValue("mount")+"/"+r.PathValue("path")
+	if !validSecretPath(path) {
+		s.recordAuditEvent(r, "update", "failure", s.auditRequestActor(r, source), source, path, "invalid_secret_path")
+		writeInvalidSecretPath(w)
+		return
+	}
 	if !s.kvAuthorized(r) {
 		s.recordAuditEvent(r, "update", "failure", s.auditRequestActor(r, source), source, path, "unauthorized")
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
@@ -1390,6 +1405,11 @@ func (s *server) putKVSecret(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) deleteKVSecret(w http.ResponseWriter, r *http.Request) {
 	source, path := "api", r.PathValue("mount")+"/"+r.PathValue("path")
+	if !validSecretPath(path) {
+		s.recordAuditEvent(r, "delete", "failure", s.auditRequestActor(r, source), source, path, "invalid_secret_path")
+		writeInvalidSecretPath(w)
+		return
+	}
 	if !s.kvAuthorized(r) {
 		s.recordAuditEvent(r, "delete", "failure", s.auditRequestActor(r, source), source, path, "unauthorized")
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
@@ -1406,6 +1426,12 @@ func (s *server) deleteKVSecret(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) listKVMetadata(w http.ResponseWriter, r *http.Request) {
 	source := "api"
+	path := r.PathValue("mount") + "/" + r.PathValue("path")
+	if !validSecretPath(path) {
+		s.recordAuditEvent(r, "list", "failure", s.auditRequestActor(r, source), source, path, "invalid_secret_path")
+		writeInvalidSecretPath(w)
+		return
+	}
 	if !s.kvAuthorized(r) {
 		s.recordAuditEvent(r, "list", "failure", s.auditRequestActor(r, source), source, r.PathValue("mount")+"/"+r.PathValue("path"), "unauthorized")
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
@@ -1447,6 +1473,10 @@ func (s *server) listKVMetadata(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) getSecret(w http.ResponseWriter, r *http.Request) {
 	source, path := "web", r.PathValue("path")
+	if !validSecretPath(path) {
+		writeInvalidSecretPath(w)
+		return
+	}
 	if !s.authorizedWeb(r) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
@@ -1472,6 +1502,10 @@ func (s *server) getSecret(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) putSecret(w http.ResponseWriter, r *http.Request) {
 	source, path := "web", r.PathValue("path")
+	if !validSecretPath(path) {
+		writeInvalidSecretPath(w)
+		return
+	}
 	if !s.authorizedWeb(r) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
@@ -1511,6 +1545,10 @@ func (s *server) putSecret(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) deleteSecret(w http.ResponseWriter, r *http.Request) {
 	source, path := "web", r.PathValue("path")
+	if !validSecretPath(path) {
+		writeInvalidSecretPath(w)
+		return
+	}
 	if !s.authorizedWeb(r) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
@@ -1550,6 +1588,114 @@ func (s *server) listSecrets(w http.ResponseWriter, r *http.Request) {
 	}
 	s.recordAuditEvent(r, "list", "success", s.auditRequestActor(r, source), source, "*", "")
 	writeJSON(w, http.StatusOK, paths)
+}
+
+func validSecretPath(path string) bool {
+	segments := strings.Split(path, "/")
+	if len(segments) == 0 {
+		return false
+	}
+	for _, segment := range segments {
+		if len(segment) < 1 || len(segment) > 127 {
+			return false
+		}
+		for _, char := range segment {
+			if (char < 'a' || char > 'z') &&
+				(char < 'A' || char > 'Z') &&
+				(char < '0' || char > '9') &&
+				char != '-' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func writeInvalidSecretPath(w http.ResponseWriter) {
+	writeJSON(w, http.StatusBadRequest, map[string]string{
+		"error": "invalid secret path: each segment must be 1-127 characters and contain only letters, numbers, or hyphens",
+	})
+}
+
+func (s *server) browseSecrets(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizedWeb(r) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+
+	rows, err := s.db.Query("SELECT path FROM secrets ORDER BY path")
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not list secrets"})
+		return
+	}
+	defer rows.Close()
+
+	groupCounts := make(map[string]int)
+	allPaths := make(map[string][]string)
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read secrets"})
+			return
+		}
+		group := secretGroup(path)
+		groupCounts[group]++
+		allPaths[group] = append(allPaths[group], path)
+	}
+	if err := rows.Err(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not list secrets"})
+		return
+	}
+
+	groups := make([]map[string]any, 0, len(groupCounts))
+	groupNames := make([]string, 0, len(groupCounts))
+	for group := range groupCounts {
+		groupNames = append(groupNames, group)
+	}
+	sort.Strings(groupNames)
+	for _, group := range groupNames {
+		groups = append(groups, map[string]any{"name": group, "count": groupCounts[group]})
+	}
+
+	selected := strings.TrimSpace(r.URL.Query().Get("group"))
+	if selected == "" && len(groupNames) > 0 {
+		selected = groupNames[0]
+	}
+	limit, err := strconv.Atoi(r.URL.Query().Get("limit"))
+	if err != nil || (limit != 10 && limit != 20 && limit != 50 && limit != 100) {
+		limit = 20
+	}
+	offset, err := strconv.Atoi(r.URL.Query().Get("offset"))
+	if err != nil || offset < 0 {
+		offset = 0
+	}
+	paths := allPaths[selected]
+	total := len(paths)
+	if offset > total {
+		offset = total
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	pagedPaths := append([]string(nil), paths[offset:end]...)
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"groups": groups,
+		"group":  selected,
+		"paths":  pagedPaths,
+		"total":  total,
+		"limit":  limit,
+		"offset": offset,
+	})
+}
+
+func secretGroup(path string) string {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) < 2 {
+		return parts[0]
+	}
+	return strings.Join(parts[:2], "/")
 }
 
 func (s *server) listAuditEvents(w http.ResponseWriter, r *http.Request) {
@@ -1675,7 +1821,7 @@ func (s *server) serveHome(w http.ResponseWriter, r *http.Request) {
 		s.serveNotFound(w, r)
 		return
 	}
-	destination := "/secret.html"
+	destination := "/secrets.html"
 	if s.adminName == "" {
 		destination = "/setup.html"
 		if s.setupLocked() {
@@ -1709,7 +1855,7 @@ func (s *server) serveLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.authorizedWeb(r) {
-		http.Redirect(w, r, "/secret.html", http.StatusSeeOther)
+		http.Redirect(w, r, "/secrets.html", http.StatusSeeOther)
 		return
 	}
 	s.renderPage(w, "login.gohtml", http.StatusOK, nil)
@@ -1717,6 +1863,10 @@ func (s *server) serveLogin(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) serveSecrets(w http.ResponseWriter, r *http.Request) {
 	s.serveProtectedPage(w, r, "secret.gohtml")
+}
+
+func (s *server) serveSecretBrowser(w http.ResponseWriter, r *http.Request) {
+	s.serveProtectedPage(w, r, "secrets.gohtml")
 }
 
 func (s *server) serveTokens(w http.ResponseWriter, r *http.Request) {

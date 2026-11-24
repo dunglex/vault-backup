@@ -21,10 +21,11 @@ func TestPageTemplatesRenderStandalonePages(t *testing.T) {
 		name    string
 		markers []string
 	}{
-		{"index.gohtml", []string{"http-equiv=\"refresh\"", "/secret.html"}},
+		{"index.gohtml", []string{"http-equiv=\"refresh\"", "/secrets.html"}},
 		{"setup.gohtml", []string{`id="setupForm"`, `name="password_confirmation"`, "/v1/setup"}},
 		{"login.gohtml", []string{`id="loginForm"`, "/v1/auth/login"}},
-		{"secret.gohtml", []string{`id="paths"`, `id="secretPath"`, "async function refresh()"}},
+		{"secret.gohtml", []string{`id="paths"`, `id="secretPath"`, `id="convert-format"`, `id="convert-case"`, "parseDotenv", "validateEditorData", "Duplicate dotenv key", ".slice(0, 5)", "location.assign('/secrets.html?group='"}},
+		{"secrets.gohtml", []string{`id="secret-groups"`, `id="secret-list"`, "/v1/secrets-browser", `get('group')`}},
 		{"token.gohtml", []string{`id="tokens"`, `id="createToken"`, "async function refreshTokens()"}},
 		{"audit.gohtml", []string{`id="events"`, "/v1/audit", "async function refresh()"}},
 		{"401.gohtml", []string{"401", "Go to login"}},
@@ -36,7 +37,7 @@ func TestPageTemplatesRenderStandalonePages(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			data := any(nil)
 			if test.name == "index.gohtml" {
-				data = map[string]string{"Destination": "/secret.html"}
+				data = map[string]string{"Destination": "/secrets.html"}
 			}
 			var output bytes.Buffer
 			if err := pageTemplate.ExecuteTemplate(&output, test.name, data); err != nil {
@@ -65,7 +66,7 @@ func TestIndexNavigatesByServerState(t *testing.T) {
 		{"setup", "", false, false, "/setup.html"},
 		{"locked", "", false, true, "/lock.html"},
 		{"login", "admin", false, false, "/login.html"},
-		{"secrets", "admin", true, false, "/secret.html"},
+		{"secrets", "admin", true, false, "/secrets.html"},
 	}
 
 	for _, test := range tests {
@@ -185,6 +186,99 @@ func TestOpenAuditDatabaseIsSeparateAndQueryable(t *testing.T) {
 	}
 	if !strings.HasPrefix(string(contents), "SQLite format 3\x00") {
 		t.Fatal("audit database is not plaintext SQLite")
+	}
+}
+
+func TestBrowseSecretsGroupsAndPaginates(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "vault.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec("CREATE TABLE secrets (path TEXT PRIMARY KEY)"); err != nil {
+		t.Fatal(err)
+	}
+	paths := []string{
+		"kv/dummy/secret1",
+		"kv/dummy/secret2",
+		"kv/production/database",
+		"other",
+	}
+	for _, path := range paths {
+		if _, err := db.Exec("INSERT INTO secrets(path) VALUES (?)", path); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	s := &server{
+		db:       db,
+		sessions: map[string]time.Time{"session": time.Now().Add(time.Minute)},
+	}
+	request := httptest.NewRequest(http.MethodGet, "/v1/secrets-browser?group=kv%2Fdummy&limit=1&offset=1", nil)
+	request.AddCookie(&http.Cookie{Name: "vault_session", Value: "session"})
+	response := httptest.NewRecorder()
+	s.browseSecrets(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("browse secrets status = %d, body %q", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	for _, want := range []string{
+		`"group":"kv/dummy"`,
+		`"paths":["kv/dummy/secret2"]`,
+		`"total":2`,
+		`"count":2`,
+		`"name":"kv/production"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("browse response %q does not contain %q", body, want)
+		}
+	}
+}
+
+func TestBrowseSecretsUsesAllowedPageSizes(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "vault.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec("CREATE TABLE secrets (path TEXT PRIMARY KEY)"); err != nil {
+		t.Fatal(err)
+	}
+	s := &server{
+		db:       db,
+		sessions: map[string]time.Time{"session": time.Now().Add(time.Minute)},
+	}
+
+	for _, test := range []struct {
+		query string
+		want  string
+	}{
+		{"", `"limit":20`},
+		{"?limit=999", `"limit":20`},
+		{"?limit=50", `"limit":50`},
+	} {
+		request := httptest.NewRequest(http.MethodGet, "/v1/secrets-browser"+test.query, nil)
+		request.AddCookie(&http.Cookie{Name: "vault_session", Value: "session"})
+		response := httptest.NewRecorder()
+		s.browseSecrets(response, request)
+		if !strings.Contains(response.Body.String(), test.want) {
+			t.Fatalf("query %q response = %q, want %q", test.query, response.Body.String(), test.want)
+		}
+	}
+
+}
+
+func TestValidSecretPath(t *testing.T) {
+	for _, path := range []string{"kv", "kv/dummy/load-test-10", "A-Z/secret123"} {
+		if !validSecretPath(path) {
+			t.Errorf("valid path %q was rejected", path)
+		}
+	}
+	for _, path := range []string{"", "/kv", "kv/", "kv//secret", "kv/dummy_test", "kv/dummy.test", strings.Repeat("a", 128)} {
+		if validSecretPath(path) {
+			t.Errorf("invalid path %q was accepted", path)
+		}
 	}
 }
 
