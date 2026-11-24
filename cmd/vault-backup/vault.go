@@ -80,7 +80,7 @@ func writeOutput(data map[string]any, outputMode, outputFormat, outputPath, file
 			panic("Expected 'data' key in secret map")
 		}
 		filePath := outputPath + "/" + fileName
-		if err := os.MkdirAll(outputPath, 0755); err != nil {
+		if err := os.MkdirAll(outputPath, 0700); err != nil {
 			panic(fmt.Sprintf("Failed to create output directory: %v", err))
 		}
 		if !strings.HasSuffix(fileName, ".ini") &&
@@ -90,8 +90,7 @@ func writeOutput(data map[string]any, outputMode, outputFormat, outputPath, file
 			!strings.HasSuffix(fileName, ".yaml") {
 			filePath = filePath + "." + strings.Replace(outputFormat, ".", "", -1)
 		}
-		err := os.WriteFile(filePath, []byte(outputData), 0644)
-		if err != nil {
+		if err := writeSecretFile(filePath, []byte(outputData)); err != nil {
 			panic(fmt.Sprintf("Failed to write to file: %v", err))
 		}
 		fmt.Printf("Secrets written to %s\n", filePath)
@@ -99,6 +98,27 @@ func writeOutput(data map[string]any, outputMode, outputFormat, outputPath, file
 	default:
 		panic(fmt.Sprintf("Unknown output mode: %s", outputMode))
 	}
+}
+
+func writeSecretFile(path string, data []byte) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0600)
+	if err != nil {
+		return err
+	}
+
+	if err := file.Chmod(0600); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Truncate(0); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		return err
+	}
+	return file.Close()
 }
 
 func toINI(data map[string]any) string {

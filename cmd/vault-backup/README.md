@@ -35,6 +35,8 @@ Supply options as flags or as environment variables with the `VAULT_` prefix.
 
 Use HTTPS for direct TLS connections. HTTP is insecure and prints a warning when selected; use it only for private, trusted ingress networks. Do not use `--insecure` with untrusted networks.
 
+Backup files are written with mode `0600`. Output directories created by `vault-backup` use mode `0700`.
+
 When the administrator has created a managed API token, `vault-backup` can use it directly:
 
 ```bash

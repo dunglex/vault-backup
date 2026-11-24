@@ -21,6 +21,8 @@ assert_status 200 "$PUT_STATUS" "seed KV v2 source secret"
   --output_mode file --output_format env --output_path "$TMPDIR/database.env"
 
 [[ -f "$TMPDIR/database.env" ]] || fail "backup env file was not created"
+BACKUP_MODE=$(stat -c '%a' "$TMPDIR/database.env")
+[[ "$BACKUP_MODE" == "600" ]] || fail "backup file permissions: expected 600, got $BACKUP_MODE"
 tr -d '\r' <"$TMPDIR/database.env" >"$TMPDIR/database-normalized.env"
 grep -q '^DATABASE_HOST=db.example.local$' "$TMPDIR/database-normalized.env" || fail "DATABASE_HOST missing from backup"
 grep -q '^DATABASE_PORT=5432$' "$TMPDIR/database-normalized.env" || fail "DATABASE_PORT missing from backup"
