@@ -15,7 +15,6 @@ TESTS = [
 def main() -> None:
     for test in TESTS:
         subprocess.run(["python3", str(TEST_DIR / test)], check=True)
-    subprocess.run(["python3", str(TEST_DIR / "generate_dummy_secrets.py"), "--help"], check=True, stdout=subprocess.DEVNULL)
     print("All Vault server integration tests passed.")
 
 

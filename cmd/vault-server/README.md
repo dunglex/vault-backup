@@ -88,8 +88,10 @@ The restore refuses to overwrite a non-empty destination unless `--replace` is s
 
 ## Managed API tokens
 
-After logging in through the web UI, an admin can create, list, and revoke API tokens. Tokens:
+After logging in through the web UI at `/tokens.html`, an admin can create
+tokens in the add-token dialog, list, and revoke API tokens. Tokens:
 
+- May share a name; each token has a distinct ID and value
 - Expire exactly 30 days after creation
 - Have no configurable duration
 - Are shown only in the creation response
@@ -225,7 +227,7 @@ Secret path segments are 1–127 characters and may contain only ASCII letters, 
 
 ## Audit log
 
-Authenticated administrators can open `/audit.html` to search and filter successful and failed login events plus secret list, read, create, update, and delete activity from both the web panel and managed-token `/api/...` endpoints. API token identities are recorded as truncated SHA-256 fingerprints, never raw tokens. Filters cover text, actor, source, action, outcome, and date range. The backing `/v1/audit` endpoint uses the web session cookie and is limited to 500 events per response.
+Authenticated administrators can open `/audits.html` to search and filter successful and failed login events, secret list/read/create/update/delete activity from both the web panel and managed-token `/api/...` endpoints, and managed API token creation/revocation. Token audit events contain token record IDs, never raw token values. API token identities are recorded as truncated SHA-256 fingerprints. Filters cover text, actor, source, action, outcome, and date range. The backing `/v1/audit` endpoint uses the web session cookie and is limited to 500 events per response.
 
 ## Test
 
@@ -240,9 +242,19 @@ The integration test creates a temporary HTTPS certificate, starts isolated HTTP
 To populate a running server with dummy secrets, create a managed API token in the web panel and run:
 
 ```bash
+python3 ./generate_dummy_secrets.py \
+  --count 1000 \
+  --prefix apps/production \
+  --prefix databases/postgres \
+  --prefix teams/platform
+
+./scripts/build.sh
 VAULT_URL=https://vault.example:8200/api \
 VAULT_TOKEN="$VAULT_API_TOKEN" \
-python3 ./tests/generate_dummy_secrets.py --count 1000 --prefix dummy/load-test
+python3 ./restore_dummy_secrets.py
 ```
 
-Use `--insecure-tls` only for trusted development certificates. Add `--cleanup` to delete every generated secret after verification.
+The generator writes JSON files into `test_data/`; their paths become Vault
+secret paths. The restore helper uses `bin/vault-backup` to restore them. Use
+`--insecure-tls` only for trusted development certificates, or specify
+`--ca-cert` for the server CA.

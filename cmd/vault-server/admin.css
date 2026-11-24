@@ -387,6 +387,51 @@ table {
   display: none;
 }
 
+.token-page-header {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  gap: 1.2rem;
+}
+
+.token-page-header > * {
+  margin-bottom: 0;
+}
+
+.token-dialog {
+  border: 0.1rem solid var(--border);
+  border-radius: 0.6rem;
+  box-shadow: var(--shadow);
+  max-width: 52rem;
+  padding: 2.4rem;
+  width: calc(100% - 3.2rem);
+}
+
+.token-dialog::backdrop {
+  background: rgba(29, 38, 55, 0.48);
+}
+
+.token-dialog form {
+  margin-bottom: 0;
+}
+
+.token-dialog h2 {
+  margin-bottom: 1.6rem;
+}
+
+.token-dialog-actions {
+  justify-content: flex-end;
+  margin-top: 1.6rem;
+}
+
+.token-dialog-actions button {
+  margin-bottom: 0;
+}
+
+#newToken {
+  white-space: pre-wrap;
+}
+
 @media (max-width: 80rem) {
   .filters {
     grid-template-columns: repeat(3, minmax(14rem, 1fr));

@@ -34,30 +34,16 @@ import (
 	"syscall"
 	"time"
 
-	_ "github.com/CovenantSQL/go-sqlite3-encrypt"
-	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/bcrypt"
-	_ "modernc.org/sqlite"
 )
 
 const (
-	databaseKeyLength  = 128
-	argonTime          = uint32(3)
-	argonMemory        = uint32(64 * 1024)
-	argonThreads       = uint8(4)
 	apiTokenLifetime   = 30 * 24 * time.Hour
 	setupLifetime      = 20 * time.Minute
 	loginAttemptLimit  = 5
 	loginAttemptWindow = 10 * time.Minute
 	shutdownTimeout    = 15 * time.Second
 )
-
-type encryptedKeyFile struct {
-	Version    int    `json:"version"`
-	Salt       []byte `json:"salt"`
-	Nonce      []byte `json:"nonce"`
-	Ciphertext []byte `json:"ciphertext"`
-}
 
 type server struct {
 	db            *sql.DB
@@ -83,6 +69,18 @@ type accountRequest struct {
 
 type secretRequest struct {
 	Data map[string]any `json:"data"`
+}
+
+type httpErrorLogWriter struct {
+	output io.Writer
+}
+
+func (w httpErrorLogWriter) Write(p []byte) (int, error) {
+	if bytes.Contains(p, []byte("http: TLS handshake error")) &&
+		bytes.Contains(p, []byte("tls: unknown certificate")) {
+		return len(p), nil
+	}
+	return w.output.Write(p)
 }
 
 //go:embed *.gohtml *.css
@@ -182,30 +180,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	if _, err := db.Exec(`
-		CREATE TABLE IF NOT EXISTS accounts (
-			username TEXT PRIMARY KEY,
-			password_hash TEXT NOT NULL,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-		);
-		CREATE TABLE IF NOT EXISTS secrets (
-			path TEXT PRIMARY KEY,
-			data TEXT NOT NULL,
-			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-		);
-		CREATE TABLE IF NOT EXISTS api_tokens (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			name TEXT NOT NULL,
-			token_hash TEXT NOT NULL UNIQUE,
-			created_at INTEGER NOT NULL,
-			expires_at INTEGER NOT NULL,
-			revoked_at INTEGER
-		);
-		CREATE TABLE IF NOT EXISTS server_settings (
-			key TEXT PRIMARY KEY,
-			value TEXT NOT NULL
-		);
-	`); err != nil {
+	if err := initializeDatabase(db); err != nil {
 		log.Fatal(err)
 	}
 	if err := os.Chmod(*dbPath, 0600); err != nil {
@@ -274,11 +249,21 @@ func main() {
 	for _, path := range []string{"/secrets", "/secrets.html"} {
 		mux.HandleFunc("GET "+path, s.serveSecretBrowser)
 	}
-	for _, path := range []string{"/token", "/token.html"} {
+	for _, path := range []string{"/tokens", "/tokens.html"} {
 		mux.HandleFunc("GET "+path, s.serveTokens)
 	}
-	for _, path := range []string{"/audit", "/audit.html"} {
+	for _, path := range []string{"/token", "/token.html"} {
+		mux.HandleFunc("GET "+path, func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "/tokens.html", http.StatusMovedPermanently)
+		})
+	}
+	for _, path := range []string{"/audits", "/audits.html"} {
 		mux.HandleFunc("GET "+path, s.serveAudit)
+	}
+	for _, path := range []string{"/audit", "/audit.html"} {
+		mux.HandleFunc("GET "+path, func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "/audits.html", http.StatusMovedPermanently)
+		})
 	}
 	for _, path := range []string{"/401", "/401.html"} {
 		mux.HandleFunc("GET "+path, s.serveUnauthorized)
@@ -326,6 +311,7 @@ func main() {
 		tlsConfig.ClientCAs = clientCAs
 		log.Printf("Vault server HTTPS mutual TLS enabled using client CA %s", *mtlsCACert)
 	}
+	httpErrorLog := log.New(httpErrorLogWriter{output: os.Stderr}, "", log.LstdFlags)
 	httpsServer := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
@@ -333,6 +319,7 @@ func main() {
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 		TLSConfig:         tlsConfig,
+		ErrorLog:          httpErrorLog,
 	}
 	httpServer := &http.Server{
 		Handler:           handler,
@@ -340,6 +327,7 @@ func main() {
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       60 * time.Second,
+		ErrorLog:          httpErrorLog,
 	}
 	httpsListener, err := net.Listen("tcp", *addr)
 	if err != nil {
@@ -522,276 +510,10 @@ func loadDotEnv(path string) error {
 	return nil
 }
 
-func isPlaintextSQLite(path string) (bool, error) {
-	file, err := os.Open(path)
-	if os.IsNotExist(err) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	defer file.Close()
-
-	const sqliteHeader = "SQLite format 3\x00"
-	header := make([]byte, len(sqliteHeader))
-	if _, err := io.ReadFull(file, header); err != nil {
-		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			return false, nil
-		}
-		return false, err
-	}
-	return string(header) == sqliteHeader, nil
-}
-
-func openDatabase(path string, key []byte) (*sql.DB, bool, error) {
-	return openDatabaseWithOptions(path, key, false)
-}
-
-func openDatabaseWithOptions(path string, key []byte, allowPlaintext bool) (*sql.DB, bool, error) {
-	legacyDatabase, err := isPlaintextSQLite(path)
-	if err != nil {
-		return nil, false, err
-	}
-
-	driverName := "sqlite3"
-	dsn := path + "?_crypto_key=" + hex.EncodeToString(key) + "&_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=1"
-	if legacyDatabase {
-		if !allowPlaintext {
-			return nil, true, fmt.Errorf("existing database %s is plaintext SQLite; use --allow-plaintext-db or VAULT_SERVER_ALLOW_PLAINTEXT_DB=true only after acknowledging it is insecure", path)
-		}
-		driverName = "sqlite"
-		dsn = path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
-		log.Printf("WARNING: plaintext SQLite database %s is allowed and remains unencrypted", path)
-	}
-
-	db, err := sql.Open(driverName, dsn)
-	if err != nil {
-		return nil, legacyDatabase, err
-	}
-	db.SetMaxOpenConns(1)
-	return db, legacyDatabase, nil
-}
-
-func openAuditDatabase(path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)")
-	if err != nil {
-		return nil, err
-	}
-	db.SetMaxOpenConns(1)
-	if _, err := db.Exec(`
-		CREATE TABLE IF NOT EXISTS audit_events (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			created_at INTEGER NOT NULL,
-			action TEXT NOT NULL,
-			outcome TEXT NOT NULL,
-			actor TEXT NOT NULL,
-			client_ip TEXT NOT NULL,
-			source TEXT NOT NULL,
-			resource TEXT NOT NULL,
-			detail TEXT NOT NULL
-		);
-		CREATE INDEX IF NOT EXISTS idx_audit_events_created_at ON audit_events(created_at DESC);
-		CREATE INDEX IF NOT EXISTS idx_audit_events_action ON audit_events(action);
-		CREATE INDEX IF NOT EXISTS idx_audit_events_outcome ON audit_events(outcome);
-		CREATE INDEX IF NOT EXISTS idx_audit_events_actor ON audit_events(actor);
-	`); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	return db, nil
-}
-
-func randomKey() string {
-	b := make([]byte, 24)
-	if _, err := rand.Read(b); err != nil {
-		log.Fatal(err)
-	}
-	return hex.EncodeToString(b)
-}
-
 func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
-}
-
-func loadOrCreateKey(path, password string) ([]byte, error) {
-	if password == "" {
-		return nil, fmt.Errorf("database key password is required")
-	}
-
-	fileContents, err := os.ReadFile(path)
-	if err == nil {
-		if len(fileContents) == 0 || fileContents[0] != '{' {
-			return nil, fmt.Errorf("unsupported legacy database key file format; remove it to create a new 128-byte protected key")
-		}
-		return decryptKeyFile(fileContents, password)
-	} else if !os.IsNotExist(err) {
-		return nil, err
-	}
-
-	key := make([]byte, databaseKeyLength)
-	if _, err := io.ReadFull(rand.Reader, key); err != nil {
-		return nil, err
-	}
-	if err := writeEncryptedKeyFile(path, key, password); err != nil {
-		return nil, err
-	}
-	return key, nil
-}
-
-func deriveWrappingKey(password string, salt []byte) []byte {
-	return argon2.IDKey([]byte(password), salt, argonTime, argonMemory, argonThreads, 32)
-}
-
-func encryptKey(plaintext []byte, password string) (*encryptedKeyFile, error) {
-	if len(plaintext) != databaseKeyLength {
-		return nil, fmt.Errorf("database key must be exactly %d bytes", databaseKeyLength)
-	}
-	salt := make([]byte, 32)
-	nonce := make([]byte, 12)
-	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
-		return nil, err
-	}
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		return nil, err
-	}
-
-	wrappingKey := deriveWrappingKey(password, salt)
-	block, err := aes.NewCipher(wrappingKey)
-	if err != nil {
-		return nil, err
-	}
-	aead, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-
-	return &encryptedKeyFile{
-		Version:    1,
-		Salt:       salt,
-		Nonce:      nonce,
-		Ciphertext: aead.Seal(nil, nonce, plaintext, nil),
-	}, nil
-}
-
-func decryptKeyFile(contents []byte, password string) ([]byte, error) {
-	var envelope encryptedKeyFile
-	if err := json.Unmarshal(contents, &envelope); err != nil {
-		return nil, fmt.Errorf("invalid encrypted database key file: %w", err)
-	}
-	if envelope.Version != 1 {
-		return nil, fmt.Errorf("unsupported database key file version %d", envelope.Version)
-	}
-	if len(envelope.Salt) != 32 {
-		return nil, fmt.Errorf("invalid database key salt length")
-	}
-	if len(envelope.Nonce) != 12 {
-		return nil, fmt.Errorf("invalid database key nonce length")
-	}
-
-	wrappingKey := deriveWrappingKey(password, envelope.Salt)
-	block, err := aes.NewCipher(wrappingKey)
-	if err != nil {
-		return nil, err
-	}
-	aead, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-	plaintext, err := aead.Open(nil, envelope.Nonce, envelope.Ciphertext, nil)
-	if err != nil {
-		return nil, fmt.Errorf("could not decrypt database key: wrong db password or corrupted key file")
-	}
-	if len(plaintext) != databaseKeyLength {
-		return nil, fmt.Errorf("invalid decrypted database key length: got %d bytes", len(plaintext))
-	}
-	return plaintext, nil
-}
-
-func writeEncryptedKeyFile(path string, key []byte, password string) error {
-	envelope, err := encryptKey(key, password)
-	if err != nil {
-		return err
-	}
-	contents, err := json.Marshal(envelope)
-	if err != nil {
-		return err
-	}
-
-	dir := filepath.Dir(path)
-	temp, err := os.CreateTemp(dir, ".vault-db-key-*")
-	if err != nil {
-		return err
-	}
-	tempPath := temp.Name()
-	cleanup := true
-	defer func() {
-		if cleanup {
-			_ = os.Remove(tempPath)
-		}
-	}()
-	if err := temp.Chmod(0600); err != nil {
-		_ = temp.Close()
-		return err
-	}
-	if _, err := temp.Write(contents); err != nil {
-		_ = temp.Close()
-		return err
-	}
-	if err := temp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tempPath, path); err != nil {
-		return err
-	}
-	cleanup = false
-	return os.Chmod(path, 0600)
-}
-
-func loadOrCreateSetupKey(path string) (string, error) {
-	key, err := os.ReadFile(path)
-	if err == nil {
-		setupKey := strings.TrimSpace(string(key))
-		if setupKey == "" {
-			return "", fmt.Errorf("invalid setup key file")
-		}
-		return setupKey, nil
-	}
-	if !os.IsNotExist(err) {
-		return "", err
-	}
-
-	setupKey := randomKey()
-	if err := os.WriteFile(path, []byte(setupKey+"\n"), 0600); err != nil {
-		return "", err
-	}
-	if err := os.Chmod(path, 0600); err != nil {
-		return "", err
-	}
-	return setupKey, nil
-}
-
-func loadOrCreateSetupDeadline(db *sql.DB) (time.Time, error) {
-	const key = "setup_started_at"
-	now := time.Now().Unix()
-	if _, err := db.Exec(
-		"INSERT OR IGNORE INTO server_settings(key, value) VALUES (?, ?)",
-		key,
-		strconv.FormatInt(now, 10),
-	); err != nil {
-		return time.Time{}, err
-	}
-
-	var value string
-	if err := db.QueryRow("SELECT value FROM server_settings WHERE key = ?", key).Scan(&value); err != nil {
-		return time.Time{}, err
-	}
-	startedAt, err := strconv.ParseInt(value, 10, 64)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("invalid setup start time: %w", err)
-	}
-	return time.Unix(startedAt, 0).Add(setupLifetime), nil
 }
 
 func (s *server) encrypt(plaintext []byte) (string, error) {
@@ -1200,6 +922,7 @@ func (s *server) logout(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) createAPIToken(w http.ResponseWriter, r *http.Request) {
 	if !s.authorizedWeb(r) {
+		s.recordAuditEvent(r, "create_token", "failure", "anonymous", "web", "api-token", "unauthorized")
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
@@ -1207,17 +930,20 @@ func (s *server) createAPIToken(w http.ResponseWriter, r *http.Request) {
 		Name string `json:"name"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.recordAuditEvent(r, "create_token", "failure", s.auditRequestActor(r, "web"), "web", "api-token", "invalid_request")
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
 		return
 	}
 	req.Name = strings.TrimSpace(req.Name)
 	if req.Name == "" || len(req.Name) > 128 {
+		s.recordAuditEvent(r, "create_token", "failure", s.auditRequestActor(r, "web"), "web", "api-token", "invalid_name")
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name is required and must be at most 128 characters"})
 		return
 	}
 
 	tokenBytes := make([]byte, 32)
 	if _, err := io.ReadFull(rand.Reader, tokenBytes); err != nil {
+		s.recordAuditEvent(r, "create_token", "failure", s.auditRequestActor(r, "web"), "web", "api-token", "random_generation_failed")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not create API token"})
 		return
 	}
@@ -1233,14 +959,17 @@ func (s *server) createAPIToken(w http.ResponseWriter, r *http.Request) {
 		expiresAt.Unix(),
 	)
 	if err != nil {
+		s.recordAuditEvent(r, "create_token", "failure", s.auditRequestActor(r, "web"), "web", "api-token", "storage_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not create API token"})
 		return
 	}
 	id, err := result.LastInsertId()
 	if err != nil {
+		s.recordAuditEvent(r, "create_token", "failure", s.auditRequestActor(r, "web"), "web", "api-token", "storage_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not create API token"})
 		return
 	}
+	s.recordAuditEvent(r, "create_token", "success", s.auditRequestActor(r, "web"), "web", "api-token:"+strconv.FormatInt(id, 10), "")
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"id":         id,
 		"name":       req.Name,
@@ -1293,28 +1022,34 @@ func (s *server) listAPITokens(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) revokeAPIToken(w http.ResponseWriter, r *http.Request) {
 	if !s.authorizedWeb(r) {
+		s.recordAuditEvent(r, "revoke_token", "failure", "anonymous", "web", "api-token", "unauthorized")
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil || id < 1 {
+		s.recordAuditEvent(r, "revoke_token", "failure", s.auditRequestActor(r, "web"), "web", "api-token", "invalid_token_id")
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid token id"})
 		return
 	}
+	resource := "api-token:" + strconv.FormatInt(id, 10)
 	result, err := s.db.Exec(
 		"UPDATE api_tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
 		time.Now().Unix(),
 		id,
 	)
 	if err != nil {
+		s.recordAuditEvent(r, "revoke_token", "failure", s.auditRequestActor(r, "web"), "web", resource, "storage_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not revoke API token"})
 		return
 	}
 	affected, err := result.RowsAffected()
 	if err != nil || affected != 1 {
+		s.recordAuditEvent(r, "revoke_token", "failure", s.auditRequestActor(r, "web"), "web", resource, "active_token_not_found")
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "active API token not found"})
 		return
 	}
+	s.recordAuditEvent(r, "revoke_token", "success", s.auditRequestActor(r, "web"), "web", resource, "")
 	writeJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
 }
 
@@ -1678,7 +1413,7 @@ func (s *server) browseSecrets(w http.ResponseWriter, r *http.Request) {
 	if end > total {
 		end = total
 	}
-	pagedPaths := append([]string(nil), paths[offset:end]...)
+	pagedPaths := append([]string{}, paths[offset:end]...)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"groups": groups,

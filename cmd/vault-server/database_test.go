@@ -16,6 +16,67 @@ import (
 	"time"
 )
 
+func TestHTTPErrorLogWriterFiltersUnknownCertificateHandshakeErrors(t *testing.T) {
+	var output bytes.Buffer
+	writer := httpErrorLogWriter{output: &output}
+
+	ignored := []byte("http: TLS handshake error from 127.0.0.1:1234: remote error: tls: unknown certificate\n")
+	if n, err := writer.Write(ignored); err != nil || n != len(ignored) {
+		t.Fatalf("Write() = (%d, %v), want (%d, nil)", n, err, len(ignored))
+	}
+	if output.Len() != 0 {
+		t.Fatalf("unknown certificate handshake log was not filtered: %q", output.String())
+	}
+
+	retained := []byte("http: TLS handshake error from 127.0.0.1:1234: tls: bad certificate\n")
+	if n, err := writer.Write(retained); err != nil || n != len(retained) {
+		t.Fatalf("Write() = (%d, %v), want (%d, nil)", n, err, len(retained))
+	}
+	if output.String() != string(retained) {
+		t.Fatalf("other HTTP server errors should be retained: got %q", output.String())
+	}
+}
+
+func TestInitializeDatabaseRemovesLegacyUniqueTokenNameConstraint(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "vault.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+
+	if _, err := db.Exec(`
+		CREATE TABLE api_tokens (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL UNIQUE,
+			token_hash TEXT NOT NULL UNIQUE,
+			created_at INTEGER NOT NULL,
+			expires_at INTEGER NOT NULL,
+			revoked_at INTEGER
+		);
+		INSERT INTO api_tokens(name, token_hash, created_at, expires_at)
+			VALUES ('backup-agent', 'first-hash', 1, 2);
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if err := initializeDatabase(db); err != nil {
+		t.Fatalf("initialize database: %v", err)
+	}
+	if _, err := db.Exec(
+		"INSERT INTO api_tokens(name, token_hash, created_at, expires_at) VALUES (?, ?, ?, ?)",
+		"backup-agent", "second-hash", 1, 2,
+	); err != nil {
+		t.Fatalf("insert API token with duplicate name: %v", err)
+	}
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM api_tokens WHERE name = ?", "backup-agent").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("API tokens with duplicate name = %d, want 2", count)
+	}
+}
+
 func TestPageTemplatesRenderStandalonePages(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -26,8 +87,8 @@ func TestPageTemplatesRenderStandalonePages(t *testing.T) {
 		{"login.gohtml", []string{`id="loginForm"`, "/v1/auth/login"}},
 		{"secret.gohtml", []string{`id="paths"`, `id="secretPath"`, `id="convert-format"`, `id="convert-case"`, "parseDotenv", "validateEditorData", "Duplicate dotenv key", ".slice(0, 5)", "location.assign('/secrets.html?group='"}},
 		{"secrets.gohtml", []string{`id="secret-groups"`, `id="secret-list"`, "/v1/secrets-browser", `get('group')`}},
-		{"token.gohtml", []string{`id="tokens"`, `id="createToken"`, "async function refreshTokens()"}},
-		{"audit.gohtml", []string{`id="events"`, "/v1/audit", "async function refresh()"}},
+		{"token.gohtml", []string{`id="tokens"`, `id="openCreateToken"`, `id="createTokenDialog"`, `id="createToken"`, "async function refreshTokens()"}},
+		{"audit.gohtml", []string{`id="events"`, `href="/audits.html"`, "/v1/audit", "create_token", "revoke_token", "async function refresh()"}},
 		{"401.gohtml", []string{"401", "Go to login"}},
 		{"404.gohtml", []string{"404", "Page not found"}},
 		{"lock.gohtml", []string{"423", "Setup locked"}},
@@ -52,6 +113,31 @@ func TestPageTemplatesRenderStandalonePages(t *testing.T) {
 				t.Error("navigator includes quotes in the redirect URL")
 			}
 		})
+	}
+}
+
+func TestSecretBrowserGroupButtonKeepsClickedSelection(t *testing.T) {
+	var output bytes.Buffer
+	if err := pageTemplate.ExecuteTemplate(&output, "secrets.gohtml", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	page := output.String()
+	start := strings.Index(page, "button.onclick = () => {")
+	if start < 0 {
+		t.Fatal("secret group click handler not found")
+	}
+	handler := page[start:]
+	end := strings.Index(handler, "\n    };")
+	if end < 0 {
+		t.Fatal("secret group click handler end not found")
+	}
+	handler = handler[:end]
+	if !strings.Contains(handler, "selectedGroup = group.name;") {
+		t.Fatal("group click handler does not select the clicked group")
+	}
+	if strings.Contains(handler, "new URLSearchParams") {
+		t.Fatal("group click handler unexpectedly overwrites the clicked group from the URL")
 	}
 }
 
@@ -252,18 +338,20 @@ func TestBrowseSecretsUsesAllowedPageSizes(t *testing.T) {
 
 	for _, test := range []struct {
 		query string
-		want  string
+		want  []string
 	}{
-		{"", `"limit":20`},
-		{"?limit=999", `"limit":20`},
-		{"?limit=50", `"limit":50`},
+		{"", []string{`"limit":20`, `"groups":[]`, `"paths":[]`}},
+		{"?limit=999", []string{`"limit":20`}},
+		{"?limit=50", []string{`"limit":50`}},
 	} {
 		request := httptest.NewRequest(http.MethodGet, "/v1/secrets-browser"+test.query, nil)
 		request.AddCookie(&http.Cookie{Name: "vault_session", Value: "session"})
 		response := httptest.NewRecorder()
 		s.browseSecrets(response, request)
-		if !strings.Contains(response.Body.String(), test.want) {
-			t.Fatalf("query %q response = %q, want %q", test.query, response.Body.String(), test.want)
+		for _, want := range test.want {
+			if !strings.Contains(response.Body.String(), want) {
+				t.Fatalf("query %q response = %q, want %q", test.query, response.Body.String(), want)
+			}
 		}
 	}
 

@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
+import os
+import signal
 import stat
+import subprocess
 import tarfile
+import time
 
-from test_common import ServerTest, require, run
+from test_common import HttpClient, ServerTest, assert_status, require, run
 
 
 def mode(path) -> int:
@@ -37,6 +41,115 @@ def main() -> None:
                 "server backup omitted audit database",
             )
         print("PASS: server backup includes audit database")
+
+        server.setup()
+        server.login()
+        status, _ = server.client.json(
+            "PUT",
+            f"{server.https_url}/v1/secrets/restore-test/database",
+            data={"data": {"username": "restore-admin", "password": "restore-secret"}},
+        )
+        assert_status(200, status, "create secret for database restore")
+        server.stop()
+
+        run(
+            "./scripts/backup-vault-server.sh",
+            "--db",
+            server.path / "vault.db",
+            "--env-file",
+            "",
+            "--tls-cert",
+            server.cert,
+            "--tls-key",
+            server.key,
+            "--output",
+            archive,
+        )
+        restore_dir = server.path / "restored-data"
+        run(
+            "./scripts/restore-vault-server.sh",
+            "--data-dir",
+            restore_dir,
+            archive,
+        )
+        require(mode(restore_dir / "vault.db") == 0o600, "restored database permissions")
+        require(mode(restore_dir / "vault.db.key") == 0o600, "restored key permissions")
+        print("PASS: restore installs protected database files")
+
+        restored_port = 18230
+        restored_url = f"https://127.0.0.1:{restored_port}"
+        restored_env = os.environ | {
+            "VAULT_SERVER_ADDR": f"127.0.0.1:{restored_port}",
+            "VAULT_SERVER_HTTP_ADDR": "",
+            "VAULT_SERVER_DB": str(restore_dir / "vault.db"),
+            "VAULT_SERVER_AUDIT_DB": str(restore_dir / "audit.db"),
+            "VAULT_SERVER_DB_PASSWORD": server.password,
+        }
+        restored_log = open(server.path / "restored-server.log", "wb")
+        restored_process = subprocess.Popen(
+            [
+                str(server.server_binary),
+                "--tls-cert",
+                str(restore_dir / "tls/server.crt"),
+                "--tls-key",
+                str(restore_dir / "tls/server.key"),
+            ],
+            cwd=server.path,
+            env=restored_env,
+            stdout=restored_log,
+            stderr=subprocess.STDOUT,
+        )
+        try:
+            restored_client = HttpClient()
+            for _ in range(40):
+                if restored_process.poll() is not None:
+                    raise RuntimeError(
+                        (server.path / "restored-server.log").read_text(errors="replace")
+                    )
+                status, _ = restored_client.request(
+                    "GET", f"{restored_url}/health", timeout=1
+                )
+                if status == 200:
+                    break
+                time.sleep(0.25)
+            else:
+                raise RuntimeError("restored server did not become healthy")
+
+            status, _ = restored_client.json(
+                "POST",
+                f"{restored_url}/v1/auth/login",
+                data={"username": server.user, "password": server.password},
+            )
+            assert_status(200, status, "log in to restored server")
+            status, secret = restored_client.json(
+                "GET", f"{restored_url}/v1/secrets/restore-test/database"
+            )
+            assert_status(200, status, "read secret from restored database")
+            require(
+                secret["data"] == {
+                    "username": "restore-admin",
+                    "password": "restore-secret",
+                },
+                "restored database secret values",
+            )
+            _, audit = restored_client.json(
+                "GET",
+                f"{restored_url}/v1/audit?action=create&q=restore-test",
+            )
+            require(
+                any(
+                    event["action"] == "create"
+                    and event["resource"] == "restore-test/database"
+                    for event in audit["events"]
+                ),
+                "restored audit database event",
+            )
+            print("PASS: restored server retains audit history")
+        finally:
+            if restored_process.poll() is None:
+                restored_process.send_signal(signal.SIGTERM)
+                restored_process.wait(timeout=20)
+            restored_log.close()
 
 
 if __name__ == "__main__":

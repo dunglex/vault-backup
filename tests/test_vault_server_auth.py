@@ -27,6 +27,14 @@ def main() -> None:
         assert_status(409, status, "disable admin creation after setup")
 
         login_token = server.login()
+        status, token_page = server.client.request("GET", f"{server.https_url}/tokens.html")
+        assert_status(200, status, "open canonical API tokens page")
+        require(b'<dialog id="createTokenDialog"' in token_page, "token creation dialog")
+        require(b'id="openCreateToken"' in token_page, "token page add button")
+        status, legacy_token_page = server.client.request("GET", f"{server.https_url}/token.html")
+        assert_status(200, status, "redirect legacy API tokens URL")
+        require(b"/tokens.html" in legacy_token_page, "legacy token URL canonical target")
+
         status, _ = server.client.request(
             "GET",
             f"{server.https_url}/api/v1/kv/data/session/test",
@@ -61,6 +69,30 @@ def main() -> None:
         expires = datetime.fromisoformat(token_data["expires_at"].replace("Z", "+00:00"))
         require(int((expires - created).total_seconds()) == 2592000, "API token lifetime")
         print("PASS: create fixed-expiry API token")
+        _, token_audit = server.client.json(
+            "GET",
+            f"{server.https_url}/v1/audit?action=create_token&q=api-token%3A{token_id}",
+        )
+        require(
+            any(
+                event["outcome"] == "success"
+                and event["actor"] == server.user
+                and event["resource"] == f"api-token:{token_id}"
+                for event in token_audit["events"]
+            ),
+            "API token creation audit event",
+        )
+        require(api_token not in str(token_audit), "raw token leaked into creation audit")
+        print("PASS: audit API token creation without storing raw token")
+
+        duplicate_token, duplicate_token_id, _ = server.create_api_token("backup-agent")
+        require(duplicate_token_id != token_id, "duplicate-name API token IDs must be distinct")
+        _, tokens = server.client.json("GET", f"{server.https_url}/v1/tokens")
+        require(
+            sum(token["name"] == "backup-agent" for token in tokens) == 2,
+            "multiple API tokens with the same name",
+        )
+        print("PASS: create multiple API tokens with the same name")
 
         api_headers = {"X-Vault-Token": api_token}
         status, _ = server.client.json(
@@ -98,6 +130,20 @@ def main() -> None:
         print("PASS: list managed API tokens")
         status, _ = server.client.request("DELETE", f"{server.https_url}/v1/tokens/{token_id}")
         assert_status(200, status, "revoke API token")
+        _, revoke_audit = server.client.json(
+            "GET",
+            f"{server.https_url}/v1/audit?action=revoke_token&q=api-token%3A{token_id}",
+        )
+        require(
+            any(
+                event["outcome"] == "success"
+                and event["actor"] == server.user
+                and event["resource"] == f"api-token:{token_id}"
+                for event in revoke_audit["events"]
+            ),
+            "API token revocation audit event",
+        )
+        print("PASS: audit API token revocation")
         status, _ = server.client.request("GET", f"{server.https_url}/api/v1/kv/data/token/test", headers=api_headers)
         assert_status(401, status, "reject revoked API token")
 

@@ -15,21 +15,39 @@
     <h1 class="brand">Vault Server</h1>
     <nav class="app-nav" aria-label="Admin navigation">
       <a class="button button-outline" href="/secrets.html">Secrets</a>
-      <a class="button" aria-current="page" href="/token.html">API tokens</a>
-      <a class="button button-outline" href="/audit.html">Audit log</a>
+      <a class="button" aria-current="page" href="/tokens.html">API tokens</a>
+      <a class="button button-outline" href="/audits.html">Audit log</a>
       <button id="logout" class="button button-outline">Logout</button>
     </nav>
   </header>
   <div id="error" class="notice" role="alert"></div>
   <section class="panel">
-    <p class="section-label">API token</p>
-    <div class="row-actions"><input id="tokenName" placeholder="Token name"><button id="createToken">Create</button></div>
-    <p id="newToken" class="muted"></p>
+    <div class="token-page-header">
+      <h2 class="section-label">API tokens</h2>
+      <button id="openCreateToken" type="button">Add token</button>
+    </div>
     <ul id="tokens"></ul>
   </section>
 </main>
+<dialog id="createTokenDialog" class="token-dialog" aria-labelledby="createTokenTitle">
+  <form id="createTokenForm">
+    <h2 id="createTokenTitle">Add API token</h2>
+    <div id="tokenFormFields">
+      <label for="tokenName">Token name</label>
+      <input id="tokenName" name="name" maxlength="128" autocomplete="off" required>
+    </div>
+    <p id="dialogError" class="notice" role="alert"></p>
+    <p id="newToken" class="muted" hidden></p>
+    <div class="row-actions token-dialog-actions">
+      <button id="closeCreateToken" class="button button-outline" type="button">Cancel</button>
+      <button id="createToken" type="submit">Create token</button>
+      <button id="finishCreateToken" type="button" hidden>Done</button>
+    </div>
+  </form>
+</dialog>
 <script>
 const errorBox = document.getElementById('error');
+const createDialog = document.getElementById('createTokenDialog');
 let apiTokens = [];
 
 function showError(message) { errorBox.textContent = message || ''; }
@@ -63,6 +81,7 @@ function renderTokens() {
       const button = document.createElement('button');
       button.className = 'danger';
       button.textContent = 'Revoke';
+      button.type = 'button';
       button.onclick = async () => {
         try {
           await api('/v1/tokens/' + token.id, {method:'DELETE'});
@@ -75,18 +94,56 @@ function renderTokens() {
   });
 }
 
-document.getElementById('createToken').addEventListener('click', async () => {
+document.getElementById('openCreateToken').addEventListener('click', () => {
+  document.getElementById('createTokenTitle').textContent = 'Add API token';
+  document.getElementById('dialogError').textContent = '';
+  document.getElementById('newToken').textContent = '';
+  document.getElementById('newToken').hidden = true;
+  document.getElementById('tokenFormFields').hidden = false;
+  document.getElementById('closeCreateToken').hidden = false;
+  document.getElementById('createToken').hidden = false;
+  document.getElementById('finishCreateToken').hidden = true;
+  createDialog.showModal();
+  document.getElementById('tokenName').focus();
+});
+
+document.getElementById('closeCreateToken').addEventListener('click', () => createDialog.close());
+document.getElementById('finishCreateToken').addEventListener('click', () => createDialog.close());
+createDialog.addEventListener('close', () => {
+  document.getElementById('tokenName').value = '';
+  document.getElementById('newToken').textContent = '';
+  document.getElementById('dialogError').textContent = '';
+});
+createDialog.addEventListener('click', event => {
+  if (event.target === createDialog) createDialog.close();
+});
+
+document.getElementById('createTokenForm').addEventListener('submit', async event => {
+  event.preventDefault();
   const name = document.getElementById('tokenName').value.trim();
+  const createButton = document.getElementById('createToken');
+  const dialogError = document.getElementById('dialogError');
+  dialogError.textContent = '';
+  createButton.disabled = true;
   try {
     const result = await api('/v1/tokens', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({name})
     });
-    document.getElementById('newToken').textContent = 'Copy now: ' + result.token;
-    document.getElementById('tokenName').value = '';
+    document.getElementById('createTokenTitle').textContent = 'Token created';
+    document.getElementById('tokenFormFields').hidden = true;
+    document.getElementById('newToken').textContent = 'Copy this token now. It will not be shown again: ' + result.token;
+    document.getElementById('newToken').hidden = false;
+    createButton.hidden = true;
+    document.getElementById('closeCreateToken').hidden = true;
+    document.getElementById('finishCreateToken').hidden = false;
     await refreshTokens();
-  } catch (error) { showError(error.message); }
+  } catch (error) {
+    dialogError.textContent = error.message;
+  } finally {
+    createButton.disabled = false;
+  }
 });
 
 document.getElementById('logout').addEventListener('click', async () => {

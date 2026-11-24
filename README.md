@@ -20,3 +20,13 @@ See each application's guide for configuration, deployment, and tests:
 
 - [`vault-backup` guide](cmd/vault-backup/README.md)
 - [`vault-server` guide](cmd/vault-server/README.md)
+
+## Testings
+
+- Python 3.10 or later
+
+Automation tests:
+
+ - Test actual data backup/restore [`test_data`](test_data/README.md)
+ - Test using a test server [`tests`](test/README.md)
+ 

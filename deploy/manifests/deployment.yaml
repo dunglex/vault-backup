@@ -1,0 +1,90 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vault-server
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vault-server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vault-server
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: vault-server
+          image: registry.vn.eit.zone/hr-digi/vault-server:latest
+          imagePullPolicy: Always
+          args:
+            - --addr=0.0.0.0:8200
+            - --db=/data/vault.db
+            - --audit-db=/data/audit.db
+            - --tls-cert=/var/run/vault/tls/tls.crt
+            - --tls-key=/var/run/vault/tls/tls.key
+          env:
+            - name: VAULT_SERVER_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: vault-server-env
+                  key: db-password
+          ports:
+            - name: https
+              containerPort: 8200
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /health
+              port: https
+              scheme: HTTPS
+            periodSeconds: 5
+            failureThreshold: 24
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: https
+              scheme: HTTPS
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: https
+              scheme: HTTPS
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tls
+              mountPath: /var/run/vault/tls
+              readOnly: true
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: vault-server-data
+        - name: tls
+          secret:
+            secretName: vault-server-tls
+            optional: false
