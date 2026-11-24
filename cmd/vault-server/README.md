@@ -35,6 +35,7 @@ VAULT_SERVER_HTTP_ADDR=
 VAULT_SERVER_DB=/var/lib/vault/vault.db
 VAULT_SERVER_TLS_CERT=/etc/vault/tls/server.crt
 VAULT_SERVER_TLS_KEY=/etc/vault/tls/server.key
+VAULT_SERVER_TRUSTED_PROXIES=10.0.0.0/8
 ```
 
 Start it with:
@@ -50,6 +51,8 @@ Use another file with `--env-file` or `VAULT_SERVER_ENV_FILE`:
 ```
 
 Restrict `.env` permissions to `0600` because it contains the database password.
+
+Web and LDAP-compatible username/password endpoints share a limit of five attempts per ten minutes, applied to both the client IP and account. By default, forwarding headers are ignored. If the server is behind a reverse proxy, configure `--trusted-proxies` or `VAULT_SERVER_TRUSTED_PROXIES` with the exact proxy IPs or CIDRs; only those peers may supply `X-Forwarded-For`.
 
 ## Back up server state
 

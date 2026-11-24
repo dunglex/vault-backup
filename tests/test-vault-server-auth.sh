@@ -113,3 +113,24 @@ AFTER_LOGOUT_STATUS=$(curl --insecure --silent --output /dev/null --write-out '%
   --cookie "$COOKIE_JAR" \
   "$BASE_URL/v1/secrets")
 assert_status 401 "$AFTER_LOGOUT_STATUS" "reject revoked web session"
+
+BAD_LOGIN_1=$(curl --insecure --silent --output /dev/null --write-out '%{http_code}' \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"wrong-password"}' \
+  "$BASE_URL/v1/auth/login")
+BAD_LOGIN_2=$(curl --insecure --silent --output /dev/null --write-out '%{http_code}' \
+  -H 'Content-Type: application/json' \
+  -d '{"password":"wrong-password"}' \
+  -X PUT "$BASE_URL/api/v1/auth/ldap/login/admin")
+BAD_LOGIN_3=$(curl --insecure --silent --output /dev/null --write-out '%{http_code}' \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"wrong-password"}' \
+  "$HTTP_URL/v1/auth/login")
+BAD_LOGIN_4=$(curl --insecure --silent --output /dev/null --write-out '%{http_code}' \
+  -H 'Content-Type: application/json' \
+  -d '{"password":"wrong-password"}' \
+  -X PUT "$BASE_URL/api/v1/auth/ldap/login/admin")
+assert_status 401 "$BAD_LOGIN_1" "count first failed web login"
+assert_status 401 "$BAD_LOGIN_2" "share limit with failed LDAP login"
+assert_status 401 "$BAD_LOGIN_3" "normalize client ports and listeners"
+assert_status 429 "$BAD_LOGIN_4" "throttle shared login endpoints"

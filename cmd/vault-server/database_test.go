@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"database/sql"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -346,5 +347,73 @@ func TestOpenDatabaseRejectsPlaintextDatabaseByDefault(t *testing.T) {
 	}
 	if !legacy {
 		t.Fatal("plaintext database was not detected")
+	}
+}
+
+func TestLoginAttemptsIgnoreEphemeralPorts(t *testing.T) {
+	s := &server{attempts: map[string][]time.Time{}}
+	for i := 0; i < loginAttemptLimit; i++ {
+		request := httptest.NewRequest(http.MethodPost, "/v1/auth/login", nil)
+		request.RemoteAddr = "192.0.2.10:" + strconv.Itoa(40000+i)
+		if !s.allowLoginAttempt(request, "admin") {
+			t.Fatalf("attempt %d was unexpectedly blocked", i+1)
+		}
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/auth/login", nil)
+	request.RemoteAddr = "192.0.2.10:59999"
+	if s.allowLoginAttempt(request, "other-user") {
+		t.Fatal("new ephemeral port bypassed the IP limit")
+	}
+}
+
+func TestLoginAttemptsAreLimitedPerAccount(t *testing.T) {
+	s := &server{attempts: map[string][]time.Time{}}
+	for i := 0; i < loginAttemptLimit; i++ {
+		request := httptest.NewRequest(http.MethodPost, "/v1/auth/login", nil)
+		request.RemoteAddr = fmt.Sprintf("198.51.100.%d:40000", i+1)
+		if !s.allowLoginAttempt(request, "Admin") {
+			t.Fatalf("attempt %d was unexpectedly blocked", i+1)
+		}
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/auth/login", nil)
+	request.RemoteAddr = "203.0.113.20:40000"
+	if s.allowLoginAttempt(request, "admin") {
+		t.Fatal("new source IP bypassed the account limit")
+	}
+}
+
+func TestClientIPTrustsForwardedAddressOnlyFromTrustedProxy(t *testing.T) {
+	ranges, err := parseTrustedProxies("10.0.0.0/8, 192.0.2.5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &server{trustedProxies: ranges}
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/auth/login", nil)
+	request.RemoteAddr = "10.1.2.3:40000"
+	request.Header.Set("X-Forwarded-For", "203.0.113.8")
+	if got := s.clientIP(request); got != "203.0.113.8" {
+		t.Fatalf("trusted proxy client IP = %q", got)
+	}
+
+	request.RemoteAddr = "198.51.100.10:40000"
+	if got := s.clientIP(request); got != "198.51.100.10" {
+		t.Fatalf("untrusted proxy client IP = %q", got)
+	}
+}
+
+func TestLoginAttemptWindowExpires(t *testing.T) {
+	s := &server{
+		attempts: map[string][]time.Time{
+			"ip:192.0.2.10": {time.Now().Add(-loginAttemptWindow - time.Second)},
+			"account:admin": {time.Now().Add(-loginAttemptWindow - time.Second)},
+		},
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/auth/login", nil)
+	request.RemoteAddr = "192.0.2.10:40000"
+	if !s.allowLoginAttempt(request, "admin") {
+		t.Fatal("expired attempts were not discarded")
 	}
 }

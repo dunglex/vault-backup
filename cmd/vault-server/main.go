@@ -36,12 +36,14 @@ import (
 )
 
 const (
-	databaseKeyLength = 128
-	argonTime         = uint32(3)
-	argonMemory       = uint32(64 * 1024)
-	argonThreads      = uint8(4)
-	apiTokenLifetime  = 30 * 24 * time.Hour
-	setupLifetime     = 20 * time.Minute
+	databaseKeyLength  = 128
+	argonTime          = uint32(3)
+	argonMemory        = uint32(64 * 1024)
+	argonThreads       = uint8(4)
+	apiTokenLifetime   = 30 * 24 * time.Hour
+	setupLifetime      = 20 * time.Minute
+	loginAttemptLimit  = 5
+	loginAttemptWindow = 10 * time.Minute
 )
 
 type encryptedKeyFile struct {
@@ -59,9 +61,10 @@ type server struct {
 	adminName     string
 	aead          cipher.AEAD
 
-	mu       sync.Mutex
-	sessions map[string]time.Time
-	attempts map[string][]time.Time
+	mu             sync.Mutex
+	sessions       map[string]time.Time
+	attempts       map[string][]time.Time
+	trustedProxies []*net.IPNet
 }
 
 type accountRequest struct {
@@ -97,6 +100,7 @@ func main() {
 		allowPlaintextDB = flag.Bool("allow-plaintext-db", envBool("VAULT_SERVER_ALLOW_PLAINTEXT_DB", false), "allow an existing plaintext SQLite database (insecure)")
 		envFileFlag      = flag.String("env-file", envDefault("VAULT_SERVER_ENV_FILE", ".env"), "path to .env configuration file")
 		mtlsCACert       = flag.String("mtls-ca-cert", envDefault("VAULT_SERVER_MTLS_CA_CERT", ""), "CA certificate PEM used to verify HTTPS client certificates")
+		trustedProxies   = flag.String("trusted-proxies", envDefault("VAULT_SERVER_TRUSTED_PROXIES", ""), "comma-separated proxy IP/CIDR ranges allowed to set forwarding headers")
 	)
 	flag.Parse()
 	_ = envFileFlag
@@ -208,7 +212,11 @@ func main() {
 		log.Fatal(err)
 	}
 
-	s := &server{db: db, setupKey: setupKey, setupKeyPath: setupKeyPath, setupDeadline: setupDeadline, adminName: adminName, aead: aead, sessions: map[string]time.Time{}, attempts: map[string][]time.Time{}}
+	trustedProxyRanges, err := parseTrustedProxies(*trustedProxies)
+	if err != nil {
+		log.Fatal(err)
+	}
+	s := &server{db: db, setupKey: setupKey, setupKeyPath: setupKeyPath, setupDeadline: setupDeadline, adminName: adminName, aead: aead, sessions: map[string]time.Time{}, attempts: map[string][]time.Time{}, trustedProxies: trustedProxyRanges}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.health)
 	for _, path := range []string{"/setup", "/setup.html"} {
@@ -754,23 +762,10 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ip := r.RemoteAddr
-	cutoff := time.Now().Add(-10 * time.Minute)
-	s.mu.Lock()
-	recent := s.attempts[ip][:0]
-	for _, attempt := range s.attempts[ip] {
-		if attempt.After(cutoff) {
-			recent = append(recent, attempt)
-		}
-	}
-	if len(recent) >= 5 {
-		s.mu.Unlock()
+	if !s.allowLoginAttempt(r, req.Username) {
 		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many login attempts"})
 		return
 	}
-	recent = append(recent, time.Now())
-	s.attempts[ip] = recent
-	s.mu.Unlock()
 
 	var hash string
 	if err := s.db.QueryRow("SELECT password_hash FROM accounts WHERE username = ?", req.Username).Scan(&hash); err != nil {
@@ -810,6 +805,10 @@ func (s *server) loginLDAP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
 		return
 	}
+	if !s.allowLoginAttempt(r, username) {
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many login attempts"})
+		return
+	}
 	var hash string
 	if err := s.db.QueryRow("SELECT password_hash FROM accounts WHERE username = ?", username).Scan(&hash); err != nil {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid username or password"})
@@ -829,6 +828,104 @@ func (s *server) loginLDAP(w http.ResponseWriter, r *http.Request) {
 	s.sessions[token] = time.Now().Add(30 * time.Minute)
 	s.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{"auth": map[string]any{"client_token": token}})
+}
+
+func parseTrustedProxies(value string) ([]*net.IPNet, error) {
+	var ranges []*net.IPNet
+	for _, part := range strings.Split(value, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if !strings.Contains(part, "/") {
+			ip := net.ParseIP(part)
+			if ip == nil {
+				return nil, fmt.Errorf("invalid trusted proxy address %q", part)
+			}
+			bits := 128
+			if ip.To4() != nil {
+				bits = 32
+			}
+			part += fmt.Sprintf("/%d", bits)
+		}
+		_, network, err := net.ParseCIDR(part)
+		if err != nil {
+			return nil, fmt.Errorf("invalid trusted proxy CIDR %q: %w", part, err)
+		}
+		ranges = append(ranges, network)
+	}
+	return ranges, nil
+}
+
+func (s *server) allowLoginAttempt(r *http.Request, username string) bool {
+	now := time.Now()
+	username = strings.ToLower(strings.TrimSpace(username))
+	keys := []string{"ip:" + s.clientIP(r)}
+	if username != "" {
+		keys = append(keys, "account:"+username)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cutoff := now.Add(-loginAttemptWindow)
+	for key, attempts := range s.attempts {
+		recent := attempts[:0]
+		for _, attempt := range attempts {
+			if attempt.After(cutoff) {
+				recent = append(recent, attempt)
+			}
+		}
+		if len(recent) == 0 {
+			delete(s.attempts, key)
+		} else {
+			s.attempts[key] = recent
+		}
+	}
+	for _, key := range keys {
+		if len(s.attempts[key]) >= loginAttemptLimit {
+			return false
+		}
+	}
+	for _, key := range keys {
+		s.attempts[key] = append(s.attempts[key], now)
+	}
+	return true
+}
+
+func (s *server) clientIP(r *http.Request) string {
+	peerIP := net.ParseIP(r.RemoteAddr)
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		peerIP = net.ParseIP(host)
+	}
+	if peerIP == nil {
+		return r.RemoteAddr
+	}
+	if !ipInRanges(peerIP, s.trustedProxies) {
+		return peerIP.String()
+	}
+
+	chain := make([]net.IP, 0)
+	for _, part := range strings.Split(r.Header.Get("X-Forwarded-For"), ",") {
+		if ip := net.ParseIP(strings.TrimSpace(part)); ip != nil {
+			chain = append(chain, ip)
+		}
+	}
+	chain = append(chain, peerIP)
+	for i := len(chain) - 1; i >= 0; i-- {
+		if !ipInRanges(chain[i], s.trustedProxies) {
+			return chain[i].String()
+		}
+	}
+	return peerIP.String()
+}
+
+func ipInRanges(ip net.IP, ranges []*net.IPNet) bool {
+	for _, network := range ranges {
+		if network.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *server) authorizedWeb(r *http.Request) bool {
