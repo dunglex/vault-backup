@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -415,5 +417,52 @@ func TestLoginAttemptWindowExpires(t *testing.T) {
 	request.RemoteAddr = "192.0.2.10:40000"
 	if !s.allowLoginAttempt(request, "admin") {
 		t.Fatal("expired attempts were not discarded")
+	}
+}
+
+func TestShutdownServersWaitsForActiveRequests(t *testing.T) {
+	requestStarted := make(chan struct{})
+	releaseRequest := make(chan struct{})
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(requestStarted)
+		<-releaseRequest
+		w.WriteHeader(http.StatusNoContent)
+	})}
+	go func() {
+		_ = server.Serve(listener)
+	}()
+
+	requestDone := make(chan error, 1)
+	go func() {
+		response, err := http.Get("http://" + listener.Addr().String())
+		if err == nil {
+			_ = response.Body.Close()
+		}
+		requestDone <- err
+	}()
+	<-requestStarted
+
+	shutdownDone := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		shutdownDone <- shutdownServers(ctx, []*http.Server{server})
+	}()
+
+	select {
+	case err := <-shutdownDone:
+		t.Fatalf("shutdown completed before active request drained: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseRequest)
+	if err := <-requestDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-shutdownDone; err != nil {
+		t.Fatal(err)
 	}
 }

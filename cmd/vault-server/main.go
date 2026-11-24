@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -15,6 +16,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"html/template"
@@ -23,10 +25,12 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	_ "github.com/CovenantSQL/go-sqlite3-encrypt"
@@ -44,6 +48,7 @@ const (
 	setupLifetime      = 20 * time.Minute
 	loginAttemptLimit  = 5
 	loginAttemptWindow = 10 * time.Minute
+	shutdownTimeout    = 15 * time.Second
 )
 
 type encryptedKeyFile struct {
@@ -139,7 +144,11 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			log.Printf("Could not close database cleanly: %v", err)
+		}
+	}()
 
 	if err := os.Chmod(*dbPath, 0600); err != nil && !os.IsNotExist(err) {
 		log.Fatal(err)
@@ -314,16 +323,72 @@ func main() {
 	if httpListener != nil {
 		log.Printf("Vault server serving HTTP on %s", *httpAddr)
 	}
-	errCount := 1
-	if httpListener != nil {
-		errCount++
-	}
-	errs := make(chan error, errCount)
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(signals)
+
+	errs := make(chan error, 2)
 	go func() { errs <- httpsServer.ServeTLS(httpsListener, *tlsCert, *tlsKey) }()
 	if httpListener != nil {
 		go func() { errs <- httpServer.Serve(httpListener) }()
 	}
-	log.Fatal(<-errs)
+
+	select {
+	case sig := <-signals:
+		log.Printf("Shutdown signal %s received", sig)
+		servers := []*http.Server{httpsServer}
+		if httpListener != nil {
+			servers = append(servers, httpServer)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		if err := shutdownServers(ctx, servers); err != nil {
+			log.Printf("Graceful shutdown incomplete: %v", err)
+		}
+		<-errs
+		if httpListener != nil {
+			<-errs
+		}
+		log.Printf("Vault server shut down")
+	case err := <-errs:
+		servers := []*http.Server{httpsServer}
+		if httpListener != nil {
+			servers = append(servers, httpServer)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		shutdownErr := shutdownServers(ctx, servers)
+		cancel()
+		if shutdownErr != nil {
+			log.Printf("Server cleanup failed: %v", shutdownErr)
+		}
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("Vault server stopped unexpectedly: %v", err)
+		}
+	}
+}
+
+func shutdownServers(ctx context.Context, servers []*http.Server) error {
+	results := make(chan error, len(servers))
+	for _, server := range servers {
+		go func(server *http.Server) {
+			if err := server.Shutdown(ctx); err != nil {
+				if closeErr := server.Close(); closeErr != nil && !errors.Is(closeErr, http.ErrServerClosed) {
+					results <- errors.Join(err, closeErr)
+					return
+				}
+				results <- err
+				return
+			}
+			results <- nil
+		}(server)
+	}
+	var failures []error
+	for range servers {
+		if err := <-results; err != nil {
+			failures = append(failures, err)
+		}
+	}
+	return errors.Join(failures...)
 }
 
 func envDefault(name, fallback string) string {

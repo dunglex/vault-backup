@@ -54,6 +54,8 @@ Restrict `.env` permissions to `0600` because it contains the database password.
 
 Web and LDAP-compatible username/password endpoints share a limit of five attempts per ten minutes, applied to both the client IP and account. By default, forwarding headers are ignored. If the server is behind a reverse proxy, configure `--trusted-proxies` or `VAULT_SERVER_TRUSTED_PROXIES` with the exact proxy IPs or CIDRs; only those peers may supply `X-Forwarded-For`.
 
+On `SIGINT` or `SIGTERM`, the server stops accepting new connections, drains active requests for up to 15 seconds, closes all listeners, and then closes the encrypted database connection.
+
 ## Back up server state
 
 Create a sensitive filesystem tarball containing the database, its protected key, TLS files, and optional `.env`:
