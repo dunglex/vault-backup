@@ -134,6 +134,15 @@ fi
 if [[ -f "$RESTORE_ROOT/database/vault.db-shm" ]]; then
   install -m 600 "$RESTORE_ROOT/database/vault.db-shm" "$DATA_DIR/vault.db-shm"
 fi
+if [[ -f "$RESTORE_ROOT/database/audit.db" ]]; then
+  install -m 600 "$RESTORE_ROOT/database/audit.db" "$DATA_DIR/audit.db"
+fi
+if [[ -f "$RESTORE_ROOT/database/audit.db-wal" ]]; then
+  install -m 600 "$RESTORE_ROOT/database/audit.db-wal" "$DATA_DIR/audit.db-wal"
+fi
+if [[ -f "$RESTORE_ROOT/database/audit.db-shm" ]]; then
+  install -m 600 "$RESTORE_ROOT/database/audit.db-shm" "$DATA_DIR/audit.db-shm"
+fi
 
 mkdir -p "$DATA_DIR/tls"
 chmod 700 "$DATA_DIR/tls"

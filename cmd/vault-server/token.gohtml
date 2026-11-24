@@ -4,39 +4,27 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>API Tokens - Vault Server</title>
-  <style>
-    :root { color-scheme: dark; --bg:#0b1020; --panel:#151d31; --line:#293450; --text:#edf2ff; --muted:#9da9c3; --accent:#64d2a8; --danger:#ff7b86; }
-    * { box-sizing:border-box; }
-    body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 system-ui,sans-serif; }
-    main { max-width:760px; margin:auto; padding:32px 20px; }
-    header { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:20px; }
-    h1,h2 { margin-top:0; }
-    nav,.row { display:flex; gap:8px; }
-    nav a,button { border-radius:7px; padding:9px 12px; font:inherit; font-weight:700; text-decoration:none; }
-    nav a { background:#263452; color:var(--text); }
-    .panel { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:18px; }
-    input,button { border:1px solid var(--line); border-radius:7px; padding:9px 10px; background:#0d1324; color:var(--text); }
-    input { flex:1; }
-    button { cursor:pointer; background:var(--accent); color:#07150f; border:0; }
-    button.secondary { background:#263452; color:var(--text); }
-    button.danger { background:var(--danger); color:#261016; }
-    .muted { color:var(--muted); overflow-wrap:anywhere; }
-    #tokens { list-style:none; margin:20px 0 0; padding:0; }
-    #tokens li { display:flex; align-items:center; justify-content:space-between; gap:12px; border-bottom:1px solid var(--line); padding:12px 0; }
-    #error { min-height:24px; color:var(--danger); }
-    @media(max-width:620px) { header { align-items:flex-start; flex-direction:column; } .row { flex-direction:column; } }
-  </style>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300italic,700,700italic">
+  <link rel="stylesheet" href="/normalize.css">
+  <link rel="stylesheet" href="/miligram.css">
+  <link rel="stylesheet" href="/admin.css">
 </head>
 <body>
-<main>
-  <header>
-    <h1>API tokens</h1>
-    <nav><a href="/secret.html">Secrets</a><a href="/token.html">API tokens</a><button id="logout" class="secondary">Logout</button></nav>
+<main class="app-shell">
+  <header class="app-header">
+    <h1 class="brand">Vault Server</h1>
+    <nav class="app-nav" aria-label="Admin navigation">
+      <a class="button button-outline" href="/secret.html">Secrets</a>
+      <a class="button" aria-current="page" href="/token.html">API tokens</a>
+      <a class="button button-outline" href="/audit.html">Audit log</a>
+      <button id="logout" class="button button-outline">Logout</button>
+    </nav>
   </header>
-  <div id="error" role="alert"></div>
+  <h2>API tokens</h2>
+  <div id="error" class="notice" role="alert"></div>
   <section class="panel">
-    <h2>Create token</h2>
-    <div class="row"><input id="tokenName" placeholder="Token name"><button id="createToken">Create</button></div>
+    <h3>Create token</h3>
+    <div class="row-actions"><input id="tokenName" placeholder="Token name"><button id="createToken">Create</button></div>
     <p id="newToken" class="muted"></p>
     <ul id="tokens"></ul>
   </section>

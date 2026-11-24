@@ -57,3 +57,28 @@ assert_status 200 "$DELETE_STATUS" "delete secret with web cookie"
 MISSING_STATUS=$(curl --insecure --silent --output /dev/null --write-out '%{http_code}' \
   --cookie "$COOKIE_JAR" "$BASE_URL/v1/secrets/app/database")
 assert_status 404 "$MISSING_STATUS" "confirm deleted secret is missing"
+
+AUDIT_PAGE_STATUS=$(curl --insecure --silent --output "$TMPDIR/audit.html" --write-out '%{http_code}' \
+  --cookie "$COOKIE_JAR" "$BASE_URL/audit.html")
+assert_status 200 "$AUDIT_PAGE_STATUS" "serve audit page"
+grep -q 'id="events"' "$TMPDIR/audit.html" || fail "audit page is missing events table"
+
+AUDIT_BODY=$(curl --insecure --silent --show-error --fail --cookie "$COOKIE_JAR" \
+  "$BASE_URL/v1/audit?action=update&q=app%2Fdatabase")
+printf '%s' "$AUDIT_BODY" | grep -q '"action":"update"' || fail "audit update action missing"
+printf '%s' "$AUDIT_BODY" | grep -q '"resource":"app/database"' || fail "audit resource missing"
+printf '%s' "$AUDIT_BODY" | grep -q '"actor":"admin"' || fail "audit actor missing"
+echo "PASS: filter secret CRUD audit events"
+
+AUDIT_ALL=$(curl --insecure --silent --show-error --fail --cookie "$COOKIE_JAR" "$BASE_URL/v1/audit")
+printf '%s' "$AUDIT_ALL" | grep -q 'db-password' && fail "audit log contains secret data"
+printf '%s' "$AUDIT_ALL" | grep -q 'rotated-password' && fail "audit log contains updated secret data"
+
+AUDIT_DELETE=$(curl --insecure --silent --show-error --fail --cookie "$COOKIE_JAR" \
+  "$BASE_URL/v1/audit?action=delete")
+printf '%s' "$AUDIT_DELETE" | grep -q '"action":"delete"' || fail "audit delete action missing"
+echo "PASS: audit delete event"
+
+AUDIT_UNAUTH=$(curl --insecure --silent --output /dev/null --write-out '%{http_code}' \
+  "$BASE_URL/v1/audit")
+assert_status 401 "$AUDIT_UNAUTH" "reject unauthenticated audit access"

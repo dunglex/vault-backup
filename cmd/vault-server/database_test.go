@@ -26,6 +26,7 @@ func TestPageTemplatesRenderStandalonePages(t *testing.T) {
 		{"login.gohtml", []string{`id="loginForm"`, "/v1/auth/login"}},
 		{"secret.gohtml", []string{`id="paths"`, `id="secretPath"`, "async function refresh()"}},
 		{"token.gohtml", []string{`id="tokens"`, `id="createToken"`, "async function refreshTokens()"}},
+		{"audit.gohtml", []string{`id="events"`, "/v1/audit", "async function refresh()"}},
 		{"401.gohtml", []string{"401", "Go to login"}},
 		{"404.gohtml", []string{"404", "Page not found"}},
 		{"lock.gohtml", []string{"423", "Setup locked"}},
@@ -133,7 +134,12 @@ func TestHealthChecksDatabaseConnection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &server{db: db}
+	auditDB, err := openAuditDatabase(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer auditDB.Close()
+	s := &server{db: db, auditDB: auditDB}
 
 	healthy := httptest.NewRecorder()
 	s.health(healthy, httptest.NewRequest(http.MethodGet, "/health", nil))
@@ -148,6 +154,37 @@ func TestHealthChecksDatabaseConnection(t *testing.T) {
 	s.health(unhealthy, httptest.NewRequest(http.MethodGet, "/health", nil))
 	if unhealthy.Code != http.StatusServiceUnavailable || unhealthy.Body.String() != "{\"ok\":false}\n" {
 		t.Fatalf("unhealthy response = %d %q", unhealthy.Code, unhealthy.Body.String())
+	}
+}
+
+func TestOpenAuditDatabaseIsSeparateAndQueryable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.db")
+	db, err := openAuditDatabase(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if _, err := db.Exec(`
+		INSERT INTO audit_events(created_at, action, outcome, actor, client_ip, source, resource, detail)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		time.Now().Unix(), "read", "success", "admin", "127.0.0.1", "web", "app/database", "",
+	); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM audit_events").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("audit event count = %d, want 1", count)
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(contents), "SQLite format 3\x00") {
+		t.Fatal("audit database is not plaintext SQLite")
 	}
 }
 

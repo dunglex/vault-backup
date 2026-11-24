@@ -33,6 +33,7 @@ VAULT_SERVER_DB_PASSWORD=use-a-long-random-password
 VAULT_SERVER_ADDR=127.0.0.1:8200
 VAULT_SERVER_HTTP_ADDR=
 VAULT_SERVER_DB=/var/lib/vault/vault.db
+VAULT_SERVER_AUDIT_DB=/var/lib/vault/audit.db
 VAULT_SERVER_TLS_CERT=/etc/vault/tls/server.crt
 VAULT_SERVER_TLS_KEY=/etc/vault/tls/server.key
 VAULT_SERVER_TRUSTED_PROXIES=10.0.0.0/8
@@ -51,6 +52,8 @@ Use another file with `--env-file` or `VAULT_SERVER_ENV_FILE`:
 ```
 
 Restrict `.env` permissions to `0600` because it contains the database password.
+
+Security events are stored separately in a plaintext SQLite audit database. It defaults to `audit.db` alongside the main encrypted database and can be overridden with `--audit-db` or `VAULT_SERVER_AUDIT_DB`. The audit database stores event metadata only and never stores secret values or raw tokens.
 
 Web and LDAP-compatible username/password endpoints share a limit of five attempts per ten minutes, applied to both the client IP and account. By default, forwarding headers are ignored. If the server is behind a reverse proxy, configure `--trusted-proxies` or `VAULT_SERVER_TRUSTED_PROXIES` with the exact proxy IPs or CIDRs; only those peers may supply `X-Forwarded-For`.
 
@@ -71,6 +74,7 @@ Create a sensitive filesystem tarball containing the database, its protected key
 ```
 
 The archive is created with mode `0600` and includes SHA-256 checksums in `vault-server/manifest.txt`. Stop or quiesce the server before backup for the most consistent database snapshot.
+The main database, protected key, and separate audit database are included.
 
 Restore a backup into a clean `/data` directory:
 
@@ -215,6 +219,10 @@ curl --cacert /path/to/ca.pem \
 ```
 
 Web routes such as `/`, `/v1/setup`, `/v1/auth/login`, and `/v1/secrets/...` use an HttpOnly session cookie.
+
+## Audit log
+
+Authenticated administrators can open `/audit.html` to search and filter successful and failed login events plus secret list, read, create, update, and delete activity from both the web panel and managed-token `/api/...` endpoints. API token identities are recorded as truncated SHA-256 fingerprints, never raw tokens. Filters cover text, actor, source, action, outcome, and date range. The backing `/v1/audit` endpoint uses the web session cookie and is limited to 500 events per response.
 
 ## Test
 

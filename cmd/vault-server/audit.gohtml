@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Audit log - Vault Server</title>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300italic,700,700italic">
+  <link rel="stylesheet" href="/normalize.css">
+  <link rel="stylesheet" href="/miligram.css">
+  <link rel="stylesheet" href="/admin.css">
+</head>
+<body>
+<main class="app-shell">
+  <header class="app-header">
+    <h1 class="brand">Vault Server</h1>
+    <nav class="app-nav" aria-label="Admin navigation">
+      <a class="button button-outline" href="/secret.html">Secrets</a>
+      <a class="button button-outline" href="/token.html">API tokens</a>
+      <a class="button" aria-current="page" href="/audit.html">Audit log</a>
+      <button id="logout" class="button button-outline">Logout</button>
+    </nav>
+  </header>
+  <h2>Audit log</h2>
+  <div id="error" class="notice" role="alert"></div>
+  <section class="panel">
+    <div class="filters">
+      <label>Search<input id="q" placeholder="Actor, resource, or detail"></label>
+      <label>Actor<input id="actor" placeholder="Exact actor"></label>
+      <label>Action<select id="action"><option value="">All</option><option>login</option><option>list</option><option>read</option><option>create</option><option>update</option><option>delete</option></select></label>
+      <label>Outcome<select id="outcome"><option value="">All</option><option>success</option><option>failure</option></select></label>
+      <label>Source<select id="source"><option value="">All</option><option>web</option><option>api</option></select></label>
+      <label>From<input id="from" type="date"></label>
+      <label>To<input id="to" type="date"></label>
+      <button id="filter">Filter</button>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Time (UTC)</th><th>Actor</th><th>Action</th><th>Outcome</th><th>Source</th><th>Client IP</th><th>Resource / detail</th></tr></thead>
+        <tbody id="events"></tbody>
+      </table>
+    </div>
+    <div class="pager"><span id="summary"></span><div class="row-actions"><button id="previous" class="button-outline">Previous</button><button id="next" class="button-outline">Next</button></div></div>
+  </section>
+</main>
+<script>
+const errorBox = document.getElementById('error');
+let offset = 0;
+const limit = 100;
+
+async function api(url, options = {}) {
+  options.credentials = 'same-origin';
+  const response = await fetch(url, options);
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    if (response.status === 401) location.assign('/401.html');
+    throw new Error(body.error || 'Request failed');
+  }
+  return body;
+}
+
+function textCell(row, value, className = '') {
+  const cell = row.insertCell();
+  cell.textContent = value || '-';
+  if (className) cell.className = className;
+}
+
+async function refresh() {
+  try {
+    const params = new URLSearchParams({limit, offset});
+    for (const id of ['q','actor','action','outcome','source','from','to']) {
+      const value = document.getElementById(id).value.trim();
+      if (value) params.set(id, value);
+    }
+    const result = await api('/v1/audit?' + params);
+    const body = document.getElementById('events');
+    body.replaceChildren();
+    for (const event of result.events) {
+      const row = body.insertRow();
+      textCell(row, event.created_at);
+      textCell(row, event.actor);
+      textCell(row, event.action);
+      textCell(row, event.outcome, event.outcome);
+      textCell(row, event.source);
+      textCell(row, event.client_ip);
+      textCell(row, [event.resource, event.detail].filter(Boolean).join(' - '));
+    }
+    document.getElementById('summary').textContent = `${result.total} event${result.total === 1 ? '' : 's'}; showing ${result.events.length}`;
+    document.getElementById('previous').disabled = offset === 0;
+    document.getElementById('next').disabled = offset + result.events.length >= result.total;
+    errorBox.textContent = '';
+  } catch (error) {
+    errorBox.textContent = error.message;
+  }
+}
+
+document.getElementById('filter').onclick = () => { offset = 0; refresh(); };
+document.getElementById('previous').onclick = () => { offset = Math.max(0, offset - limit); refresh(); };
+document.getElementById('next').onclick = () => { offset += limit; refresh(); };
+document.getElementById('logout').onclick = async () => {
+  try { await api('/v1/auth/logout', {method:'POST'}); } catch (_) {}
+  location.assign('/login.html');
+};
+document.addEventListener('keydown', event => {
+  if (event.key === 'Enter') { offset = 0; refresh(); }
+});
+refresh();
+</script>
+</body>
+</html>

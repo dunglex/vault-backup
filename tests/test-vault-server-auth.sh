@@ -65,6 +65,18 @@ LDAP_API_STATUS=$(curl --insecure --silent --output /dev/null --write-out '%{htt
   "$BASE_URL/api/v1/kv/data/session/test")
 assert_status 401 "$LDAP_API_STATUS" "reject LDAP login token on API endpoints"
 
+FAILED_LOGIN_STATUS=$(curl --insecure --silent --output /dev/null --write-out '%{http_code}' \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"wrong-password"}' \
+  "$BASE_URL/v1/auth/login")
+assert_status 401 "$FAILED_LOGIN_STATUS" "failed login for audit"
+
+LOGIN_AUDIT=$(curl --insecure --silent --show-error --fail --cookie "$COOKIE_JAR" \
+  "$BASE_URL/v1/audit?action=login")
+printf '%s' "$LOGIN_AUDIT" | grep -q '"outcome":"success"' || fail "successful login audit missing"
+printf '%s' "$LOGIN_AUDIT" | grep -q '"outcome":"failure"' || fail "failed login audit missing"
+echo "PASS: audit successful and failed logins"
+
 UNAUTH_STATUS=$(curl --insecure --silent --output /dev/null --write-out '%{http_code}' "$BASE_URL/v1/secrets")
 assert_status 401 "$UNAUTH_STATUS" "reject unauthorized web secret list"
 
@@ -88,6 +100,26 @@ TOKEN_PUT_STATUS=$(curl --insecure --silent --output /dev/null --write-out '%{ht
   -d '{"data":{"managed":"token"}}' \
   -X PUT "$BASE_URL/api/v1/kv/data/token/test")
 assert_status 200 "$TOKEN_PUT_STATUS" "authenticate with managed API token"
+
+TOKEN_GET_STATUS=$(curl --insecure --silent --output /dev/null --write-out '%{http_code}' \
+  -H "X-Vault-Token: $API_TOKEN" \
+  "$BASE_URL/api/v1/kv/data/token/test")
+assert_status 200 "$TOKEN_GET_STATUS" "read secret with managed API token"
+
+TOKEN_BAD_REQUEST_STATUS=$(curl --insecure --silent --output /dev/null --write-out '%{http_code}' \
+  -H "X-Vault-Token: $API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"invalid":true}' \
+  -X PUT "$BASE_URL/api/v1/kv/data/token/test")
+assert_status 400 "$TOKEN_BAD_REQUEST_STATUS" "reject invalid managed API request"
+
+API_AUDIT=$(curl --insecure --silent --show-error --fail --cookie "$COOKIE_JAR" \
+  "$BASE_URL/v1/audit?source=api&q=token%2Ftest")
+printf '%s' "$API_AUDIT" | grep -q '"action":"create"' || fail "API create audit missing"
+printf '%s' "$API_AUDIT" | grep -q '"action":"read"' || fail "API read audit missing"
+printf '%s' "$API_AUDIT" | grep -q '"outcome":"failure"' || fail "API failed request audit missing"
+printf '%s' "$API_AUDIT" | grep -q '"source":"api"' || fail "API audit source missing"
+echo "PASS: audit successful and failed managed API operations"
 
 TOKEN_LIST=$(curl --insecure --silent --show-error --fail --cookie "$COOKIE_JAR" "$BASE_URL/v1/tokens")
 printf '%s' "$TOKEN_LIST" | grep -q '"name":"backup-agent"' || fail "list API token"
@@ -132,5 +164,5 @@ BAD_LOGIN_4=$(curl --insecure --silent --output /dev/null --write-out '%{http_co
   -X PUT "$BASE_URL/api/v1/auth/ldap/login/admin")
 assert_status 401 "$BAD_LOGIN_1" "count first failed web login"
 assert_status 401 "$BAD_LOGIN_2" "share limit with failed LDAP login"
-assert_status 401 "$BAD_LOGIN_3" "normalize client ports and listeners"
+assert_status 429 "$BAD_LOGIN_3" "normalize client ports and listeners"
 assert_status 429 "$BAD_LOGIN_4" "throttle shared login endpoints"

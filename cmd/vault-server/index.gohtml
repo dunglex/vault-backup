@@ -5,9 +5,15 @@
   <meta http-equiv="refresh" content="0; url={{.Destination}}">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Vault Server</title>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300italic,700,700italic">
+  <link rel="stylesheet" href="/normalize.css">
+  <link rel="stylesheet" href="/miligram.css">
+  <link rel="stylesheet" href="/admin.css">
 </head>
-<body>
-  <p>Redirecting to <a href="{{.Destination}}">{{.Destination}}</a>...</p>
+<body class="status-page">
+  <main class="panel status-card">
+    <p>Redirecting to <a href="{{.Destination}}">{{.Destination}}</a>...</p>
+  </main>
   <script>location.replace({{.Destination}});</script>
 </body>
 </html>

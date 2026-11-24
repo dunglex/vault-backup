@@ -12,6 +12,7 @@ Usage: backup-vault-server.sh [options]
 Options:
   -o, --output PATH         Archive path (default: ./backups/vault-server-backup-YYYYMMDD-HHMMSS.tar.gz)
       --db PATH             SQLite database path (default: VAULT_SERVER_DB or tests/data/vault.db)
+      --audit-db PATH       Audit database path (default: alongside the main database as audit.db)
       --env-file PATH       Server .env file to include (default: VAULT_SERVER_ENV_FILE or ./.env)
       --tls-cert PATH       Server TLS certificate (default: VAULT_SERVER_TLS_CERT)
       --tls-key PATH        Server TLS private key (default: VAULT_SERVER_TLS_KEY)
@@ -28,6 +29,7 @@ ENV_FILE="${VAULT_SERVER_ENV_FILE:-$ROOT_DIR/.env}"
 TLS_CERT="${VAULT_SERVER_TLS_CERT:-}"
 TLS_KEY="${VAULT_SERVER_TLS_KEY:-}"
 MTLS_CA_CERT="${VAULT_SERVER_MTLS_CA_CERT:-}"
+AUDIT_DB_PATH="${VAULT_SERVER_AUDIT_DB:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -39,6 +41,11 @@ while [[ $# -gt 0 ]]; do
     --db)
       [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; exit 2; }
       DB_PATH=$2
+      shift 2
+      ;;
+    --audit-db)
+      [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; exit 2; }
+      AUDIT_DB_PATH=$2
       shift 2
       ;;
     --env-file)
@@ -75,6 +82,11 @@ done
 
 if [[ "$DB_PATH" != /* ]]; then
   DB_PATH="$ROOT_DIR/$DB_PATH"
+fi
+if [[ -z "$AUDIT_DB_PATH" ]]; then
+  AUDIT_DB_PATH="$(dirname "$DB_PATH")/audit.db"
+elif [[ "$AUDIT_DB_PATH" != /* ]]; then
+  AUDIT_DB_PATH="$ROOT_DIR/$AUDIT_DB_PATH"
 fi
 if [[ "$ENV_FILE" != /* && -n "$ENV_FILE" ]]; then
   ENV_FILE="$ROOT_DIR/$ENV_FILE"
@@ -116,6 +128,9 @@ copy_file "$DB_PATH" "database" "vault.db"
 copy_file "${DB_PATH}-wal" "database" "vault.db-wal"
 copy_file "${DB_PATH}-shm" "database" "vault.db-shm"
 copy_file "${DB_PATH}.key" "database" "vault.db.key"
+copy_file "$AUDIT_DB_PATH" "database" "audit.db"
+copy_file "${AUDIT_DB_PATH}-wal" "database" "audit.db-wal"
+copy_file "${AUDIT_DB_PATH}-shm" "database" "audit.db-shm"
 copy_file "$TLS_CERT" "tls" "server.crt"
 copy_file "$TLS_KEY" "tls" "server.key"
 copy_file "$MTLS_CA_CERT" "tls" "client-ca.crt"
@@ -123,6 +138,10 @@ copy_file "$ENV_FILE" "config" ".env"
 
 if [[ ! -f "$ARCHIVE_DIR/database/vault.db.key" ]]; then
   echo "Protected database key not found: ${DB_PATH}.key" >&2
+  exit 1
+fi
+if [[ ! -f "$ARCHIVE_DIR/database/audit.db" ]]; then
+  echo "Audit database not found: $AUDIT_DB_PATH" >&2
   exit 1
 fi
 

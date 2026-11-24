@@ -60,6 +60,7 @@ type encryptedKeyFile struct {
 
 type server struct {
 	db            *sql.DB
+	auditDB       *sql.DB
 	setupKey      string
 	setupKeyPath  string
 	setupDeadline time.Time
@@ -83,7 +84,7 @@ type secretRequest struct {
 	Data map[string]any `json:"data"`
 }
 
-//go:embed *.gohtml
+//go:embed *.gohtml *.css
 var embeddedFiles embed.FS
 
 var pageTemplate = template.Must(template.ParseFS(embeddedFiles, "*.gohtml"))
@@ -99,6 +100,7 @@ func main() {
 		addr             = flag.String("addr", envDefault("VAULT_SERVER_ADDR", "127.0.0.1:8200"), "HTTPS server address")
 		httpAddr         = flag.String("http-addr", envDefault("VAULT_SERVER_HTTP_ADDR", ""), "HTTP server address (disabled by default)")
 		dbPath           = flag.String("db", envDefault("VAULT_SERVER_DB", "vault.db"), "path to database file")
+		auditDBPath      = flag.String("audit-db", envDefault("VAULT_SERVER_AUDIT_DB", ""), "path to plaintext audit database file (default: alongside main database)")
 		tlsCert          = flag.String("tls-cert", envDefault("VAULT_SERVER_TLS_CERT", ""), "path to TLS certificate PEM")
 		tlsKey           = flag.String("tls-key", envDefault("VAULT_SERVER_TLS_KEY", ""), "path to TLS private key PEM")
 		dbPassword       = flag.String("db-password", envDefault("VAULT_SERVER_DB_PASSWORD", ""), "password used to decrypt the database key file")
@@ -125,8 +127,21 @@ func main() {
 		log.Fatal(err)
 	}
 	*dbPath = filepath.Clean(resolvedDB)
+	*auditDBPath = strings.TrimSpace(*auditDBPath)
+	if *auditDBPath == "" {
+		*auditDBPath = filepath.Join(filepath.Dir(*dbPath), "audit.db")
+	}
+	resolvedAuditDB, err := filepath.Abs(*auditDBPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	*auditDBPath = filepath.Clean(resolvedAuditDB)
+	if *auditDBPath == *dbPath {
+		log.Fatal("audit database path must differ from the encrypted main database path")
+	}
 
-	if dir := filepath.Dir(*dbPath); dir != "." {
+	databaseDirs := []string{filepath.Dir(*dbPath), filepath.Dir(*auditDBPath)}
+	for _, dir := range databaseDirs {
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			log.Fatal(err)
 		}
@@ -149,6 +164,18 @@ func main() {
 			log.Printf("Could not close database cleanly: %v", err)
 		}
 	}()
+	auditDB, err := openAuditDatabase(*auditDBPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer func() {
+		if err := auditDB.Close(); err != nil {
+			log.Printf("Could not close audit database cleanly: %v", err)
+		}
+	}()
+	if err := os.Chmod(*auditDBPath, 0600); err != nil {
+		log.Fatal(err)
+	}
 
 	if err := os.Chmod(*dbPath, 0600); err != nil && !os.IsNotExist(err) {
 		log.Fatal(err)
@@ -225,9 +252,12 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	s := &server{db: db, setupKey: setupKey, setupKeyPath: setupKeyPath, setupDeadline: setupDeadline, adminName: adminName, aead: aead, sessions: map[string]time.Time{}, attempts: map[string][]time.Time{}, trustedProxies: trustedProxyRanges}
+	s := &server{db: db, auditDB: auditDB, setupKey: setupKey, setupKeyPath: setupKeyPath, setupDeadline: setupDeadline, adminName: adminName, aead: aead, sessions: map[string]time.Time{}, attempts: map[string][]time.Time{}, trustedProxies: trustedProxyRanges}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.health)
+	mux.HandleFunc("GET /normalize.css", serveEmbeddedAsset("normalize.css", "text/css; charset=utf-8"))
+	mux.HandleFunc("GET /miligram.css", serveEmbeddedAsset("miligram.css", "text/css; charset=utf-8"))
+	mux.HandleFunc("GET /admin.css", serveEmbeddedAsset("admin.css", "text/css; charset=utf-8"))
 	for _, path := range []string{"/setup", "/setup.html"} {
 		mux.HandleFunc("GET "+path, s.serveSetup)
 	}
@@ -242,6 +272,9 @@ func main() {
 	}
 	for _, path := range []string{"/token", "/token.html"} {
 		mux.HandleFunc("GET "+path, s.serveTokens)
+	}
+	for _, path := range []string{"/audit", "/audit.html"} {
+		mux.HandleFunc("GET "+path, s.serveAudit)
 	}
 	for _, path := range []string{"/401", "/401.html"} {
 		mux.HandleFunc("GET "+path, s.serveUnauthorized)
@@ -262,6 +295,7 @@ func main() {
 	mux.HandleFunc("POST /v1/tokens", s.createAPIToken)
 	mux.HandleFunc("GET /v1/tokens", s.listAPITokens)
 	mux.HandleFunc("DELETE /v1/tokens/{id}", s.revokeAPIToken)
+	mux.HandleFunc("GET /v1/audit", s.listAuditEvents)
 
 	// API endpoints: require bearer/X-Vault-Token authentication.
 	mux.HandleFunc("GET /api/health", s.health)
@@ -318,7 +352,7 @@ func main() {
 	if setupKey != "" {
 		fmt.Printf("Vault setup key: %s\n", setupKey)
 	}
-	log.Printf("Vault server listening on %s (SQLite: %s)", *addr, *dbPath)
+	log.Printf("Vault server listening on %s (SQLite: %s; audit: %s)", *addr, *dbPath, *auditDBPath)
 	log.Printf("Vault server serving HTTPS on %s", *addr)
 	if httpListener != nil {
 		log.Printf("Vault server serving HTTP on %s", *httpAddr)
@@ -531,6 +565,35 @@ func openDatabaseWithOptions(path string, key []byte, allowPlaintext bool) (*sql
 	}
 	db.SetMaxOpenConns(1)
 	return db, legacyDatabase, nil
+}
+
+func openAuditDatabase(path string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)")
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS audit_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			created_at INTEGER NOT NULL,
+			action TEXT NOT NULL,
+			outcome TEXT NOT NULL,
+			actor TEXT NOT NULL,
+			client_ip TEXT NOT NULL,
+			source TEXT NOT NULL,
+			resource TEXT NOT NULL,
+			detail TEXT NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_audit_events_created_at ON audit_events(created_at DESC);
+		CREATE INDEX IF NOT EXISTS idx_audit_events_action ON audit_events(action);
+		CREATE INDEX IF NOT EXISTS idx_audit_events_outcome ON audit_events(outcome);
+		CREATE INDEX IF NOT EXISTS idx_audit_events_actor ON audit_events(actor);
+	`); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return db, nil
 }
 
 func randomKey() string {
@@ -749,7 +812,7 @@ func (s *server) decrypt(encoded string) ([]byte, error) {
 
 func (s *server) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Security-Policy", "default-src 'none'; connect-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'")
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; connect-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' https://fonts.googleapis.com 'unsafe-inline'; font-src https://fonts.gstatic.com; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'")
 		w.Header().Set("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
@@ -758,6 +821,19 @@ func (s *server) securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("Cache-Control", "no-store")
 		next.ServeHTTP(w, r)
 	})
+}
+
+func serveEmbeddedAsset(name, contentType string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		data, err := embeddedFiles.ReadFile(name)
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", contentType)
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		_, _ = w.Write(data)
+	}
 }
 
 func (s *server) setupLockAPIs(next http.Handler) http.Handler {
@@ -776,6 +852,11 @@ func (s *server) health(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	var result int
 	if s.db == nil || s.db.QueryRowContext(ctx, "SELECT 1").Scan(&result) != nil || result != 1 {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]bool{"ok": false})
+		return
+	}
+	result = 0
+	if s.auditDB == nil || s.auditDB.QueryRowContext(ctx, "SELECT 1").Scan(&result) != nil || result != 1 {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]bool{"ok": false})
 		return
 	}
@@ -830,21 +911,25 @@ func (s *server) setup(w http.ResponseWriter, r *http.Request) {
 func (s *server) login(w http.ResponseWriter, r *http.Request) {
 	var req accountRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.recordAuditEvent(r, "login", "failure", "unknown", "web", "", "invalid_request")
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
 		return
 	}
 
 	if !s.allowLoginAttempt(r, req.Username) {
+		s.recordAuditEvent(r, "login", "failure", req.Username, "web", "", "rate_limited")
 		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many login attempts"})
 		return
 	}
 
 	var hash string
 	if err := s.db.QueryRow("SELECT password_hash FROM accounts WHERE username = ?", req.Username).Scan(&hash); err != nil {
+		s.recordAuditEvent(r, "login", "failure", req.Username, "web", "", "invalid_credentials")
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid username or password"})
 		return
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(req.Password)); err != nil {
+		s.recordAuditEvent(r, "login", "failure", req.Username, "web", "", "invalid_credentials")
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid username or password"})
 		return
 	}
@@ -867,6 +952,7 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteStrictMode,
 		MaxAge:   int((30 * time.Minute).Seconds()),
 	})
+	s.recordAuditEvent(r, "login", "success", req.Username, "web", "", "")
 	writeJSON(w, http.StatusOK, map[string]string{"token": token})
 }
 
@@ -874,19 +960,23 @@ func (s *server) loginLDAP(w http.ResponseWriter, r *http.Request) {
 	username := r.PathValue("username")
 	var req accountRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.recordAuditEvent(r, "login", "failure", username, "api", "", "invalid_request")
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
 		return
 	}
 	if !s.allowLoginAttempt(r, username) {
+		s.recordAuditEvent(r, "login", "failure", username, "api", "", "rate_limited")
 		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many login attempts"})
 		return
 	}
 	var hash string
 	if err := s.db.QueryRow("SELECT password_hash FROM accounts WHERE username = ?", username).Scan(&hash); err != nil {
+		s.recordAuditEvent(r, "login", "failure", username, "api", "", "invalid_credentials")
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid username or password"})
 		return
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(req.Password)); err != nil {
+		s.recordAuditEvent(r, "login", "failure", username, "api", "", "invalid_credentials")
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid username or password"})
 		return
 	}
@@ -899,7 +989,50 @@ func (s *server) loginLDAP(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.sessions[token] = time.Now().Add(30 * time.Minute)
 	s.mu.Unlock()
+	s.recordAuditEvent(r, "login", "success", username, "api", "", "")
 	writeJSON(w, http.StatusOK, map[string]any{"auth": map[string]any{"client_token": token}})
+}
+
+func (s *server) recordAuditEvent(r *http.Request, action, outcome, actor, source, resource, detail string) {
+	if s.auditDB == nil {
+		return
+	}
+	actor = strings.TrimSpace(actor)
+	if actor == "" {
+		actor = "unknown"
+	}
+	if len(actor) > 128 {
+		actor = actor[:128]
+	}
+	if len(resource) > 1024 {
+		resource = resource[:1024]
+	}
+	if len(detail) > 1024 {
+		detail = detail[:1024]
+	}
+	_, err := s.auditDB.Exec(`
+		INSERT INTO audit_events(created_at, action, outcome, actor, client_ip, source, resource, detail)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		time.Now().Unix(), action, outcome, actor, s.clientIP(r), source, resource, detail,
+	)
+	if err != nil {
+		log.Printf("WARNING: could not write audit event %s/%s: %v", action, outcome, err)
+	}
+}
+
+func (s *server) auditRequestActor(r *http.Request, source string) string {
+	if source == "web" {
+		return s.adminName
+	}
+	token := r.Header.Get("X-Vault-Token")
+	if token == "" {
+		token = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	}
+	if token == "" {
+		return "anonymous"
+	}
+	sum := sha256.Sum256([]byte(token))
+	return "api-token:" + hex.EncodeToString(sum[:6])
 }
 
 func parseTrustedProxies(value string) ([]*net.IPNet, error) {
@@ -1181,75 +1314,100 @@ func (s *server) revokeAPIToken(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) getKVSecret(w http.ResponseWriter, r *http.Request) {
+	source, path := "api", r.PathValue("mount")+"/"+r.PathValue("path")
 	if !s.kvAuthorized(r) {
+		s.recordAuditEvent(r, "read", "failure", s.auditRequestActor(r, source), source, path, "unauthorized")
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
-	path := r.PathValue("mount") + "/" + r.PathValue("path")
 	var encrypted string
 	if err := s.db.QueryRow("SELECT data FROM secrets WHERE path = ?", path).Scan(&encrypted); err != nil {
+		s.recordAuditEvent(r, "read", "failure", s.auditRequestActor(r, source), source, path, "not_found")
 		writeJSON(w, http.StatusNotFound, map[string]any{"errors": []string{"secret not found"}})
 		return
 	}
 	plaintext, err := s.decrypt(encrypted)
 	if err != nil {
+		s.recordAuditEvent(r, "read", "failure", s.auditRequestActor(r, source), source, path, "storage_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "invalid stored secret"})
 		return
 	}
 	var data map[string]any
 	if err := json.Unmarshal(plaintext, &data); err != nil {
+		s.recordAuditEvent(r, "read", "failure", s.auditRequestActor(r, source), source, path, "storage_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "invalid stored secret"})
 		return
 	}
+	s.recordAuditEvent(r, "read", "success", s.auditRequestActor(r, source), source, path, "")
 	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"data": data}})
 }
 
 func (s *server) putKVSecret(w http.ResponseWriter, r *http.Request) {
+	source, path := "api", r.PathValue("mount")+"/"+r.PathValue("path")
 	if !s.kvAuthorized(r) {
+		s.recordAuditEvent(r, "update", "failure", s.auditRequestActor(r, source), source, path, "unauthorized")
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	action := "create"
+	var exists int
+	if err := s.db.QueryRow("SELECT 1 FROM secrets WHERE path = ?", path).Scan(&exists); err == nil {
+		action = "update"
+	} else if err != sql.ErrNoRows {
+		s.recordAuditEvent(r, action, "failure", s.auditRequestActor(r, source), source, path, "storage_error")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not store secret"})
 		return
 	}
 	var req struct {
 		Data map[string]any `json:"data"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Data == nil {
+		s.recordAuditEvent(r, action, "failure", s.auditRequestActor(r, source), source, path, "invalid_request")
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid secret data"})
 		return
 	}
 	plaintext, err := json.Marshal(req.Data)
 	if err != nil {
+		s.recordAuditEvent(r, action, "failure", s.auditRequestActor(r, source), source, path, "invalid_request")
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid secret data"})
 		return
 	}
 	encrypted, err := s.encrypt(plaintext)
 	if err != nil {
+		s.recordAuditEvent(r, action, "failure", s.auditRequestActor(r, source), source, path, "storage_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not store secret"})
 		return
 	}
-	path := r.PathValue("mount") + "/" + r.PathValue("path")
 	if _, err := s.db.Exec(`INSERT INTO secrets(path, data, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(path) DO UPDATE SET data = excluded.data, updated_at = CURRENT_TIMESTAMP`, path, encrypted); err != nil {
+		s.recordAuditEvent(r, action, "failure", s.auditRequestActor(r, source), source, path, "storage_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not store secret"})
 		return
 	}
+	s.recordAuditEvent(r, action, "success", s.auditRequestActor(r, source), source, path, "")
 	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"version": 1}})
 }
 
 func (s *server) deleteKVSecret(w http.ResponseWriter, r *http.Request) {
+	source, path := "api", r.PathValue("mount")+"/"+r.PathValue("path")
 	if !s.kvAuthorized(r) {
+		s.recordAuditEvent(r, "delete", "failure", s.auditRequestActor(r, source), source, path, "unauthorized")
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
-	path := r.PathValue("mount") + "/" + r.PathValue("path")
 	if _, err := s.db.Exec("DELETE FROM secrets WHERE path = ?", path); err != nil {
+		s.recordAuditEvent(r, "delete", "failure", s.auditRequestActor(r, source), source, path, "storage_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not delete secret"})
 		return
 	}
+	s.recordAuditEvent(r, "delete", "success", s.auditRequestActor(r, source), source, path, "")
 	writeJSON(w, http.StatusNoContent, nil)
 }
 
 func (s *server) listKVMetadata(w http.ResponseWriter, r *http.Request) {
+	source := "api"
 	if !s.kvAuthorized(r) {
+		s.recordAuditEvent(r, "list", "failure", s.auditRequestActor(r, source), source, r.PathValue("mount")+"/"+r.PathValue("path"), "unauthorized")
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
@@ -1260,6 +1418,7 @@ func (s *server) listKVMetadata(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := s.db.Query("SELECT path FROM secrets WHERE path LIKE ? ORDER BY path", prefix+"%")
 	if err != nil {
+		s.recordAuditEvent(r, "list", "failure", s.auditRequestActor(r, source), source, r.PathValue("mount")+"/"+r.PathValue("path"), "storage_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not list secrets"})
 		return
 	}
@@ -1268,6 +1427,7 @@ func (s *server) listKVMetadata(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var path string
 		if err := rows.Scan(&path); err != nil {
+			s.recordAuditEvent(r, "list", "failure", s.auditRequestActor(r, source), source, r.PathValue("mount")+"/"+r.PathValue("path"), "storage_error")
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read secrets"})
 			return
 		}
@@ -1277,18 +1437,20 @@ func (s *server) listKVMetadata(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err := rows.Err(); err != nil {
+		s.recordAuditEvent(r, "list", "failure", s.auditRequestActor(r, source), source, r.PathValue("mount")+"/"+r.PathValue("path"), "storage_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not list secrets"})
 		return
 	}
+	s.recordAuditEvent(r, "list", "success", s.auditRequestActor(r, source), source, r.PathValue("mount")+"/"+r.PathValue("path"), "")
 	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"keys": keys}})
 }
 
 func (s *server) getSecret(w http.ResponseWriter, r *http.Request) {
+	source, path := "web", r.PathValue("path")
 	if !s.authorizedWeb(r) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
-	path := r.PathValue("path")
 	var encrypted string
 	if err := s.db.QueryRow("SELECT data FROM secrets WHERE path = ?", path).Scan(&encrypted); err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "secret not found"})
@@ -1304,16 +1466,27 @@ func (s *server) getSecret(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "invalid stored secret"})
 		return
 	}
+	s.recordAuditEvent(r, "read", "success", s.auditRequestActor(r, source), source, path, "")
 	writeJSON(w, http.StatusOK, map[string]any{"data": data})
 }
 
 func (s *server) putSecret(w http.ResponseWriter, r *http.Request) {
+	source, path := "web", r.PathValue("path")
 	if !s.authorizedWeb(r) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
+	action := "create"
+	var exists int
+	if err := s.db.QueryRow("SELECT 1 FROM secrets WHERE path = ?", path).Scan(&exists); err == nil {
+		action = "update"
+	} else if err != sql.ErrNoRows {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not store secret"})
+		return
+	}
 	var req secretRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Data == nil {
+		s.recordAuditEvent(r, action, "failure", s.auditRequestActor(r, source), source, path, "invalid_request")
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid secret data"})
 		return
 	}
@@ -1327,29 +1500,31 @@ func (s *server) putSecret(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not store secret"})
 		return
 	}
-	path := r.PathValue("path")
 	if _, err := s.db.Exec(`INSERT INTO secrets(path, data, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(path) DO UPDATE SET data = excluded.data, updated_at = CURRENT_TIMESTAMP`, path, encrypted); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not store secret"})
 		return
 	}
+	s.recordAuditEvent(r, action, "success", s.auditRequestActor(r, source), source, path, "")
 	writeJSON(w, http.StatusOK, map[string]string{"path": path})
 }
 
 func (s *server) deleteSecret(w http.ResponseWriter, r *http.Request) {
+	source, path := "web", r.PathValue("path")
 	if !s.authorizedWeb(r) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
-	path := r.PathValue("path")
 	if _, err := s.db.Exec("DELETE FROM secrets WHERE path = ?", path); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not delete secret"})
 		return
 	}
+	s.recordAuditEvent(r, "delete", "success", s.auditRequestActor(r, source), source, path, "")
 	writeJSON(w, http.StatusOK, map[string]string{"path": path})
 }
 
 func (s *server) listSecrets(w http.ResponseWriter, r *http.Request) {
+	source := "web"
 	if !s.authorizedWeb(r) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
@@ -1373,7 +1548,122 @@ func (s *server) listSecrets(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not list secrets"})
 		return
 	}
+	s.recordAuditEvent(r, "list", "success", s.auditRequestActor(r, source), source, "*", "")
 	writeJSON(w, http.StatusOK, paths)
+}
+
+func (s *server) listAuditEvents(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizedWeb(r) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+
+	limit, err := strconv.Atoi(r.URL.Query().Get("limit"))
+	if err != nil || limit <= 0 {
+		limit = 100
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	offset, err := strconv.Atoi(r.URL.Query().Get("offset"))
+	if err != nil || offset < 0 {
+		offset = 0
+	}
+
+	conditions := []string{"1 = 1"}
+	args := make([]any, 0)
+	addFilter := func(column, value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		conditions = append(conditions, column+" = ?")
+		args = append(args, value)
+	}
+	addFilter("action", r.URL.Query().Get("action"))
+	addFilter("outcome", r.URL.Query().Get("outcome"))
+	addFilter("actor", r.URL.Query().Get("actor"))
+	addFilter("source", r.URL.Query().Get("source"))
+
+	if search := strings.TrimSpace(r.URL.Query().Get("q")); search != "" {
+		conditions = append(conditions, "(actor LIKE ? OR resource LIKE ? OR detail LIKE ?)")
+		pattern := "%" + search + "%"
+		args = append(args, pattern, pattern, pattern)
+	}
+	if from, ok := parseAuditDate(r.URL.Query().Get("from")); ok {
+		conditions = append(conditions, "created_at >= ?")
+		args = append(args, from.Unix())
+	} else if strings.TrimSpace(r.URL.Query().Get("from")) != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid from date"})
+		return
+	}
+	if to, ok := parseAuditDate(r.URL.Query().Get("to")); ok {
+		conditions = append(conditions, "created_at < ?")
+		args = append(args, to.Add(24*time.Hour).Unix())
+	} else if strings.TrimSpace(r.URL.Query().Get("to")) != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid to date"})
+		return
+	}
+
+	where := strings.Join(conditions, " AND ")
+	var total int
+	if err := s.auditDB.QueryRow("SELECT COUNT(*) FROM audit_events WHERE "+where, args...).Scan(&total); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not count audit events"})
+		return
+	}
+
+	queryArgs := append(append([]any{}, args...), limit, offset)
+	rows, err := s.auditDB.Query(`
+		SELECT id, created_at, action, outcome, actor, client_ip, source, resource, detail
+		FROM audit_events
+		WHERE `+where+`
+		ORDER BY created_at DESC, id DESC
+		LIMIT ? OFFSET ?`, queryArgs...)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not list audit events"})
+		return
+	}
+	defer rows.Close()
+
+	events := make([]map[string]any, 0)
+	for rows.Next() {
+		var id, createdAt int64
+		var action, outcome, actor, clientIP, source, resource, detail string
+		if err := rows.Scan(&id, &createdAt, &action, &outcome, &actor, &clientIP, &source, &resource, &detail); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read audit events"})
+			return
+		}
+		events = append(events, map[string]any{
+			"id":         id,
+			"created_at": time.Unix(createdAt, 0).UTC().Format(time.RFC3339),
+			"action":     action,
+			"outcome":    outcome,
+			"actor":      actor,
+			"client_ip":  clientIP,
+			"source":     source,
+			"resource":   resource,
+			"detail":     detail,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read audit events"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"events": events,
+		"total":  total,
+		"limit":  limit,
+		"offset": offset,
+	})
+}
+
+func parseAuditDate(value string) (time.Time, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}, false
+	}
+	parsed, err := time.Parse("2006-01-02", value)
+	return parsed, err == nil
 }
 
 func (s *server) kvAuthorized(r *http.Request) bool {
@@ -1431,6 +1721,10 @@ func (s *server) serveSecrets(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) serveTokens(w http.ResponseWriter, r *http.Request) {
 	s.serveProtectedPage(w, r, "token.gohtml")
+}
+
+func (s *server) serveAudit(w http.ResponseWriter, r *http.Request) {
+	s.serveProtectedPage(w, r, "audit.gohtml")
 }
 
 func (s *server) serveProtectedPage(w http.ResponseWriter, r *http.Request, name string) {
