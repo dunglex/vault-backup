@@ -128,9 +128,6 @@ fi
 install -m 600 "$RESTORE_ROOT/database/vault.db" "$DATA_DIR/vault.db"
 install -m 600 "$RESTORE_ROOT/database/vault.db.key" "$DATA_DIR/vault.db.key"
 
-if [[ -f "$RESTORE_ROOT/database/vault.db.setup-key" ]]; then
-  install -m 600 "$RESTORE_ROOT/database/vault.db.setup-key" "$DATA_DIR/vault.db.setup-key"
-fi
 if [[ -f "$RESTORE_ROOT/database/vault.db-wal" ]]; then
   install -m 600 "$RESTORE_ROOT/database/vault.db-wal" "$DATA_DIR/vault.db-wal"
 fi

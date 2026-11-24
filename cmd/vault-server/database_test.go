@@ -1,11 +1,73 @@
 package main
 
 import (
+	"bytes"
 	"database/sql"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
+
+func TestPageTemplateRendersFeatureSections(t *testing.T) {
+	var output bytes.Buffer
+	err := pageTemplate.ExecuteTemplate(&output, "index.gohtml", map[string]any{
+		"Title":      "Vault Server",
+		"Configured": true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, marker := range []string{
+		`id="paths"`,
+		`id="secretPath"`,
+		`id="tokens"`,
+		`id="createToken"`,
+		"async function refreshTokens()",
+	} {
+		if !strings.Contains(output.String(), marker) {
+			t.Errorf("rendered page does not contain %q", marker)
+		}
+	}
+}
+
+func TestWebPagesUseExpectedStatusAndContent(t *testing.T) {
+	s := &server{adminName: "admin", sessions: map[string]time.Time{}}
+
+	login := httptest.NewRecorder()
+	s.serveLogin(login, httptest.NewRequest(http.MethodGet, "/login", nil))
+	if login.Code != http.StatusOK || !strings.Contains(login.Body.String(), `id="loginForm"`) {
+		t.Fatalf("login page returned status %d or did not contain its form", login.Code)
+	}
+
+	unauthorized := httptest.NewRecorder()
+	s.serveUnauthorized(unauthorized, httptest.NewRequest(http.MethodGet, "/401", nil))
+	if unauthorized.Code != http.StatusUnauthorized || !strings.Contains(unauthorized.Body.String(), "401") {
+		t.Fatalf("unauthorized page returned status %d or invalid content", unauthorized.Code)
+	}
+
+	notFound := httptest.NewRecorder()
+	s.serveNotFound(notFound, httptest.NewRequest(http.MethodGet, "/missing", nil))
+	if notFound.Code != http.StatusNotFound || !strings.Contains(notFound.Body.String(), "404") {
+		t.Fatalf("not-found page returned status %d or invalid content", notFound.Code)
+	}
+
+	apiNotFound := httptest.NewRecorder()
+	s.serveNotFound(apiNotFound, httptest.NewRequest(http.MethodPost, "/api/v1/missing", nil))
+	if apiNotFound.Code != http.StatusNotFound || apiNotFound.Body.Len() != 0 {
+		t.Fatalf("API not-found response = status %d, body %q", apiNotFound.Code, apiNotFound.Body.String())
+	}
+
+	home := httptest.NewRecorder()
+	s.serveHome(home, httptest.NewRequest(http.MethodGet, "/", nil))
+	if home.Code != http.StatusSeeOther || home.Header().Get("Location") != "/login" {
+		t.Fatalf("unauthenticated home redirect = %d %q", home.Code, home.Header().Get("Location"))
+	}
+}
 
 func TestDatabaseKeyIsEncryptedAnd128Bytes(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "vault.db.key")

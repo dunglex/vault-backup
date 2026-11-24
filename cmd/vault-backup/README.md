@@ -19,6 +19,7 @@ Supply options as flags or as environment variables with the `VAULT_` prefix.
 | `--url` | `VAULT_URL` | Vault API URL, including `/api` when using `vault-server` |
 | `--user` | `VAULT_USER` | Vault username |
 | `--pass` | `VAULT_PASS` | Vault password |
+| `--token` | `VAULT_TOKEN` | Managed API token (alternative to username/password) |
 | `--secret_name` | `VAULT_SECRET_NAME` | Secret mount/name |
 | `--secret_path` | `VAULT_SECRET_PATH` | Secret path for backup |
 | `--output_mode` | `VAULT_OUTPUT_MODE` | `all`, `data`, or `file` (default: `all`) |
@@ -33,6 +34,18 @@ Supply options as flags or as environment variables with the `VAULT_` prefix.
 | `--tls_server_name` | `VAULT_TLS_SERVER_NAME` | Optional TLS server-name override |
 
 Use HTTPS for direct TLS connections. HTTP is insecure and prints a warning when selected; use it only for private, trusted ingress networks. Do not use `--insecure` with untrusted networks.
+
+When the administrator has created a managed API token, `vault-backup` can use it directly:
+
+```bash
+VAULT_TOKEN="$VAULT_API_TOKEN" ./bin/vault-backup \
+  --url https://vault.example:8200/api \
+  --secret_name kv \
+  --secret_path app/database \
+  --output_mode file \
+  --output_format env \
+  --output_path ./database.env
+```
 
 For mutual TLS, configure the server CA and the backup client certificate/key:
 

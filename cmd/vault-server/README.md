@@ -20,7 +20,7 @@ The bundled mkcert helper creates a certificate for `localhost`, `127.0.0.1`, an
 
 Open `https://localhost:8200/`. The generated files are `tests/data/localhost.pem` and `tests/data/localhost-key.pem`. Keep the local CA private key in its CA root directory protected.
 
-The startup script uses `tests/data/vault.db`, `tests/data/vault.db.key`, and `tests/data/vault.db.setup-key`.
+The startup script uses `tests/data/vault.db`, `tests/data/vault.db.key`, and generates a setup key only until the first account is created.
 
 ## Configuration from .env
 
@@ -51,7 +51,7 @@ Restrict `.env` permissions to `0600` because it contains the database password.
 
 ## Back up server state
 
-Create a sensitive filesystem tarball containing the database, its protected key, setup key, TLS files, and optional `.env`:
+Create a sensitive filesystem tarball containing the database, its protected key, TLS files, and optional `.env`:
 
 ```bash
 ./tests/backup-vault-server.sh \
@@ -74,6 +74,34 @@ Restore a backup into a clean `/data` directory:
 ```
 
 The restore refuses to overwrite a non-empty destination unless `--replace` is specified. It verifies SHA-256 checksums before installing files with restricted permissions.
+
+## Managed API tokens
+
+After logging in through the web UI, an admin can create, list, and revoke API tokens. Tokens:
+
+- Expire exactly 30 days after creation
+- Have no configurable duration
+- Are shown only in the creation response
+- Are stored as SHA-256 hashes in the encrypted database
+
+Management endpoints use the admin's web session:
+
+```bash
+POST   /v1/tokens
+GET    /v1/tokens
+DELETE /v1/tokens/{id}
+```
+
+Create a token:
+
+```bash
+curl --cookie cookies.txt \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"backup-agent"}' \
+  https://vault.example:8200/v1/tokens
+```
+
+Use the returned token through `X-Vault-Token` or the `Authorization: Bearer` header. Username/password login creates a web session only; login credentials and the resulting web-session token cannot authorize `/api/...` endpoints.
 
 ## Mutual TLS
 
@@ -163,7 +191,7 @@ Recommended deployment controls:
 - Run behind a firewall or private network
 - Restrict database and key files to mode `0600`
 - Use an encrypted persistent volume
-- Back up `vault.db`, `vault.db.key`, and `vault.db.setup-key`
+- Back up `vault.db` and `vault.db.key`
 - Keep `vault.db.key` available and protected; it is required to open newly created encrypted databases
 - Use a TLS reverse proxy or load balancer if needed
 - Rotate API tokens and certificates periodically

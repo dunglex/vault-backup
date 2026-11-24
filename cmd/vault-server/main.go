@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -39,6 +40,7 @@ const (
 	argonTime         = uint32(3)
 	argonMemory       = uint32(64 * 1024)
 	argonThreads      = uint8(4)
+	apiTokenLifetime  = 30 * 24 * time.Hour
 )
 
 type encryptedKeyFile struct {
@@ -49,10 +51,11 @@ type encryptedKeyFile struct {
 }
 
 type server struct {
-	db        *sql.DB
-	setupKey  string
-	adminName string
-	aead      cipher.AEAD
+	db           *sql.DB
+	setupKey     string
+	setupKeyPath string
+	adminName    string
+	aead         cipher.AEAD
 
 	mu       sync.Mutex
 	sessions map[string]time.Time
@@ -69,10 +72,10 @@ type secretRequest struct {
 	Data map[string]any `json:"data"`
 }
 
-//go:embed index.gohtml
+//go:embed *.gohtml
 var embeddedFiles embed.FS
 
-var pageTemplate = template.Must(template.ParseFS(embeddedFiles, "index.gohtml"))
+var pageTemplate = template.Must(template.ParseFS(embeddedFiles, "*.gohtml"))
 
 func main() {
 	envFile := envFileFromArgs()
@@ -146,6 +149,14 @@ func main() {
 			data TEXT NOT NULL,
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		);
+		CREATE TABLE IF NOT EXISTS api_tokens (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL,
+			token_hash TEXT NOT NULL UNIQUE,
+			created_at INTEGER NOT NULL,
+			expires_at INTEGER NOT NULL,
+			revoked_at INTEGER
+		);
 	`); err != nil {
 		log.Fatal(err)
 	}
@@ -153,13 +164,24 @@ func main() {
 		log.Fatal(err)
 	}
 
-	setupKey := os.Getenv("VAULT_SERVER_SETUP_KEY")
-	if setupKey == "" {
-		var err error
-		setupKey, err = loadOrCreateSetupKey(*dbPath + ".setup-key")
-		if err != nil {
-			log.Fatal(err)
+	var adminName string
+	if err := db.QueryRow("SELECT username FROM accounts LIMIT 1").Scan(&adminName); err != nil && err != sql.ErrNoRows {
+		log.Fatal(err)
+	}
+
+	setupKeyPath := *dbPath + ".setup-key"
+	setupKey := ""
+	if adminName == "" {
+		setupKey = os.Getenv("VAULT_SERVER_SETUP_KEY")
+		if setupKey == "" {
+			var err error
+			setupKey, err = loadOrCreateSetupKey(setupKeyPath)
+			if err != nil {
+				log.Fatal(err)
+			}
 		}
+	} else if err := os.Remove(setupKeyPath); err != nil && !os.IsNotExist(err) {
+		log.Fatal(err)
 	}
 
 	applicationKey := sha256.Sum256(masterKey)
@@ -172,14 +194,12 @@ func main() {
 		log.Fatal(err)
 	}
 
-	var adminName string
-	if err := db.QueryRow("SELECT username FROM accounts LIMIT 1").Scan(&adminName); err != nil && err != sql.ErrNoRows {
-		log.Fatal(err)
-	}
-
-	s := &server{db: db, setupKey: setupKey, adminName: adminName, aead: aead, sessions: map[string]time.Time{}, attempts: map[string][]time.Time{}}
+	s := &server{db: db, setupKey: setupKey, setupKeyPath: setupKeyPath, adminName: adminName, aead: aead, sessions: map[string]time.Time{}, attempts: map[string][]time.Time{}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.health)
+	mux.HandleFunc("GET /login", s.serveLogin)
+	mux.HandleFunc("GET /401", s.serveUnauthorized)
+	mux.HandleFunc("GET /404", s.serveNotFound)
 
 	// Web endpoints: use same-origin cookie sessions.
 	mux.HandleFunc("POST /v1/setup", s.setup)
@@ -190,6 +210,9 @@ func main() {
 	mux.HandleFunc("DELETE /v1/secrets/{path...}", s.deleteSecret)
 	mux.HandleFunc("GET /v1/secrets", s.listSecrets)
 	mux.HandleFunc("GET /v1/session", s.webSession)
+	mux.HandleFunc("POST /v1/tokens", s.createAPIToken)
+	mux.HandleFunc("GET /v1/tokens", s.listAPITokens)
+	mux.HandleFunc("DELETE /v1/tokens/{id}", s.revokeAPIToken)
 
 	// API endpoints: require bearer/X-Vault-Token authentication.
 	mux.HandleFunc("GET /api/health", s.health)
@@ -200,7 +223,7 @@ func main() {
 	mux.HandleFunc("DELETE /api/v1/{mount}/data/{path...}", s.deleteKVSecret)
 	mux.HandleFunc("LIST /api/v1/{mount}/metadata/{path...}", s.listKVMetadata)
 
-	mux.HandleFunc("GET /", s.serveHome)
+	mux.HandleFunc("/", s.serveHome)
 
 	handler := s.securityHeaders(http.MaxBytesHandler(mux, 1<<20))
 	tlsConfig := &tls.Config{
@@ -243,7 +266,9 @@ func main() {
 		}
 	}
 
-	fmt.Printf("Vault setup key: %s\n", setupKey)
+	if setupKey != "" {
+		fmt.Printf("Vault setup key: %s\n", setupKey)
+	}
 	log.Printf("Vault server listening on %s (SQLite: %s)", *addr, *dbPath)
 	log.Printf("Vault server serving HTTPS on %s", *addr)
 	if httpListener != nil {
@@ -642,6 +667,10 @@ func (s *server) setup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.adminName = req.Username
+	s.setupKey = ""
+	if err := os.Remove(s.setupKeyPath); err != nil && !os.IsNotExist(err) {
+		log.Printf("WARNING: could not remove setup key file %s: %v", s.setupKeyPath, err)
+	}
 	writeJSON(w, http.StatusCreated, map[string]string{"username": req.Username})
 }
 
@@ -742,7 +771,7 @@ func (s *server) authorizedAPI(r *http.Request) bool {
 	if token == "" {
 		token = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	}
-	return s.authorizedToken(token)
+	return s.authorizedAPIToken(token)
 }
 
 func (s *server) authorizedToken(token string) bool {
@@ -760,6 +789,23 @@ func (s *server) authorizedToken(token string) bool {
 	return true
 }
 
+func (s *server) authorizedAPIToken(token string) bool {
+	if token == "" {
+		return false
+	}
+	hash := sha256.Sum256([]byte(token))
+	now := time.Now().Unix()
+	var expires int64
+	err := s.db.QueryRow(
+		"SELECT expires_at FROM api_tokens WHERE token_hash = ? AND revoked_at IS NULL",
+		hex.EncodeToString(hash[:]),
+	).Scan(&expires)
+	if err == nil && expires >= now {
+		return true
+	}
+	return false
+}
+
 func (s *server) logout(w http.ResponseWriter, r *http.Request) {
 	token := ""
 	if cookie, err := r.Cookie("vault_session"); err == nil {
@@ -770,6 +816,126 @@ func (s *server) logout(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 	http.SetCookie(w, &http.Cookie{Name: "vault_session", Value: "", Path: "/", HttpOnly: true, Secure: r.TLS != nil, SameSite: http.SameSiteStrictMode, MaxAge: -1})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "logged out"})
+}
+
+func (s *server) createAPIToken(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizedWeb(r) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
+		return
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" || len(req.Name) > 128 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name is required and must be at most 128 characters"})
+		return
+	}
+
+	tokenBytes := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, tokenBytes); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not create API token"})
+		return
+	}
+	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
+	tokenHash := sha256.Sum256([]byte(token))
+	createdAt := time.Now()
+	expiresAt := createdAt.Add(apiTokenLifetime)
+	result, err := s.db.Exec(
+		"INSERT INTO api_tokens(name, token_hash, created_at, expires_at) VALUES (?, ?, ?, ?)",
+		req.Name,
+		hex.EncodeToString(tokenHash[:]),
+		createdAt.Unix(),
+		expiresAt.Unix(),
+	)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not create API token"})
+		return
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not create API token"})
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"id":         id,
+		"name":       req.Name,
+		"token":      token,
+		"created_at": createdAt.UTC().Format(time.RFC3339),
+		"expires_at": expiresAt.UTC().Format(time.RFC3339),
+	})
+}
+
+func (s *server) listAPITokens(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizedWeb(r) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	rows, err := s.db.Query(`
+		SELECT id, name, created_at, expires_at, revoked_at
+		FROM api_tokens
+		ORDER BY created_at DESC, id DESC`)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not list API tokens"})
+		return
+	}
+	defer rows.Close()
+
+	tokens := make([]map[string]any, 0)
+	for rows.Next() {
+		var id, createdAt, expiresAt int64
+		var revokedAt sql.NullInt64
+		var name string
+		if err := rows.Scan(&id, &name, &createdAt, &expiresAt, &revokedAt); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read API tokens"})
+			return
+		}
+		item := map[string]any{
+			"id":         id,
+			"name":       name,
+			"created_at": time.Unix(createdAt, 0).UTC().Format(time.RFC3339),
+			"expires_at": time.Unix(expiresAt, 0).UTC().Format(time.RFC3339),
+			"expired":    expiresAt < time.Now().Unix(),
+			"revoked":    revokedAt.Valid,
+		}
+		tokens = append(tokens, item)
+	}
+	if err := rows.Err(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not list API tokens"})
+		return
+	}
+	writeJSON(w, http.StatusOK, tokens)
+}
+
+func (s *server) revokeAPIToken(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizedWeb(r) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id < 1 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid token id"})
+		return
+	}
+	result, err := s.db.Exec(
+		"UPDATE api_tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
+		time.Now().Unix(),
+		id,
+	)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not revoke API token"})
+		return
+	}
+	affected, err := result.RowsAffected()
+	if err != nil || affected != 1 {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "active API token not found"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
 }
 
 func (s *server) getKVSecret(w http.ResponseWriter, r *http.Request) {
@@ -973,13 +1139,54 @@ func (s *server) kvAuthorized(r *http.Request) bool {
 }
 
 func (s *server) serveHome(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		s.serveNotFound(w, r)
+		return
+	}
+	if s.adminName != "" && !s.authorizedWeb(r) {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
 	data := map[string]any{
 		"Title":      "Vault Server",
 		"Configured": s.adminName != "",
 	}
-	if err := pageTemplate.Execute(w, data); err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+	s.renderPage(w, "index.gohtml", http.StatusOK, data)
+}
+
+func (s *server) serveLogin(w http.ResponseWriter, r *http.Request) {
+	if s.adminName == "" {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
 	}
+	if s.authorizedWeb(r) {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	s.renderPage(w, "login.gohtml", http.StatusOK, nil)
+}
+
+func (s *server) serveUnauthorized(w http.ResponseWriter, r *http.Request) {
+	s.renderPage(w, "401.gohtml", http.StatusUnauthorized, nil)
+}
+
+func (s *server) serveNotFound(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Path, "/api/") {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	s.renderPage(w, "404.gohtml", http.StatusNotFound, nil)
+}
+
+func (s *server) renderPage(w http.ResponseWriter, name string, status int, data any) {
+	var output bytes.Buffer
+	if err := pageTemplate.ExecuteTemplate(&output, name, data); err != nil {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
+	_, _ = output.WriteTo(w)
 }
 
 func (s *server) webSession(w http.ResponseWriter, r *http.Request) {

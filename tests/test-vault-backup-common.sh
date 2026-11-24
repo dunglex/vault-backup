@@ -72,3 +72,19 @@ login_backup_account() {
   TOKEN=$(printf '%s' "$LOGIN_BODY" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
   [[ -n "$TOKEN" ]] || fail "obtain API token"
 }
+
+create_backup_api_token() {
+  COOKIE_JAR="$TMPDIR/cookies.txt"
+  curl --insecure --silent --show-error --fail \
+    --cookie-jar "$COOKIE_JAR" \
+    -H 'Content-Type: application/json' \
+    -d '{"username":"admin","password":"backup-test-password"}' \
+    "$BASE_URL/v1/auth/login" >/dev/null
+  MANAGED_TOKEN_BODY=$(curl --insecure --silent --show-error --fail \
+    --cookie "$COOKIE_JAR" \
+    -H 'Content-Type: application/json' \
+    -d '{"name":"backup-test"}' \
+    "$BASE_URL/v1/tokens")
+  MANAGED_TOKEN=$(printf '%s' "$MANAGED_TOKEN_BODY" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+  [[ -n "$MANAGED_TOKEN" ]] || fail "create managed API token"
+}

@@ -13,6 +13,7 @@ type Arguments struct {
 	Url           string
 	User          string
 	Pass          string
+	Token         string
 	SecretName    string
 	SecretPath    string
 	OutputMode    string
@@ -32,6 +33,7 @@ func parseArguments() Arguments {
 	pflag.StringP("url", "h", "", "Vault server host url (required) [env: VAULT_URL]")
 	pflag.StringP("user", "u", "", "Vault username (required) [env: VAULT_USER]")
 	pflag.StringP("pass", "p", "", "Vault password (required) [env: VAULT_PASS]")
+	pflag.StringP("token", "t", "", "Managed Vault API token (alternative to user/pass) [env: VAULT_TOKEN]")
 	pflag.StringP("secret_name", "n", "", "Vault secret name [env: VAULT_SECRET_NAME]")
 	pflag.StringP("secret_path", "s", "", "Vault secret path [env: VAULT_SECRET_PATH]")
 	pflag.StringP("output_mode", "m", "all", "Print mode: all/data/file (optional, default: all) [env: VAULT_OUTPUT_MODE]")
@@ -50,6 +52,7 @@ func parseArguments() Arguments {
 	viper.BindPFlag("url", pflag.Lookup("url"))
 	viper.BindPFlag("user", pflag.Lookup("user"))
 	viper.BindPFlag("pass", pflag.Lookup("pass"))
+	viper.BindPFlag("token", pflag.Lookup("token"))
 	viper.BindPFlag("secret_name", pflag.Lookup("secret_name"))
 	viper.BindPFlag("secret_path", pflag.Lookup("secret_path"))
 	viper.BindPFlag("output_mode", pflag.Lookup("output_mode"))
@@ -69,6 +72,7 @@ func parseArguments() Arguments {
 	viper.BindEnv("url")
 	viper.BindEnv("user")
 	viper.BindEnv("pass")
+	viper.BindEnv("token")
 	viper.BindEnv("secret_name")
 	viper.BindEnv("secret_path")
 	viper.BindEnv("output_mode")
@@ -86,6 +90,7 @@ func parseArguments() Arguments {
 	vaultAddr := viper.GetString("url")
 	username := viper.GetString("user")
 	password := viper.GetString("pass")
+	token := viper.GetString("token")
 	secretName := viper.GetString("secret_name")
 	secretPath := viper.GetString("secret_path")
 	outputMode := viper.GetString("output_mode")
@@ -100,8 +105,8 @@ func parseArguments() Arguments {
 	tlsServerName := viper.GetString("tls_server_name")
 
 	// Validate arguments
-	if vaultAddr == "" || username == "" || password == "" {
-		fmt.Println("url, user, and pass are required (via flag or environment variable)")
+	if vaultAddr == "" || (token == "" && (username == "" || password == "")) {
+		fmt.Println("url and either token or user/pass are required (via flag or environment variable)")
 	}
 	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(vaultAddr)), "http://") {
 		fmt.Fprintln(os.Stderr, "WARNING: insecure HTTP Vault URL; credentials and secret data may be exposed without TLS")
@@ -134,6 +139,7 @@ func parseArguments() Arguments {
 		Url:           vaultAddr,
 		User:          username,
 		Pass:          password,
+		Token:         token,
 		SecretName:    secretName,
 		SecretPath:    secretPath,
 		OutputMode:    outputMode,

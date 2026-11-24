@@ -1,0 +1,52 @@
+{{define "token-panel"}}
+<h2>API tokens</h2>
+<div class="row"><input id="tokenName" placeholder="Token name"><button id="createToken">Create</button></div>
+<p id="newToken" class="muted"></p>
+<ul id="tokens"></ul>
+{{end}}
+
+{{define "token-script"}}
+let apiTokens = [];
+
+async function refreshTokens() {
+  try {
+    apiTokens = await api('/v1/tokens');
+    renderTokens();
+  } catch (error) { showError(error.message); }
+}
+
+function renderTokens() {
+  const list = document.getElementById('tokens');
+  list.replaceChildren();
+  apiTokens.forEach(token => {
+    const li = document.createElement('li');
+    const state = token.revoked ? 'revoked' : token.expired ? 'expired' : 'active';
+    li.textContent = token.name + ' (' + state + ', expires ' + token.expires_at + ')';
+    if (!token.revoked && !token.expired) {
+      const button = document.createElement('button');
+      button.className = 'danger';
+      button.textContent = 'Revoke';
+      button.onclick = async () => {
+        await api('/v1/tokens/' + token.id, {method:'DELETE'});
+        await refreshTokens();
+      };
+      li.appendChild(button);
+    }
+    list.appendChild(li);
+  });
+}
+
+document.getElementById('createToken').addEventListener('click', async () => {
+  const name = document.getElementById('tokenName').value.trim();
+  try {
+    const result = await api('/v1/tokens', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({name})
+    });
+    document.getElementById('newToken').textContent = 'Copy now: ' + result.token;
+    document.getElementById('tokenName').value = '';
+    await refreshTokens();
+  } catch (error) { showError(error.message); }
+});
+{{end}}

@@ -219,6 +219,10 @@ func connectToVault(arguments Arguments) *vault.Client {
 	if err != nil {
 		panic(fmt.Sprintf("Failed to create Vault client: %v", err))
 	}
+	if arguments.Token != "" {
+		client.SetToken(arguments.Token)
+		return client
+	}
 
 	// Authenticate with LDAP username/password
 	data := map[string]any{
