@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	pflag "github.com/spf13/pflag"
@@ -9,17 +10,21 @@ import (
 )
 
 type Arguments struct {
-	Url          string
-	User         string
-	Pass         string
-	SecretName   string
-	SecretPath   string
-	OutputMode   string
-	OutputFormat string
-	OutputPath   string
-	Insecure     bool
-	RestoreMode  bool
-	InputPath    string
+	Url           string
+	User          string
+	Pass          string
+	SecretName    string
+	SecretPath    string
+	OutputMode    string
+	OutputFormat  string
+	OutputPath    string
+	Insecure      bool
+	RestoreMode   bool
+	InputPath     string
+	CACert        string
+	ClientCert    string
+	ClientKey     string
+	TLSServerName string
 }
 
 func parseArguments() Arguments {
@@ -35,6 +40,10 @@ func parseArguments() Arguments {
 	pflag.BoolP("insecure", "k", false, "Skip TLS certificate verification (optional, default: false) [env: VAULT_INSECURE]")
 	pflag.BoolP("restore", "r", false, "Restore mode: restore secrets from backup files to Vault (optional, default: false) [env: VAULT_RESTORE]")
 	pflag.StringP("input_path", "i", "", "Input file or folder path for restore mode (required for restore) [env: VAULT_INPUT_PATH]")
+	pflag.String("ca_cert", "", "CA certificate PEM used to verify the Vault server certificate [env: VAULT_CA_CERT]")
+	pflag.String("client_cert", "", "Client certificate PEM for mutual TLS [env: VAULT_CLIENT_CERT]")
+	pflag.String("client_key", "", "Client private key PEM for mutual TLS [env: VAULT_CLIENT_KEY]")
+	pflag.String("tls_server_name", "", "TLS server name override [env: VAULT_TLS_SERVER_NAME]")
 	pflag.Parse()
 
 	// Bind flags to viper
@@ -49,6 +58,10 @@ func parseArguments() Arguments {
 	viper.BindPFlag("insecure", pflag.Lookup("insecure"))
 	viper.BindPFlag("restore", pflag.Lookup("restore"))
 	viper.BindPFlag("input_path", pflag.Lookup("input_path"))
+	viper.BindPFlag("ca_cert", pflag.Lookup("ca_cert"))
+	viper.BindPFlag("client_cert", pflag.Lookup("client_cert"))
+	viper.BindPFlag("client_key", pflag.Lookup("client_key"))
+	viper.BindPFlag("tls_server_name", pflag.Lookup("tls_server_name"))
 
 	// Bind environment variables (upper case, underscores)
 	viper.SetEnvPrefix("VAULT")
@@ -64,6 +77,10 @@ func parseArguments() Arguments {
 	viper.BindEnv("insecure")
 	viper.BindEnv("restore")
 	viper.BindEnv("input_path")
+	viper.BindEnv("ca_cert")
+	viper.BindEnv("client_cert")
+	viper.BindEnv("client_key")
+	viper.BindEnv("tls_server_name")
 
 	// Get values from viper
 	vaultAddr := viper.GetString("url")
@@ -77,10 +94,22 @@ func parseArguments() Arguments {
 	insecure := viper.GetBool("insecure")
 	restoreMode := viper.GetBool("restore")
 	inputPath := viper.GetString("input_path")
+	caCert := viper.GetString("ca_cert")
+	clientCert := viper.GetString("client_cert")
+	clientKey := viper.GetString("client_key")
+	tlsServerName := viper.GetString("tls_server_name")
 
 	// Validate arguments
 	if vaultAddr == "" || username == "" || password == "" {
 		fmt.Println("url, user, and pass are required (via flag or environment variable)")
+	}
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(vaultAddr)), "http://") {
+		fmt.Fprintln(os.Stderr, "WARNING: insecure HTTP Vault URL; credentials and secret data may be exposed without TLS")
+	}
+	if strings.TrimSpace(clientCert) != "" || strings.TrimSpace(clientKey) != "" {
+		if strings.TrimSpace(clientCert) == "" || strings.TrimSpace(clientKey) == "" {
+			fmt.Println("client_cert and client_key are both required for mutual TLS")
+		}
 	}
 
 	if restoreMode {
@@ -102,16 +131,20 @@ func parseArguments() Arguments {
 	secretPath = strings.TrimPrefix(secretPath, "/")
 
 	return Arguments{
-		Url:          vaultAddr,
-		User:         username,
-		Pass:         password,
-		SecretName:   secretName,
-		SecretPath:   secretPath,
-		OutputMode:   outputMode,
-		OutputFormat: outputFormat,
-		OutputPath:   outputPath,
-		Insecure:     insecure,
-		RestoreMode:  restoreMode,
-		InputPath:    inputPath,
+		Url:           vaultAddr,
+		User:          username,
+		Pass:          password,
+		SecretName:    secretName,
+		SecretPath:    secretPath,
+		OutputMode:    outputMode,
+		OutputFormat:  outputFormat,
+		OutputPath:    outputPath,
+		Insecure:      insecure,
+		RestoreMode:   restoreMode,
+		InputPath:     inputPath,
+		CACert:        caCert,
+		ClientCert:    clientCert,
+		ClientKey:     clientKey,
+		TLSServerName: tlsServerName,
 	}
 }

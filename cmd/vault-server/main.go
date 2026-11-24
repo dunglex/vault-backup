@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
+	"crypto/x509"
 	"database/sql"
 	"embed"
 	"encoding/base64"
@@ -16,16 +19,34 @@ import (
 	"html/template"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	_ "github.com/CovenantSQL/go-sqlite3-encrypt"
+	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/bcrypt"
 	_ "modernc.org/sqlite"
 )
+
+const (
+	databaseKeyLength = 128
+	argonTime         = uint32(3)
+	argonMemory       = uint32(64 * 1024)
+	argonThreads      = uint8(4)
+)
+
+type encryptedKeyFile struct {
+	Version    int    `json:"version"`
+	Salt       []byte `json:"salt"`
+	Nonce      []byte `json:"nonce"`
+	Ciphertext []byte `json:"ciphertext"`
+}
 
 type server struct {
 	db        *sql.DB
@@ -54,15 +75,34 @@ var embeddedFiles embed.FS
 var pageTemplate = template.Must(template.ParseFS(embeddedFiles, "index.gohtml"))
 
 func main() {
+	envFile := envFileFromArgs()
+	if envFile != "" {
+		if err := loadDotEnv(envFile); err != nil {
+			log.Fatal(err)
+		}
+	}
 	var (
-		addr    = flag.String("addr", envDefault("VAULT_SERVER_ADDR", "127.0.0.1:8200"), "server address")
-		dbPath  = flag.String("db", envDefault("VAULT_SERVER_DB", "vault.db"), "path to database file")
-		tlsCert = flag.String("tls-cert", envDefault("VAULT_SERVER_TLS_CERT", ""), "path to TLS certificate PEM")
-		tlsKey  = flag.String("tls-key", envDefault("VAULT_SERVER_TLS_KEY", ""), "path to TLS private key PEM")
+		addr             = flag.String("addr", envDefault("VAULT_SERVER_ADDR", "127.0.0.1:8200"), "HTTPS server address")
+		httpAddr         = flag.String("http-addr", envDefault("VAULT_SERVER_HTTP_ADDR", ""), "HTTP server address (disabled by default)")
+		dbPath           = flag.String("db", envDefault("VAULT_SERVER_DB", "vault.db"), "path to database file")
+		tlsCert          = flag.String("tls-cert", envDefault("VAULT_SERVER_TLS_CERT", ""), "path to TLS certificate PEM")
+		tlsKey           = flag.String("tls-key", envDefault("VAULT_SERVER_TLS_KEY", ""), "path to TLS private key PEM")
+		dbPassword       = flag.String("db-password", envDefault("VAULT_SERVER_DB_PASSWORD", ""), "password used to decrypt the database key file")
+		allowPlaintextDB = flag.Bool("allow-plaintext-db", envBool("VAULT_SERVER_ALLOW_PLAINTEXT_DB", false), "allow an existing plaintext SQLite database (insecure)")
+		envFileFlag      = flag.String("env-file", envDefault("VAULT_SERVER_ENV_FILE", ".env"), "path to .env configuration file")
+		mtlsCACert       = flag.String("mtls-ca-cert", envDefault("VAULT_SERVER_MTLS_CA_CERT", ""), "CA certificate PEM used to verify HTTPS client certificates")
 	)
 	flag.Parse()
+	_ = envFileFlag
 	if strings.TrimSpace(*tlsCert) == "" || strings.TrimSpace(*tlsKey) == "" {
-		log.Fatal("HTTPS-only startup requires --tls-cert and --tls-key (or VAULT_SERVER_TLS_CERT and VAULT_SERVER_TLS_KEY)")
+		log.Fatal("HTTPS startup requires --tls-cert and --tls-key (or VAULT_SERVER_TLS_CERT and VAULT_SERVER_TLS_KEY)")
+	}
+	if *dbPassword == "" {
+		log.Fatal("database key password is required: set --db-password or VAULT_SERVER_DB_PASSWORD")
+	}
+	*httpAddr = strings.TrimSpace(*httpAddr)
+	if *httpAddr != "" {
+		log.Printf("WARNING: insecure HTTP listener enabled on %s; traffic is not encrypted", *httpAddr)
 	}
 
 	resolvedDB, err := filepath.Abs(*dbPath)
@@ -80,11 +120,15 @@ func main() {
 		}
 	}
 
-	db, err := sql.Open("sqlite", *dbPath+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)")
+	masterKey, err := loadOrCreateKey(*dbPath+".key", *dbPassword)
 	if err != nil {
 		log.Fatal(err)
 	}
-	db.SetMaxOpenConns(1)
+
+	db, _, err := openDatabaseWithOptions(*dbPath, masterKey, *allowPlaintextDB)
+	if err != nil {
+		log.Fatal(err)
+	}
 	defer db.Close()
 
 	if err := os.Chmod(*dbPath, 0600); err != nil && !os.IsNotExist(err) {
@@ -118,11 +162,8 @@ func main() {
 		}
 	}
 
-	masterKey, err := loadOrCreateKey(*dbPath + ".key")
-	if err != nil {
-		log.Fatal(err)
-	}
-	block, err := aes.NewCipher(masterKey)
+	applicationKey := sha256.Sum256(masterKey)
+	block, err := aes.NewCipher(applicationKey[:])
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -162,22 +203,62 @@ func main() {
 	mux.HandleFunc("GET /", s.serveHome)
 
 	handler := s.securityHeaders(http.MaxBytesHandler(mux, 1<<20))
-	server := &http.Server{
-		Addr:              *addr,
+	tlsConfig := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+	}
+	if strings.TrimSpace(*mtlsCACert) != "" {
+		clientCAs, err := loadClientCAPool(*mtlsCACert)
+		if err != nil {
+			log.Fatal(err)
+		}
+		tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
+		tlsConfig.ClientCAs = clientCAs
+		log.Printf("Vault server HTTPS mutual TLS enabled using client CA %s", *mtlsCACert)
+	}
+	httpsServer := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       60 * time.Second,
-		TLSConfig: &tls.Config{
-			MinVersion: tls.VersionTLS12,
-		},
+		TLSConfig:         tlsConfig,
+	}
+	httpServer := &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	httpsListener, err := net.Listen("tcp", *addr)
+	if err != nil {
+		log.Fatal(err)
+	}
+	var httpListener net.Listener
+	if *httpAddr != "" {
+		httpListener, err = net.Listen("tcp", *httpAddr)
+		if err != nil {
+			_ = httpsListener.Close()
+			log.Fatal(err)
+		}
 	}
 
 	fmt.Printf("Vault setup key: %s\n", setupKey)
 	log.Printf("Vault server listening on %s (SQLite: %s)", *addr, *dbPath)
 	log.Printf("Vault server serving HTTPS on %s", *addr)
-	log.Fatal(server.ListenAndServeTLS(*tlsCert, *tlsKey))
+	if httpListener != nil {
+		log.Printf("Vault server serving HTTP on %s", *httpAddr)
+	}
+	errCount := 1
+	if httpListener != nil {
+		errCount++
+	}
+	errs := make(chan error, errCount)
+	go func() { errs <- httpsServer.ServeTLS(httpsListener, *tlsCert, *tlsKey) }()
+	if httpListener != nil {
+		go func() { errs <- httpServer.Serve(httpListener) }()
+	}
+	log.Fatal(<-errs)
 }
 
 func envDefault(name, fallback string) string {
@@ -185,6 +266,141 @@ func envDefault(name, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func envBool(name string, fallback bool) bool {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		log.Printf("WARNING: invalid boolean value for %s=%q; using %t", name, value, fallback)
+		return fallback
+	}
+	return parsed
+}
+
+func loadClientCAPool(path string) (*x509.CertPool, error) {
+	pemBytes, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("could not read mTLS client CA certificate %s: %w", path, err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pemBytes) {
+		return nil, fmt.Errorf("mTLS client CA file %s contains no valid PEM certificates", path)
+	}
+	return pool, nil
+}
+
+func envFileFromArgs() string {
+	path := envDefault("VAULT_SERVER_ENV_FILE", ".env")
+	for i, arg := range os.Args[1:] {
+		if arg == "--env-file" && i+2 < len(os.Args) {
+			path = os.Args[i+2]
+			break
+		}
+		if strings.HasPrefix(arg, "--env-file=") {
+			path = strings.TrimPrefix(arg, "--env-file=")
+			break
+		}
+	}
+	return strings.TrimSpace(path)
+}
+
+func loadDotEnv(path string) error {
+	if path == "" {
+		return nil
+	}
+	file, err := os.Open(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("could not open env file %s: %w", path, err)
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if len(value) >= 2 {
+			if (value[0] == '"' && value[len(value)-1] == '"') || (value[0] == '\'' && value[len(value)-1] == '\'') {
+				value = value[1 : len(value)-1]
+			}
+		}
+		if key != "" {
+			if _, exists := os.LookupEnv(key); !exists {
+				if err := os.Setenv(key, value); err != nil {
+					return fmt.Errorf("could not load %s from env file %s: %w", key, path, err)
+				}
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("could not read env file %s: %w", path, err)
+	}
+	return nil
+}
+
+func isPlaintextSQLite(path string) (bool, error) {
+	file, err := os.Open(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer file.Close()
+
+	const sqliteHeader = "SQLite format 3\x00"
+	header := make([]byte, len(sqliteHeader))
+	if _, err := io.ReadFull(file, header); err != nil {
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			return false, nil
+		}
+		return false, err
+	}
+	return string(header) == sqliteHeader, nil
+}
+
+func openDatabase(path string, key []byte) (*sql.DB, bool, error) {
+	return openDatabaseWithOptions(path, key, false)
+}
+
+func openDatabaseWithOptions(path string, key []byte, allowPlaintext bool) (*sql.DB, bool, error) {
+	legacyDatabase, err := isPlaintextSQLite(path)
+	if err != nil {
+		return nil, false, err
+	}
+
+	driverName := "sqlite3"
+	dsn := path + "?_crypto_key=" + hex.EncodeToString(key) + "&_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=1"
+	if legacyDatabase {
+		if !allowPlaintext {
+			return nil, true, fmt.Errorf("existing database %s is plaintext SQLite; use --allow-plaintext-db or VAULT_SERVER_ALLOW_PLAINTEXT_DB=true only after acknowledging it is insecure", path)
+		}
+		driverName = "sqlite"
+		dsn = path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
+		log.Printf("WARNING: plaintext SQLite database %s is allowed and remains unencrypted", path)
+	}
+
+	db, err := sql.Open(driverName, dsn)
+	if err != nil {
+		return nil, legacyDatabase, err
+	}
+	db.SetMaxOpenConns(1)
+	return db, legacyDatabase, nil
 }
 
 func randomKey() string {
@@ -201,24 +417,138 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	_ = json.NewEncoder(w).Encode(value)
 }
 
-func loadOrCreateKey(path string) ([]byte, error) {
-	if key, err := os.ReadFile(path); err == nil {
-		if len(key) != 32 {
-			return nil, fmt.Errorf("invalid encryption key length")
+func loadOrCreateKey(path, password string) ([]byte, error) {
+	if password == "" {
+		return nil, fmt.Errorf("database key password is required")
+	}
+
+	fileContents, err := os.ReadFile(path)
+	if err == nil {
+		if len(fileContents) == 0 || fileContents[0] != '{' {
+			return nil, fmt.Errorf("unsupported legacy database key file format; remove it to create a new 128-byte protected key")
 		}
-		return key, nil
+		return decryptKeyFile(fileContents, password)
 	} else if !os.IsNotExist(err) {
 		return nil, err
 	}
 
-	key := make([]byte, 32)
+	key := make([]byte, databaseKeyLength)
 	if _, err := io.ReadFull(rand.Reader, key); err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(path, key, 0600); err != nil {
+	if err := writeEncryptedKeyFile(path, key, password); err != nil {
 		return nil, err
 	}
-	return key, os.Chmod(path, 0600)
+	return key, nil
+}
+
+func deriveWrappingKey(password string, salt []byte) []byte {
+	return argon2.IDKey([]byte(password), salt, argonTime, argonMemory, argonThreads, 32)
+}
+
+func encryptKey(plaintext []byte, password string) (*encryptedKeyFile, error) {
+	if len(plaintext) != databaseKeyLength {
+		return nil, fmt.Errorf("database key must be exactly %d bytes", databaseKeyLength)
+	}
+	salt := make([]byte, 32)
+	nonce := make([]byte, 12)
+	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
+		return nil, err
+	}
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, err
+	}
+
+	wrappingKey := deriveWrappingKey(password, salt)
+	block, err := aes.NewCipher(wrappingKey)
+	if err != nil {
+		return nil, err
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+
+	return &encryptedKeyFile{
+		Version:    1,
+		Salt:       salt,
+		Nonce:      nonce,
+		Ciphertext: aead.Seal(nil, nonce, plaintext, nil),
+	}, nil
+}
+
+func decryptKeyFile(contents []byte, password string) ([]byte, error) {
+	var envelope encryptedKeyFile
+	if err := json.Unmarshal(contents, &envelope); err != nil {
+		return nil, fmt.Errorf("invalid encrypted database key file: %w", err)
+	}
+	if envelope.Version != 1 {
+		return nil, fmt.Errorf("unsupported database key file version %d", envelope.Version)
+	}
+	if len(envelope.Salt) != 32 {
+		return nil, fmt.Errorf("invalid database key salt length")
+	}
+	if len(envelope.Nonce) != 12 {
+		return nil, fmt.Errorf("invalid database key nonce length")
+	}
+
+	wrappingKey := deriveWrappingKey(password, envelope.Salt)
+	block, err := aes.NewCipher(wrappingKey)
+	if err != nil {
+		return nil, err
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	plaintext, err := aead.Open(nil, envelope.Nonce, envelope.Ciphertext, nil)
+	if err != nil {
+		return nil, fmt.Errorf("could not decrypt database key: wrong db password or corrupted key file")
+	}
+	if len(plaintext) != databaseKeyLength {
+		return nil, fmt.Errorf("invalid decrypted database key length: got %d bytes", len(plaintext))
+	}
+	return plaintext, nil
+}
+
+func writeEncryptedKeyFile(path string, key []byte, password string) error {
+	envelope, err := encryptKey(key, password)
+	if err != nil {
+		return err
+	}
+	contents, err := json.Marshal(envelope)
+	if err != nil {
+		return err
+	}
+
+	dir := filepath.Dir(path)
+	temp, err := os.CreateTemp(dir, ".vault-db-key-*")
+	if err != nil {
+		return err
+	}
+	tempPath := temp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tempPath)
+		}
+	}()
+	if err := temp.Chmod(0600); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if _, err := temp.Write(contents); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tempPath, path); err != nil {
+		return err
+	}
+	cleanup = false
+	return os.Chmod(path, 0600)
 }
 
 func loadOrCreateSetupKey(path string) (string, error) {

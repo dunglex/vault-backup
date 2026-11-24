@@ -3,6 +3,7 @@ module vault-backup
 go 1.26.5
 
 require (
+	github.com/CovenantSQL/go-sqlite3-encrypt v1.13.0
 	github.com/hashicorp/vault/api v1.23.0
 	github.com/spf13/pflag v1.1.0
 	github.com/spf13/viper v1.21.0
@@ -35,16 +36,18 @@ require (
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/ryanuber/go-glob v1.0.0 // indirect
 	github.com/sagikazarmark/locafero v0.12.0 // indirect
-	github.com/sourcegraph/conc v0.3.1-0.20240121214520-5f936abd7ae8 // indirect
 	github.com/spf13/afero v1.15.0 // indirect
 	github.com/spf13/cast v1.10.0 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.6 // indirect
-	golang.org/x/net v0.63.0 // indirect
+	golang.org/x/net v0.63.0
 	golang.org/x/sys v0.50.0 // indirect
 	golang.org/x/text v0.44.0 // indirect
 	golang.org/x/time v0.16.0 // indirect
+	gopkg.in/check.v1 v1.0.0-20190902080502-41f04d3bba15 // indirect
+	howett.net/plist v1.0.1
 	modernc.org/libc v1.82.12 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.13.0 // indirect
+	software.sslmate.com/src/go-pkcs12 v0.7.4
 )

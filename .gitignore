@@ -1,9 +1,8 @@
 .vs
 *.ini
 *.json
-*.yaml
-*.yml
 *.env
 *.log
-/tests/data/
+/backups/
 /bin/
+/scripts/data/

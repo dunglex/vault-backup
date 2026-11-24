@@ -194,11 +194,25 @@ func connectToVault(arguments Arguments) *vault.Client {
 	config := vault.DefaultConfig()
 	config.Address = arguments.Url
 
-	// Skip TLS verification if insecure flag is set
-	if arguments.Insecure {
-		config.ConfigureTLS(&vault.TLSConfig{
-			Insecure: true,
-		})
+	tlsConfig := &vault.TLSConfig{
+		CACert:        arguments.CACert,
+		ClientCert:    arguments.ClientCert,
+		ClientKey:     arguments.ClientKey,
+		TLSServerName: arguments.TLSServerName,
+		Insecure:      arguments.Insecure,
+	}
+	if arguments.Insecure && (arguments.CACert != "" || arguments.ClientCert != "" || arguments.ClientKey != "") {
+		panic("VAULT_INSECURE cannot be combined with mTLS or custom CA configuration")
+	}
+	if arguments.ClientCert != "" || arguments.ClientKey != "" {
+		if arguments.ClientCert == "" || arguments.ClientKey == "" {
+			panic("Both VAULT_CLIENT_CERT and VAULT_CLIENT_KEY are required for mutual TLS")
+		}
+	}
+	if tlsConfig.CACert != "" || tlsConfig.ClientCert != "" || tlsConfig.ClientKey != "" || tlsConfig.TLSServerName != "" || arguments.Insecure {
+		if err := config.ConfigureTLS(tlsConfig); err != nil {
+			panic(fmt.Sprintf("Failed to configure Vault TLS: %v", err))
+		}
 	}
 
 	client, err := vault.NewClient(config)

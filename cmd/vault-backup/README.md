@@ -1,0 +1,89 @@
+# vault-backup
+
+`vault-backup` exports Vault KV secrets to local files and restores files into Vault.
+
+## Build
+
+From the repository root:
+
+```bash
+go build -o bin/vault-backup ./cmd/vault-backup
+```
+
+## Configuration
+
+Supply options as flags or as environment variables with the `VAULT_` prefix.
+
+| Flag | Environment variable | Description |
+| --- | --- | --- |
+| `--url` | `VAULT_URL` | Vault API URL, including `/api` when using `vault-server` |
+| `--user` | `VAULT_USER` | Vault username |
+| `--pass` | `VAULT_PASS` | Vault password |
+| `--secret_name` | `VAULT_SECRET_NAME` | Secret mount/name |
+| `--secret_path` | `VAULT_SECRET_PATH` | Secret path for backup |
+| `--output_mode` | `VAULT_OUTPUT_MODE` | `all`, `data`, or `file` (default: `all`) |
+| `--output_format` | `VAULT_OUTPUT_FORMAT` | `json`, `yaml`, `ini`, or `env` (default: `json`) |
+| `--output_path` | `VAULT_OUTPUT_PATH` | Output file or directory (default: `.`) |
+| `--insecure` | `VAULT_INSECURE` | Skip TLS certificate verification |
+| `--restore` | `VAULT_RESTORE` | Restore mode |
+| `--input_path` | `VAULT_INPUT_PATH` | Input file or directory for restore mode |
+| `--ca_cert` | `VAULT_CA_CERT` | CA certificate PEM that verifies the Vault server |
+| `--client_cert` | `VAULT_CLIENT_CERT` | Client certificate PEM for mutual TLS |
+| `--client_key` | `VAULT_CLIENT_KEY` | Client private key PEM for mutual TLS |
+| `--tls_server_name` | `VAULT_TLS_SERVER_NAME` | Optional TLS server-name override |
+
+Use HTTPS for direct TLS connections. HTTP is insecure and prints a warning when selected; use it only for private, trusted ingress networks. Do not use `--insecure` with untrusted networks.
+
+For mutual TLS, configure the server CA and the backup client certificate/key:
+
+```bash
+./bin/vault-backup \
+  --url https://vault.example:8200/api \
+  --ca_cert /etc/vault/tls/ca.crt \
+  --client_cert /etc/vault/tls/backup.crt \
+  --client_key /etc/vault/tls/backup.key \
+  --tls_server_name vault.example \
+  --user admin \
+  --pass "$VAULT_PASSWORD" \
+  --secret_name kv \
+  --secret_path app/database \
+  --output_mode file \
+  --output_format env \
+  --output_path ./database.env
+```
+
+Do not combine `--insecure` with custom CA or client-certificate settings.
+
+## Back up a secret
+
+```bash
+./bin/vault-backup \
+  --url http://vault.example:8201/api \
+  --user admin \
+  --pass "$VAULT_PASSWORD" \
+  --secret_name kv \
+  --secret_path app/database \
+  --output_mode file \
+  --output_format env \
+  --output_path ./database.env
+```
+
+## Restore a secret
+
+```bash
+./bin/vault-backup \
+  --url http://vault.example:8201/api \
+  --user admin \
+  --pass "$VAULT_PASSWORD" \
+  --secret_name kv \
+  --restore \
+  --input_path ./database.env
+```
+
+## Test
+
+From the repository root:
+
+```bash
+./tests/test-vault-backup.sh
+```

@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 
-set -xeu
+set -xeuo pipefail
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+ROOT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
+
+cd "$ROOT_DIR"
 
 # to user docker
 # set BUILDER=docker (cmd)
@@ -21,23 +26,11 @@ NOPUSH=${NOPUSH:-false}
 # Set the registry
 REGISTRY="registry.vn.eit.zone"
 
-APPS=(vault-backup vault-server)
+TARGET="$REGISTRY/hr-digi/vault-server:latest"
 
-for APP in "${APPS[@]}"; do
-  IMAGE="hr-digi/$APP"
-  TARGET="$REGISTRY/$IMAGE:latest"
+$BUILDER build --progress=plain --platform linux/amd64 --tag "$TARGET" .
 
-  $BUILDER build \
-    --progress=plain \
-    --platform linux/amd64 \
-    --build-arg "APP=$APP" \
-    --tag "$TARGET" \
-    .
-
-  if [ "$NOPUSH" = false ]; then
-    if [ "$APP" = "${APPS[0]}" ]; then
-      $BUILDER login "$REGISTRY"
-    fi
-    $BUILDER push $FORMAT_FLAG "$TARGET"
-  fi
-done
+if [ "$NOPUSH" = false ]; then
+  $BUILDER login "$REGISTRY"
+  $BUILDER push $FORMAT_FLAG "$TARGET"
+fi
