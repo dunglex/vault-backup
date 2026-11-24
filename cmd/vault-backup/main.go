@@ -7,12 +7,15 @@ import (
 
 func main() {
 	// Get arguments from command line or environment variables
-	arguments := parseArguments()
+	arguments, err := parseArguments()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "vault-backup failed: %v\n", err)
+		os.Exit(2)
+	}
 
 	// Connect to Vault
 	client := connectToVault(arguments)
 
-	var err error
 	if arguments.RestoreMode {
 		// Restore secrets from backup files to Vault
 		err = restoreSecrets(client, arguments)

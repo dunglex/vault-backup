@@ -13,13 +13,14 @@ go build -o bin/vault-backup ./cmd/vault-backup
 ## Configuration
 
 Supply options as flags or as environment variables with the `VAULT_` prefix.
+Invalid or incomplete configuration is rejected with exit status 2 before connecting to Vault.
 
 | Flag | Environment variable | Description |
 | --- | --- | --- |
 | `--url` | `VAULT_URL` | Vault API URL, including `/api` when using `vault-server` |
 | `--user` | `VAULT_USER` | Vault username |
 | `--pass` | `VAULT_PASS` | Vault password |
-| `--token` | `VAULT_TOKEN` | Managed API token (alternative to username/password) |
+| `--token` | `VAULT_TOKEN` | Managed API token (alternative to username/password; cannot be combined with user/pass) |
 | `--secret_name` | `VAULT_SECRET_NAME` | Secret mount/name |
 | `--secret_path` | `VAULT_SECRET_PATH` | Secret path for backup |
 | `--output_mode` | `VAULT_OUTPUT_MODE` | `all`, `data`, or `file` (default: `all`) |

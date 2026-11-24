@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 
@@ -28,7 +29,7 @@ type Arguments struct {
 	TLSServerName string
 }
 
-func parseArguments() Arguments {
+func parseArguments() (Arguments, error) {
 	// Define flags
 	pflag.StringP("url", "h", "", "Vault server host url (required) [env: VAULT_URL]")
 	pflag.StringP("user", "u", "", "Vault username (required) [env: VAULT_USER]")
@@ -87,55 +88,30 @@ func parseArguments() Arguments {
 	viper.BindEnv("tls_server_name")
 
 	// Get values from viper
-	vaultAddr := viper.GetString("url")
-	username := viper.GetString("user")
+	vaultAddr := strings.TrimSpace(viper.GetString("url"))
+	username := strings.TrimSpace(viper.GetString("user"))
 	password := viper.GetString("pass")
-	token := viper.GetString("token")
-	secretName := viper.GetString("secret_name")
-	secretPath := viper.GetString("secret_path")
+	token := strings.TrimSpace(viper.GetString("token"))
+	secretName := strings.TrimSpace(viper.GetString("secret_name"))
+	secretPath := strings.TrimSpace(viper.GetString("secret_path"))
 	outputMode := viper.GetString("output_mode")
 	outputFormat := viper.GetString("output_format")
-	outputPath := viper.GetString("output_path")
+	outputPath := strings.TrimSpace(viper.GetString("output_path"))
 	insecure := viper.GetBool("insecure")
 	restoreMode := viper.GetBool("restore")
-	inputPath := viper.GetString("input_path")
-	caCert := viper.GetString("ca_cert")
-	clientCert := viper.GetString("client_cert")
-	clientKey := viper.GetString("client_key")
-	tlsServerName := viper.GetString("tls_server_name")
-
-	// Validate arguments
-	if vaultAddr == "" || (token == "" && (username == "" || password == "")) {
-		fmt.Println("url and either token or user/pass are required (via flag or environment variable)")
-	}
-	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(vaultAddr)), "http://") {
-		fmt.Fprintln(os.Stderr, "WARNING: insecure HTTP Vault URL; credentials and secret data may be exposed without TLS")
-	}
-	if strings.TrimSpace(clientCert) != "" || strings.TrimSpace(clientKey) != "" {
-		if strings.TrimSpace(clientCert) == "" || strings.TrimSpace(clientKey) == "" {
-			fmt.Println("client_cert and client_key are both required for mutual TLS")
-		}
-	}
-
-	if restoreMode {
-		if inputPath == "" {
-			fmt.Println("input_path is required for restore mode")
-		}
-		if secretName == "" {
-			fmt.Println("secret_name is required for restore mode")
-		}
-	} else {
-		if secretName == "" || secretPath == "" {
-			fmt.Println("secret_name and secret_path are required for backup mode")
-		}
-	}
+	inputPath := strings.TrimSpace(viper.GetString("input_path"))
+	caCert := strings.TrimSpace(viper.GetString("ca_cert"))
+	clientCert := strings.TrimSpace(viper.GetString("client_cert"))
+	clientKey := strings.TrimSpace(viper.GetString("client_key"))
+	tlsServerName := strings.TrimSpace(viper.GetString("tls_server_name"))
 
 	// Allow secretName to be a full path or a relative path
-	secretName = strings.TrimPrefix(secretName, "/v1/")
-	secretName = strings.TrimSuffix(secretName, "/")
+	secretName = strings.TrimSuffix(strings.TrimPrefix(secretName, "/v1/"), "/")
 	secretPath = strings.TrimPrefix(secretPath, "/")
+	outputMode = strings.ToLower(strings.TrimSpace(outputMode))
+	outputFormat = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(outputFormat), "."))
 
-	return Arguments{
+	arguments := Arguments{
 		Url:           vaultAddr,
 		User:          username,
 		Pass:          password,
@@ -153,4 +129,76 @@ func parseArguments() Arguments {
 		ClientKey:     clientKey,
 		TLSServerName: tlsServerName,
 	}
+	return arguments, validateArguments(arguments)
+}
+
+func validateArguments(arguments Arguments) error {
+	var failures []string
+	addFailure := func(message string) {
+		failures = append(failures, message)
+	}
+
+	arguments.Url = strings.TrimSpace(arguments.Url)
+	parsedURL, err := url.Parse(arguments.Url)
+	if arguments.Url == "" {
+		addFailure("url is required")
+	} else if err != nil || parsedURL == nil || parsedURL.Host == "" || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
+		addFailure("url must be an absolute http or https URL")
+	}
+
+	hasUser := strings.TrimSpace(arguments.User) != ""
+	hasPass := strings.TrimSpace(arguments.Pass) != ""
+	hasToken := strings.TrimSpace(arguments.Token) != ""
+	if hasUser != hasPass {
+		addFailure("user and pass must be provided together")
+	}
+	if !hasToken && !(hasUser && hasPass) {
+		addFailure("either token or user/pass is required")
+	}
+	if hasToken && (hasUser || hasPass) {
+		addFailure("token cannot be combined with user or pass")
+	}
+
+	if strings.TrimSpace(arguments.ClientCert) == "" != (strings.TrimSpace(arguments.ClientKey) == "") {
+		addFailure("client_cert and client_key must be provided together")
+	}
+	if arguments.Insecure && (strings.TrimSpace(arguments.CACert) != "" ||
+		strings.TrimSpace(arguments.ClientCert) != "" ||
+		strings.TrimSpace(arguments.ClientKey) != "") {
+		addFailure("insecure cannot be combined with a custom CA or mTLS configuration")
+	}
+
+	if arguments.SecretName == "" {
+		addFailure("secret_name is required")
+	}
+	if arguments.RestoreMode {
+		if strings.TrimSpace(arguments.InputPath) == "" {
+			addFailure("input_path is required for restore mode")
+		}
+	} else {
+		if arguments.SecretPath == "" {
+			addFailure("secret_path is required for backup mode")
+		}
+		switch arguments.OutputMode {
+		case "all", "data", "file":
+		default:
+			addFailure("output_mode must be one of: all, data, file")
+		}
+		switch arguments.OutputFormat {
+		case "json", "yaml", "yml", "ini", "env":
+		default:
+			addFailure("output_format must be one of: json, yaml, yml, ini, env")
+		}
+		if strings.EqualFold(arguments.OutputMode, "file") && strings.TrimSpace(arguments.OutputPath) == "" {
+			addFailure("output_path is required when output_mode is file")
+		}
+	}
+
+	if parsedURL != nil && strings.EqualFold(parsedURL.Scheme, "http") {
+		fmt.Fprintln(os.Stderr, "WARNING: insecure HTTP Vault URL; credentials and secret data may be exposed without TLS")
+	}
+	if len(failures) > 0 {
+		return fmt.Errorf("invalid configuration: %s", strings.Join(failures, "; "))
+	}
+	return nil
 }
