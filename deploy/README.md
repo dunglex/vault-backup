@@ -22,7 +22,7 @@ with an immutable image tag or digest and use `imagePullPolicy: IfNotPresent`.
 The deployment uses two persistent volumes:
 
 - `vault-server-data` stores the live database, key, yearly audit databases,
-  and server state.
+  separate encrypted secrets database, its key, and server state.
 - `vault-server-backups` is mounted at `/backups` and can store backup archives.
 
 Generate a backup inside the running pod with:
@@ -31,6 +31,7 @@ Generate a backup inside the running pod with:
 kubectl -n vault-backup exec deploy/vault-server -- \
   /app/scripts/backup-vault-server.sh \
   --db /data/vault.db \
+  --secrets-db /data/vault-secrets.db \
   --audit-db /data/audit.db \
   --output /backups/vault-server-backup.tar.gz
 ```

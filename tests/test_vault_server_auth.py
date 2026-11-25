@@ -83,8 +83,13 @@ def main() -> None:
         status, security_page = server.client.request("GET", f"{server.https_url}/security.html")
         assert_status(200, status, "open mTLS security page")
         require(
-            b'id="enforceMTLS"' in security_page and b'id="autoRotate"' not in security_page,
-            "mTLS setting controls",
+            b'id="enforceMTLS"' in security_page
+            and b'id="autoBlockLoginBruteforceIP"' in security_page
+            and b'id="viewBlockedIPs"' in security_page
+            and b'id="blockedIPsDialog"' in security_page
+            and b"Unblock" in security_page
+            and b'id="autoRotate"' not in security_page,
+            "security settings and blocked IP dialog",
         )
         require(b'id="logout"' not in security_page, "remove Logout from Security navigation")
         require(b'id="operatorForm"' not in security_page, "keep operator management out of Security")
@@ -272,7 +277,62 @@ def main() -> None:
         assert_status(200, status, "read secret with managed API token")
 
         _, settings = server.client.json("GET", f"{server.https_url}/v1/settings")
-        require(settings == {"enforce_mtls": False}, "default mTLS settings")
+        require(
+            settings
+            == {
+                "enforce_mtls": False,
+                "auto_block_login_bruteforce_ip": False,
+            },
+            "default security settings",
+        )
+        status, blocked = server.client.json(
+            "GET", f"{server.https_url}/v1/settings/blocked-login-ips"
+        )
+        assert_status(200, status, "read blocked login IPs")
+        require(blocked["blocked_ips"] == [], "blocked IP list is empty by default")
+        status, _ = server.client.request(
+            "DELETE",
+            f"{server.https_url}/v1/settings/blocked-login-ips/198.51.100.250",
+        )
+        assert_status(404, status, "reject unblocking an IP that is not blocked")
+        _, unblock_audit = server.client.json(
+            "GET",
+            f"{server.https_url}/v1/audit?action=unblock_login_ip&q=198.51.100.250",
+        )
+        require(
+            any(event["outcome"] == "failure" for event in unblock_audit["events"]),
+            "audit failed unblock request",
+        )
+        status, updated_settings = server.client.json(
+            "PUT",
+            f"{server.https_url}/v1/settings",
+            data={"auto_block_login_bruteforce_ip": True},
+        )
+        assert_status(200, status, "enable automatic login IP blocking")
+        require(
+            updated_settings["auto_block_login_bruteforce_ip"] is True,
+            "automatic login IP blocking is enabled",
+        )
+        status, updated_settings = server.client.json(
+            "PUT",
+            f"{server.https_url}/v1/settings",
+            data={"enforce_mtls": False},
+        )
+        assert_status(200, status, "update mTLS without changing login IP blocking")
+        require(
+            updated_settings["auto_block_login_bruteforce_ip"] is True,
+            "updating mTLS preserves login IP blocking setting",
+        )
+        status, updated_settings = server.client.json(
+            "PUT",
+            f"{server.https_url}/v1/settings",
+            data={"auto_block_login_bruteforce_ip": False},
+        )
+        assert_status(200, status, "disable automatic login IP blocking")
+        require(
+            updated_settings["auto_block_login_bruteforce_ip"] is False,
+            "automatic login IP blocking is disabled",
+        )
         status, _ = server.client.json(
             "PUT",
             f"{server.https_url}/v1/settings",

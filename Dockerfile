@@ -33,6 +33,7 @@ VOLUME /data
 
 # Set default environment variables for Vault server
 ENV VAULT_SERVER_DB=/data/vault.db
+ENV VAULT_SERVER_SECRETS_DB=/data/vault-secrets.db
 ENV VAULT_SERVER_HEALTHCHECK_URL=https://127.0.0.1:8200/health
 
 USER vault

@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
@@ -49,12 +48,14 @@ const (
 
 type server struct {
 	db            *sql.DB
+	secretsDB     *sql.DB
 	auditStore    *auditStore
 	setupKey      string
 	setupKeyPath  string
 	setupDeadline time.Time
 	adminName     string
 	aead          cipher.AEAD
+	secretsAEAD   cipher.AEAD
 	clientCA      *managedClientCA
 	serverCerts   *serverCertificateManager
 	acmeAvailable bool
@@ -63,6 +64,7 @@ type server struct {
 	sessions       map[string]sessionInfo
 	attempts       map[string][]time.Time
 	trustedProxies []*net.IPNet
+	loginDelay     func(context.Context) error
 }
 
 type sessionInfo struct {
@@ -129,7 +131,11 @@ func main() {
 		log.Printf("WARNING: insecure HTTP listener enabled on %s; traffic is not encrypted", config.HTTPAddr)
 	}
 
-	databaseDirs := []string{filepath.Dir(config.DBPath), filepath.Dir(config.AuditDBPath)}
+	databaseDirs := []string{
+		filepath.Dir(config.DBPath),
+		filepath.Dir(config.SecretsDBPath),
+		filepath.Dir(config.AuditDBPath),
+	}
 	for _, dir := range databaseDirs {
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			log.Fatal(err)
@@ -143,6 +149,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	secretsMasterKey, err := loadOrCreateKey(config.SecretsDBPath+".key", config.DBPassword)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	db, _, err := openDatabaseWithOptions(config.DBPath, masterKey, config.AllowPlaintextDB)
 	if err != nil {
@@ -151,6 +161,15 @@ func main() {
 	defer func() {
 		if err := db.Close(); err != nil {
 			log.Printf("Could not close database cleanly: %v", err)
+		}
+	}()
+	secretsDB, _, err := openDatabaseWithOptions(config.SecretsDBPath, secretsMasterKey, false)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer func() {
+		if err := secretsDB.Close(); err != nil {
+			log.Printf("Could not close secrets database cleanly: %v", err)
 		}
 	}()
 	auditStore, err := openAnnualAuditStore(config.AuditDBPath)
@@ -168,6 +187,15 @@ func main() {
 	}
 
 	if err := initializeDatabase(db); err != nil {
+		log.Fatal(err)
+	}
+	if err := initializeSecretsDatabase(secretsDB); err != nil {
+		log.Fatal(err)
+	}
+	if err := os.Chmod(config.DBPath, 0600); err != nil {
+		log.Fatal(err)
+	}
+	if err := os.Chmod(config.SecretsDBPath, 0600); err != nil {
 		log.Fatal(err)
 	}
 	serverCerts, err := newServerCertificateManager(
@@ -212,12 +240,11 @@ func main() {
 		}
 	}
 
-	applicationKey := sha256.Sum256(masterKey)
-	block, err := aes.NewCipher(applicationKey[:])
+	aead, err := newDatabaseAEAD(masterKey)
 	if err != nil {
 		log.Fatal(err)
 	}
-	aead, err := cipher.NewGCM(block)
+	secretsAEAD, err := newDatabaseAEAD(secretsMasterKey)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -225,12 +252,14 @@ func main() {
 	// Web server initialization.
 	s := &server{
 		db:             db,
+		secretsDB:      secretsDB,
 		auditStore:     auditStore,
 		setupKey:       setupKey,
 		setupKeyPath:   setupKeyPath,
 		setupDeadline:  setupDeadline,
 		adminName:      adminName,
 		aead:           aead,
+		secretsAEAD:    secretsAEAD,
 		serverCerts:    serverCerts,
 		acmeAvailable:  config.HTTPAddr != "",
 		sessions:       map[string]sessionInfo{},
@@ -318,6 +347,8 @@ func main() {
 	mux.HandleFunc("POST /v1/tokens/{id}/certificate", s.issueAPITokenCertificate)
 	mux.HandleFunc("GET /v1/settings", s.getSettings)
 	mux.HandleFunc("PUT /v1/settings", s.updateSettings)
+	mux.HandleFunc("GET /v1/settings/blocked-login-ips", s.listBlockedLoginIPs)
+	mux.HandleFunc("DELETE /v1/settings/blocked-login-ips/{ip}", s.unblockLoginIP)
 	mux.HandleFunc("GET /v1/operators", s.listOperators)
 	mux.HandleFunc("POST /v1/operators", s.createOperator)
 	mux.HandleFunc("DELETE /v1/operators", s.deleteOperator)
@@ -388,7 +419,7 @@ func main() {
 	if setupKey != "" {
 		fmt.Printf("Vault setup key: %s\n", setupKey)
 	}
-	log.Printf("Vault server listening on %s (SQLite: %s; audit: %s)", config.Addr, config.DBPath, config.AuditDBPath)
+	log.Printf("Vault server listening on %s (app DB: %s; secrets DB: %s; audit: %s)", config.Addr, config.DBPath, config.SecretsDBPath, config.AuditDBPath)
 	log.Printf("Vault server serving HTTPS on %s", config.Addr)
 	if httpListener != nil {
 		log.Printf("Vault server serving HTTP on %s", config.HTTPAddr)
@@ -468,24 +499,40 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 }
 
 func (s *server) encrypt(plaintext []byte) (string, error) {
-	nonce := make([]byte, s.aead.NonceSize())
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		return "", err
-	}
-	sealed := s.aead.Seal(nonce, nonce, plaintext, nil)
-	return base64.RawStdEncoding.EncodeToString(sealed), nil
+	return encryptWithAEAD(s.aead, plaintext)
 }
 
 func (s *server) decrypt(encoded string) ([]byte, error) {
+	return decryptWithAEAD(s.aead, encoded)
+}
+
+func (s *server) encryptSecret(plaintext []byte) (string, error) {
+	return encryptWithAEAD(s.secretsAEAD, plaintext)
+}
+
+func (s *server) decryptSecret(encoded string) ([]byte, error) {
+	return decryptWithAEAD(s.secretsAEAD, encoded)
+}
+
+func encryptWithAEAD(aead cipher.AEAD, plaintext []byte) (string, error) {
+	nonce := make([]byte, aead.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return "", err
+	}
+	sealed := aead.Seal(nonce, nonce, plaintext, nil)
+	return base64.RawStdEncoding.EncodeToString(sealed), nil
+}
+
+func decryptWithAEAD(aead cipher.AEAD, encoded string) ([]byte, error) {
 	sealed, err := base64.RawStdEncoding.DecodeString(encoded)
 	if err != nil {
 		return nil, err
 	}
-	if len(sealed) < s.aead.NonceSize() {
+	if len(sealed) < aead.NonceSize() {
 		return nil, fmt.Errorf("invalid ciphertext")
 	}
-	nonce, ciphertext := sealed[:s.aead.NonceSize()], sealed[s.aead.NonceSize():]
-	return s.aead.Open(nil, nonce, ciphertext, nil)
+	nonce, ciphertext := sealed[:aead.NonceSize()], sealed[aead.NonceSize():]
+	return aead.Open(nil, nonce, ciphertext, nil)
 }
 
 func serveEmbeddedAsset(name, contentType string) http.HandlerFunc {
@@ -504,19 +551,53 @@ func serveEmbeddedAsset(name, contentType string) http.HandlerFunc {
 func (s *server) health(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
-	var result int
-	if s.db == nil || s.db.QueryRowContext(ctx, "SELECT 1").Scan(&result) != nil || result != 1 {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]bool{"ok": false})
-		return
+	checks := []func(context.Context) error{
+		func(ctx context.Context) error {
+			return checkDatabaseHealth(ctx, s.db)
+		},
+		func(ctx context.Context) error {
+			return checkDatabaseHealth(ctx, s.secretsDB)
+		},
+		func(ctx context.Context) error {
+			if s.auditStore == nil {
+				return errors.New("audit database unavailable")
+			}
+			return s.auditStore.withYear(time.Now().UTC().Year(), func(db *sql.DB) error {
+				return checkDatabaseHealth(ctx, db)
+			})
+		},
 	}
-	result = 0
-	if s.auditStore == nil || s.auditStore.withYear(time.Now().UTC().Year(), func(db *sql.DB) error {
-		return db.QueryRowContext(ctx, "SELECT 1").Scan(&result)
-	}) != nil || result != 1 {
+	results := make(chan error, len(checks))
+	for _, check := range checks {
+		go func(check func(context.Context) error) {
+			results <- check(ctx)
+		}(check)
+	}
+	healthy := true
+	for range checks {
+		if err := <-results; err != nil {
+			healthy = false
+		}
+	}
+	if !healthy {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]bool{"ok": false})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func checkDatabaseHealth(ctx context.Context, db *sql.DB) error {
+	if db == nil {
+		return errors.New("database unavailable")
+	}
+	var result int
+	if err := db.QueryRowContext(ctx, "SELECT 1").Scan(&result); err != nil {
+		return err
+	}
+	if result != 1 {
+		return errors.New("database health query returned an unexpected result")
+	}
+	return nil
 }
 
 func (s *server) setupAvailable(w http.ResponseWriter) bool {
@@ -741,8 +822,12 @@ func (s *server) requestIsHTTPS(r *http.Request) bool {
 }
 
 func (s *server) login(w http.ResponseWriter, r *http.Request) {
+	if s.rejectBlockedLoginIP(w, r, "web") {
+		return
+	}
 	var req accountRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.recordLoginFailure(r, "web")
 		s.recordAuditEvent(r, "login", "failure", "unknown", "web", "", "invalid_request")
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
 		return
@@ -753,6 +838,9 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many login attempts"})
 		return
 	}
+	if s.delayLoginAction(w, r) {
+		return
+	}
 
 	var hash, role string
 	var totpSecret sql.NullString
@@ -761,11 +849,13 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		"SELECT password_hash, role, totp_secret, totp_enabled FROM accounts WHERE username = ?",
 		req.Username,
 	).Scan(&hash, &role, &totpSecret, &totpEnabled); err != nil {
+		s.recordLoginFailure(r, "web")
 		s.recordAuditEvent(r, "login", "failure", req.Username, "web", "", "invalid_credentials")
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid username or password"})
 		return
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(req.Password)); err != nil {
+		s.recordLoginFailure(r, "web")
 		s.recordAuditEvent(r, "login", "failure", req.Username, "web", "", "invalid_credentials")
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid username or password"})
 		return
@@ -786,6 +876,7 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !valid {
+			s.recordLoginFailure(r, "web")
 			s.recordAuditEvent(r, "login", "failure", req.Username, "web", "", "invalid_second_factor")
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid username, password, or authentication code"})
 			return
@@ -797,6 +888,7 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not create session"})
 		return
 	}
+	s.resetLoginFailuresAfterSuccess(r)
 	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
 	sessionTTL := defaultSessionTTL
 	if totpEnabled == 1 {
@@ -827,9 +919,13 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) loginLDAP(w http.ResponseWriter, r *http.Request) {
+	if s.rejectBlockedLoginIP(w, r, "api") {
+		return
+	}
 	username := r.PathValue("username")
 	var req accountRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.recordLoginFailure(r, "api")
 		s.recordAuditEvent(r, "login", "failure", username, "api", "", "invalid_request")
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
 		return
@@ -839,6 +935,9 @@ func (s *server) loginLDAP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many login attempts"})
 		return
 	}
+	if s.delayLoginAction(w, r) {
+		return
+	}
 	var hash, role string
 	var totpSecret sql.NullString
 	var totpEnabled int
@@ -846,11 +945,13 @@ func (s *server) loginLDAP(w http.ResponseWriter, r *http.Request) {
 		"SELECT password_hash, role, totp_secret, totp_enabled FROM accounts WHERE username = ?",
 		username,
 	).Scan(&hash, &role, &totpSecret, &totpEnabled); err != nil {
+		s.recordLoginFailure(r, "api")
 		s.recordAuditEvent(r, "login", "failure", username, "api", "", "invalid_credentials")
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid username or password"})
 		return
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(req.Password)); err != nil {
+		s.recordLoginFailure(r, "api")
 		s.recordAuditEvent(r, "login", "failure", username, "api", "", "invalid_credentials")
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid username or password"})
 		return
@@ -861,6 +962,7 @@ func (s *server) loginLDAP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if req.TOTPCode == "" {
+			s.recordLoginFailure(r, "api")
 			s.recordAuditEvent(r, "login", "failure", username, "api", "", "totp_required")
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authentication code required"})
 			return
@@ -871,6 +973,7 @@ func (s *server) loginLDAP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !valid {
+			s.recordLoginFailure(r, "api")
 			s.recordAuditEvent(r, "login", "failure", username, "api", "", "invalid_second_factor")
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid username, password, or authentication code"})
 			return
@@ -881,6 +984,7 @@ func (s *server) loginLDAP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not create session"})
 		return
 	}
+	s.resetLoginFailuresAfterSuccess(r)
 	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
 	s.mu.Lock()
 	if s.sessions == nil {
@@ -1307,12 +1411,12 @@ func (s *server) getKVSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var encrypted string
-	if err := s.db.QueryRow("SELECT data FROM secrets WHERE path = ?", path).Scan(&encrypted); err != nil {
+	if err := s.secretsDB.QueryRow("SELECT data FROM secrets WHERE path = ?", path).Scan(&encrypted); err != nil {
 		s.recordAuditEvent(r, "read", "failure", s.auditRequestActor(r, source), source, path, "not_found")
 		writeJSON(w, http.StatusNotFound, map[string]any{"errors": []string{"secret not found"}})
 		return
 	}
-	plaintext, err := s.decrypt(encrypted)
+	plaintext, err := s.decryptSecret(encrypted)
 	if err != nil {
 		s.recordAuditEvent(r, "read", "failure", s.auditRequestActor(r, source), source, path, "storage_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "invalid stored secret"})
@@ -1342,7 +1446,7 @@ func (s *server) putKVSecret(w http.ResponseWriter, r *http.Request) {
 	}
 	action := "create"
 	var exists int
-	if err := s.db.QueryRow("SELECT 1 FROM secrets WHERE path = ?", path).Scan(&exists); err == nil {
+	if err := s.secretsDB.QueryRow("SELECT 1 FROM secrets WHERE path = ?", path).Scan(&exists); err == nil {
 		action = "update"
 	} else if err != sql.ErrNoRows {
 		s.recordAuditEvent(r, action, "failure", s.auditRequestActor(r, source), source, path, "storage_error")
@@ -1363,13 +1467,13 @@ func (s *server) putKVSecret(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid secret data"})
 		return
 	}
-	encrypted, err := s.encrypt(plaintext)
+	encrypted, err := s.encryptSecret(plaintext)
 	if err != nil {
 		s.recordAuditEvent(r, action, "failure", s.auditRequestActor(r, source), source, path, "storage_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not store secret"})
 		return
 	}
-	if _, err := s.db.Exec(`INSERT INTO secrets(path, data, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
+	if _, err := s.secretsDB.Exec(`INSERT INTO secrets(path, data, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(path) DO UPDATE SET data = excluded.data, updated_at = CURRENT_TIMESTAMP`, path, encrypted); err != nil {
 		s.recordAuditEvent(r, action, "failure", s.auditRequestActor(r, source), source, path, "storage_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not store secret"})
@@ -1391,7 +1495,7 @@ func (s *server) deleteKVSecret(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
-	if _, err := s.db.Exec("DELETE FROM secrets WHERE path = ?", path); err != nil {
+	if _, err := s.secretsDB.Exec("DELETE FROM secrets WHERE path = ?", path); err != nil {
 		s.recordAuditEvent(r, "delete", "failure", s.auditRequestActor(r, source), source, path, "storage_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not delete secret"})
 		return
@@ -1418,7 +1522,7 @@ func (s *server) listKVMetadata(w http.ResponseWriter, r *http.Request) {
 	if secretPrefix != "" {
 		prefix += strings.Trim(secretPrefix, "/") + "/"
 	}
-	rows, err := s.db.Query("SELECT path FROM secrets WHERE path LIKE ? ORDER BY path", prefix+"%")
+	rows, err := s.secretsDB.Query("SELECT path FROM secrets WHERE path LIKE ? ORDER BY path", prefix+"%")
 	if err != nil {
 		s.recordAuditEvent(r, "list", "failure", s.auditRequestActor(r, source), source, r.PathValue("mount")+"/"+r.PathValue("path"), "storage_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not list secrets"})
@@ -1458,11 +1562,11 @@ func (s *server) getSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var encrypted string
-	if err := s.db.QueryRow("SELECT data FROM secrets WHERE path = ?", path).Scan(&encrypted); err != nil {
+	if err := s.secretsDB.QueryRow("SELECT data FROM secrets WHERE path = ?", path).Scan(&encrypted); err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "secret not found"})
 		return
 	}
-	plaintext, err := s.decrypt(encrypted)
+	plaintext, err := s.decryptSecret(encrypted)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "invalid stored secret"})
 		return
@@ -1488,7 +1592,7 @@ func (s *server) putSecret(w http.ResponseWriter, r *http.Request) {
 	}
 	action := "create"
 	var exists int
-	if err := s.db.QueryRow("SELECT 1 FROM secrets WHERE path = ?", path).Scan(&exists); err == nil {
+	if err := s.secretsDB.QueryRow("SELECT 1 FROM secrets WHERE path = ?", path).Scan(&exists); err == nil {
 		action = "update"
 	} else if err != sql.ErrNoRows {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not store secret"})
@@ -1505,12 +1609,12 @@ func (s *server) putSecret(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid secret data"})
 		return
 	}
-	encrypted, err := s.encrypt(plaintext)
+	encrypted, err := s.encryptSecret(plaintext)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not store secret"})
 		return
 	}
-	if _, err := s.db.Exec(`INSERT INTO secrets(path, data, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
+	if _, err := s.secretsDB.Exec(`INSERT INTO secrets(path, data, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(path) DO UPDATE SET data = excluded.data, updated_at = CURRENT_TIMESTAMP`, path, encrypted); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not store secret"})
 		return
@@ -1529,7 +1633,7 @@ func (s *server) deleteSecret(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
-	if _, err := s.db.Exec("DELETE FROM secrets WHERE path = ?", path); err != nil {
+	if _, err := s.secretsDB.Exec("DELETE FROM secrets WHERE path = ?", path); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not delete secret"})
 		return
 	}
@@ -1543,7 +1647,7 @@ func (s *server) listSecrets(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
-	rows, err := s.db.Query("SELECT path FROM secrets ORDER BY path")
+	rows, err := s.secretsDB.Query("SELECT path FROM secrets ORDER BY path")
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not list secrets"})
 		return
@@ -1599,7 +1703,7 @@ func (s *server) browseSecrets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := s.db.Query("SELECT path FROM secrets ORDER BY path")
+	rows, err := s.secretsDB.Query("SELECT path FROM secrets ORDER BY path")
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not list secrets"})
 		return

@@ -4,6 +4,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -86,6 +87,15 @@ func openDatabaseWithOptions(path string, key []byte, allowPlaintext bool) (*sql
 }
 
 func initializeDatabase(db *sql.DB) error {
+	var legacySecretsTable int
+	if err := db.QueryRow(
+		"SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'secrets'",
+	).Scan(&legacySecretsTable); err != nil {
+		return fmt.Errorf("check for legacy secrets table: %w", err)
+	}
+	if legacySecretsTable != 0 {
+		return fmt.Errorf("legacy secrets table found in app database; this build does not migrate it, so reset the predeployment database before starting")
+	}
 	if _, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS accounts (
 			username TEXT PRIMARY KEY,
@@ -95,11 +105,6 @@ func initializeDatabase(db *sql.DB) error {
 			totp_enabled INTEGER NOT NULL DEFAULT 0 CHECK (totp_enabled IN (0, 1)),
 			totp_recovery_codes TEXT NOT NULL DEFAULT '[]',
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-		);
-		CREATE TABLE IF NOT EXISTS secrets (
-			path TEXT PRIMARY KEY,
-			data TEXT NOT NULL,
-			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		);
 		CREATE TABLE IF NOT EXISTS api_tokens (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -112,6 +117,18 @@ func initializeDatabase(db *sql.DB) error {
 		CREATE TABLE IF NOT EXISTS server_settings (
 			key TEXT PRIMARY KEY,
 			value TEXT NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS login_ip_failures (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			client_ip TEXT NOT NULL,
+			failed_at INTEGER NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_login_ip_failures_ip_time ON login_ip_failures(client_ip, failed_at);
+		CREATE INDEX IF NOT EXISTS idx_login_ip_failures_time ON login_ip_failures(failed_at);
+		CREATE TABLE IF NOT EXISTS blocked_login_ips (
+			client_ip TEXT PRIMARY KEY,
+			blocked_at INTEGER NOT NULL,
+			failure_count INTEGER NOT NULL
 		);
 		CREATE TABLE IF NOT EXISTS managed_client_certificates (
 			serial_number TEXT PRIMARY KEY,
@@ -135,6 +152,28 @@ func initializeDatabase(db *sql.DB) error {
 		return err
 	}
 	return allowDuplicateAPITokenNames(db)
+}
+
+func initializeSecretsDatabase(db *sql.DB) error {
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS secrets (
+			path TEXT PRIMARY KEY,
+			data TEXT NOT NULL,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);
+	`); err != nil {
+		return fmt.Errorf("initialize secrets database: %w", err)
+	}
+	return nil
+}
+
+func newDatabaseAEAD(masterKey []byte) (cipher.AEAD, error) {
+	applicationKey := sha256.Sum256(masterKey)
+	block, err := aes.NewCipher(applicationKey[:])
+	if err != nil {
+		return nil, err
+	}
+	return cipher.NewGCM(block)
 }
 
 func ensureAccountRoleColumn(db *sql.DB) error {

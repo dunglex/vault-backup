@@ -23,8 +23,8 @@
   </header>
   <div id="error" class="notice" role="alert"></div>
   <section class="panel">
-    <h2 class="section-label">Client certificate settings</h2>
-    <p>These controls apply to Vault API traffic. Admin pages and health checks remain available without a client certificate. Enforced API requests must use HTTPS; a TLS-terminating proxy must use TLS passthrough or HTTPS to the server.</p>
+    <h2 class="section-label">Security settings</h2>
+    <p>Mutual TLS enforcement applies to Vault API traffic. Admin pages and health checks remain available without a client certificate. Enforced API requests must use HTTPS; a TLS-terminating proxy must use TLS passthrough or HTTPS to the server.</p>
     <form id="settingsForm">
       <label class="setting-option">
         <input id="enforceMTLS" type="checkbox">
@@ -32,11 +32,32 @@
       </label>
       <p class="muted">Before enabling, issue and install a certificate for every client that needs API access. When enabled, requests must use a valid certificate issued for the same managed API token. Older vault-backup clients will be rejected and must be upgraded.</p>
       <p class="muted">Choose the token lifetime when creating an API token (1-365 days). Its client certificate expires at the same time. To renew credentials, create a replacement token and certificate before expiry.</p>
+      <label class="setting-option">
+        <input id="autoBlockLoginBruteforceIP" type="checkbox">
+        Auto block login bruteforce IP
+      </label>
+      <p class="muted">When enabled, an IP address is permanently blocked after five failed logins within ten minutes. Successful logins reset that IP's failure sequence. Blocks remain stored if this option is disabled.</p>
+      <p><button id="viewBlockedIPs" class="button button-outline" type="button">View blocked IPs</button></p>
       <div class="row-actions">
         <button id="saveSettings" type="submit">Save settings</button>
         <span id="saved" class="success" role="status"></span>
       </div>
     </form>
+    <dialog id="blockedIPsDialog" class="admin-dialog" aria-labelledby="blockedIPsTitle">
+      <div class="admin-dialog-heading">
+        <h2 id="blockedIPsTitle">Blocked login IPs</h2>
+        <button id="closeBlockedIPs" class="button button-outline" type="button">Close</button>
+      </div>
+      <p class="muted">Blocked addresses do not expire. Disable automatic blocking to stop enforcing stored blocks.</p>
+      <div id="blockedIPsError" class="notice" role="alert"></div>
+      <p id="blockedIPsEmpty" class="muted" hidden>No IP addresses are blocked.</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>IP address</th><th>Blocked at (UTC)</th><th>Failed logins</th><th>Action</th></tr></thead>
+          <tbody id="blockedIPs"></tbody>
+        </table>
+      </div>
+    </dialog>
   </section>
 </main>
 <script>
@@ -55,6 +76,7 @@ async function loadSettings() {
   try {
     const settings = await api('/v1/settings');
     document.getElementById('enforceMTLS').checked = settings.enforce_mtls;
+    document.getElementById('autoBlockLoginBruteforceIP').checked = settings.auto_block_login_bruteforce_ip;
   } catch (error) {
     errorBox.textContent = error.message;
   }
@@ -71,7 +93,8 @@ document.getElementById('settingsForm').addEventListener('submit', async event =
       method:'PUT',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({
-        enforce_mtls:document.getElementById('enforceMTLS').checked
+        enforce_mtls:document.getElementById('enforceMTLS').checked,
+        auto_block_login_bruteforce_ip:document.getElementById('autoBlockLoginBruteforceIP').checked
       })
     });
     saved.textContent = 'Settings saved.';
@@ -80,6 +103,54 @@ document.getElementById('settingsForm').addEventListener('submit', async event =
   } finally {
     button.disabled = false;
   }
+});
+
+async function refreshBlockedIPs() {
+  const body = document.getElementById('blockedIPs');
+  const empty = document.getElementById('blockedIPsEmpty');
+  body.replaceChildren();
+  const result = await api('/v1/settings/blocked-login-ips');
+  for (const blocked of result.blocked_ips) {
+    const row = body.insertRow();
+    for (const value of [blocked.ip, blocked.blocked_at, blocked.failure_count]) {
+      const cell = row.insertCell();
+      cell.textContent = String(value);
+    }
+    const action = row.insertCell();
+    const unblock = document.createElement('button');
+    unblock.type = 'button';
+    unblock.className = 'button button-outline';
+    unblock.textContent = 'Unblock';
+    unblock.addEventListener('click', async () => {
+      if (!window.confirm(`Unblock ${blocked.ip}?`)) return;
+      unblock.disabled = true;
+      const dialogError = document.getElementById('blockedIPsError');
+      dialogError.textContent = '';
+      try {
+        await api(`/v1/settings/blocked-login-ips/${encodeURIComponent(blocked.ip)}`, {method:'DELETE'});
+        await refreshBlockedIPs();
+      } catch (error) {
+        dialogError.textContent = error.message;
+        unblock.disabled = false;
+      }
+    });
+    action.append(unblock);
+  }
+  empty.hidden = result.blocked_ips.length !== 0;
+}
+
+document.getElementById('viewBlockedIPs').addEventListener('click', async () => {
+  document.getElementById('blockedIPsError').textContent = '';
+  try {
+    await refreshBlockedIPs();
+    const dialog = document.getElementById('blockedIPsDialog');
+    dialog.showModal();
+  } catch (error) {
+    errorBox.textContent = error.message;
+  }
+});
+document.getElementById('closeBlockedIPs').addEventListener('click', () => {
+  document.getElementById('blockedIPsDialog').close();
 });
 loadSettings();
 </script>

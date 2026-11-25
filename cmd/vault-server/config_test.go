@@ -40,8 +40,10 @@ func TestLoadServerConfigAppliesEnvFileEnvironmentAndFlagPrecedence(t *testing.T
 	if config.Addr != "127.0.0.1:8200" || config.HTTPAddr != "127.0.0.1:8101" {
 		t.Fatalf("addresses = %q / %q", config.Addr, config.HTTPAddr)
 	}
-	if config.DBPath != filepath.Join(dir, "cli.db") || config.AuditDBPath != filepath.Join(dir, "audit.db") {
-		t.Fatalf("database paths = %q / %q", config.DBPath, config.AuditDBPath)
+	if config.DBPath != filepath.Join(dir, "cli.db") ||
+		config.SecretsDBPath != filepath.Join(dir, "cli-secrets.db") ||
+		config.AuditDBPath != filepath.Join(dir, "audit.db") {
+		t.Fatalf("database paths = app:%q secrets:%q audit:%q", config.DBPath, config.SecretsDBPath, config.AuditDBPath)
 	}
 	if config.TLSCertPath != filepath.Join(dir, "server.crt") || config.TLSKeyPath != filepath.Join(dir, "server.key") {
 		t.Fatalf("default TLS paths = %q / %q", config.TLSCertPath, config.TLSKeyPath)
@@ -76,6 +78,11 @@ func TestLoadServerConfigValidatesRequiredAndRelatedOptions(t *testing.T) {
 			want: "must differ",
 		},
 		{
+			name: "secrets database reuses app path",
+			args: []string{"--env-file=", "--db", "same.db", "--secrets-db", "same.db"},
+			want: "secrets database path must differ",
+		},
+		{
 			name: "invalid trusted proxy",
 			args: []string{"--env-file=", "--trusted-proxies", "not-an-address"},
 			want: "invalid trusted proxy",
@@ -104,6 +111,7 @@ func unsetServerConfigEnvironment(t *testing.T) {
 		"VAULT_SERVER_HTTPS_ADDR",
 		"VAULT_SERVER_HTTP_ADDR",
 		"VAULT_SERVER_DB",
+		"VAULT_SERVER_SECRETS_DB",
 		"VAULT_SERVER_AUDIT_DB",
 		"VAULT_SERVER_TLS_CERT",
 		"VAULT_SERVER_TLS_KEY",

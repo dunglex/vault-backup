@@ -9,6 +9,7 @@ DATA_DIR=$ROOT_DIR/data
 mkdir -p "$DATA_DIR"
 
 VAULT_SERVER_DB=$DATA_DIR/vault.db
+VAULT_SERVER_SECRETS_DB=$DATA_DIR/vault-secrets.db
 TLS_CERT=$DATA_DIR/localhost.pem
 TLS_KEY=$DATA_DIR/localhost-key.pem
 
@@ -23,6 +24,7 @@ if [[ ! -f "$TLS_CERT" || ! -f "$TLS_KEY" ]]; then
 fi
 
 echo "Using Vault server DB at $VAULT_SERVER_DB"
+echo "Using Vault server secrets DB at $VAULT_SERVER_SECRETS_DB"
 echo "Using TLS certificate at $TLS_CERT"
 VAULT_SERVER_DB_PASSWORD="${VAULT_SERVER_DB_PASSWORD:-local-development-password}" \
-  exec "$ROOT_DIR/bin/vault-server" --db "$VAULT_SERVER_DB" --http-addr "127.0.0.1:8201" --https-addr "127.0.0.1:8200" --tls-cert "$TLS_CERT" --tls-key "$TLS_KEY"
+  exec "$ROOT_DIR/bin/vault-server" --db "$VAULT_SERVER_DB" --secrets-db "$VAULT_SERVER_SECRETS_DB" --http-addr "127.0.0.1:8201" --https-addr "127.0.0.1:8200" --tls-cert "$TLS_CERT" --tls-key "$TLS_KEY"

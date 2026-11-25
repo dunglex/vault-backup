@@ -149,6 +149,7 @@ class ServerTest:
             "VAULT_SERVER_HTTPS_ADDR": f"127.0.0.1:{self.port}",
             "VAULT_SERVER_HTTP_ADDR": f"127.0.0.1:{self.http_port}",
             "VAULT_SERVER_DB": str(self.path / "vault.db"),
+            "VAULT_SERVER_SECRETS_DB": str(self.path / "vault-secrets.db"),
             "VAULT_SERVER_DB_PASSWORD": self.password,
             "VAULT_SERVER_SETUP_KEY": self.setup_key,
         }

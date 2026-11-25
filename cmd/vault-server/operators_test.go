@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"database/sql"
 	"encoding/json"
@@ -14,7 +15,8 @@ import (
 
 func newOperatorTestServer(t *testing.T) *server {
 	t.Helper()
-	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "vault.db"))
+	dir := t.TempDir()
+	db, err := sql.Open("sqlite", filepath.Join(dir, "vault.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,12 +29,29 @@ func newOperatorTestServer(t *testing.T) *server {
 	if err := initializeDatabase(db); err != nil {
 		t.Fatalf("initialize database: %v", err)
 	}
+	secretsDB, err := sql.Open("sqlite", filepath.Join(dir, "vault-secrets.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := secretsDB.Close(); err != nil {
+			t.Errorf("close secrets database: %v", err)
+		}
+	})
+	secretsDB.SetMaxOpenConns(1)
+	if err := initializeSecretsDatabase(secretsDB); err != nil {
+		t.Fatalf("initialize secrets database: %v", err)
+	}
 	if _, err := db.Exec("INSERT INTO accounts(username, password_hash, role) VALUES ('admin', 'hash', 'admin')"); err != nil {
 		t.Fatal(err)
 	}
 	return &server{
 		db:        db,
+		secretsDB: secretsDB,
 		adminName: "admin",
+		loginDelay: func(context.Context) error {
+			return nil
+		},
 		sessions: map[string]sessionInfo{
 			"admin-session": {username: "admin", role: "admin", expiresAt: time.Now().Add(time.Hour)},
 		},
@@ -97,6 +116,8 @@ func TestOperatorManagementIsAdminOnlyAndRevokesDeletedSessions(t *testing.T) {
 		call func(http.ResponseWriter, *http.Request)
 	}{
 		{"security settings API", s.getSettings},
+		{"blocked login IP list API", s.listBlockedLoginIPs},
+		{"unblock login IP API", s.unblockLoginIP},
 		{"operator list API", s.listOperators},
 		{"security page", s.serveSecurity},
 		{"operators page", s.serveOperators},
@@ -123,7 +144,9 @@ func TestOperatorManagementIsAdminOnlyAndRevokesDeletedSessions(t *testing.T) {
 
 	adminSecurity := httptest.NewRecorder()
 	s.serveSecurity(adminSecurity, operatorRequestWithSession(http.MethodGet, "/security.html", "", "admin-session", true))
-	if adminSecurity.Code != http.StatusOK || !strings.Contains(adminSecurity.Body.String(), `id="enforceMTLS"`) {
+	if adminSecurity.Code != http.StatusOK ||
+		!strings.Contains(adminSecurity.Body.String(), `id="enforceMTLS"`) ||
+		!strings.Contains(adminSecurity.Body.String(), `id="autoBlockLoginBruteforceIP"`) {
 		t.Fatalf("admin Security page status = %d, missing mTLS form", adminSecurity.Code)
 	}
 	if strings.Contains(adminSecurity.Body.String(), `id="operatorForm"`) {

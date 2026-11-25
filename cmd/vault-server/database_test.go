@@ -144,6 +144,83 @@ func TestInitializeDatabaseMigratesExistingAccountsToAdmin(t *testing.T) {
 	}
 }
 
+func TestInitializeDatabaseRejectsLegacySecretsTable(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "vault.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec("CREATE TABLE secrets (path TEXT PRIMARY KEY, data TEXT NOT NULL)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := initializeDatabase(db); err == nil || !strings.Contains(err.Error(), "does not migrate") {
+		t.Fatalf("initializeDatabase() error = %v, want explicit legacy-secrets error", err)
+	}
+}
+
+func TestInitializeDatabaseKeepsSecretsSchemaSeparate(t *testing.T) {
+	dir := t.TempDir()
+	appDB, err := sql.Open("sqlite", filepath.Join(dir, "vault.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer appDB.Close()
+	secretsDB, err := sql.Open("sqlite", filepath.Join(dir, "vault-secrets.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer secretsDB.Close()
+
+	if err := initializeDatabase(appDB); err != nil {
+		t.Fatal(err)
+	}
+	if err := initializeSecretsDatabase(secretsDB); err != nil {
+		t.Fatal(err)
+	}
+	for _, check := range []struct {
+		db   *sql.DB
+		want int
+	}{
+		{appDB, 0},
+		{secretsDB, 1},
+	} {
+		var count int
+		if err := check.db.QueryRow(
+			"SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'secrets'",
+		).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != check.want {
+			t.Fatalf("secrets table count = %d, want %d", count, check.want)
+		}
+	}
+}
+
+func TestAppAndSecretsAEADKeysAreIndependent(t *testing.T) {
+	appKey := bytes.Repeat([]byte{1}, databaseKeyLength)
+	secretsKey := bytes.Repeat([]byte{2}, databaseKeyLength)
+	appAEAD, err := newDatabaseAEAD(appKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secretsAEAD, err := newDatabaseAEAD(secretsKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	encoded, err := encryptWithAEAD(secretsAEAD, []byte("secret data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plaintext, err := decryptWithAEAD(secretsAEAD, encoded)
+	if err != nil || string(plaintext) != "secret data" {
+		t.Fatalf("secrets AEAD round trip = %q, %v", plaintext, err)
+	}
+	if _, err := decryptWithAEAD(appAEAD, encoded); err == nil {
+		t.Fatal("app database key decrypted secrets data")
+	}
+}
+
 func TestAuthenticatedPagesShareAccountSecurityNavigation(t *testing.T) {
 	pages := []string{
 		"secret.gohtml",
@@ -208,10 +285,10 @@ func TestPageTemplatesRenderStandalonePages(t *testing.T) {
 		{"secret.gohtml", []string{`id="paths"`, `id="secretPath"`, `id="convert-format"`, `id="convert-case"`, "parseDotenv", "validateEditorData", "Duplicate dotenv key", ".slice(0, 5)", "location.assign('/secrets.html?group='"}},
 		{"secrets.gohtml", []string{`id="secret-groups"`, `id="secret-list"`, "/v1/secrets-browser", `get('group')`}},
 		{"token.gohtml", []string{`id="tokens"`, `id="openCreateToken"`, `id="createTokenDialog"`, `id="createToken"`, `id="closeCreateToken"`, `id="finishCreateToken"`, `id="tokenLifetimeDays"`, `id="tokenCopyPanel"`, `id="copyToken"`, `id="downloadClientCert"`, `id="downloadClientKey"`, "Sample vault-backup command", `id="sampleCommand"`, "window.confirm", "addEventListener('beforeunload'", "async function refreshTokens()"}},
-		{"security.gohtml", []string{`id="settingsForm"`, `id="enforceMTLS"`}},
+		{"security.gohtml", []string{`id="settingsForm"`, `id="enforceMTLS"`, `id="autoBlockLoginBruteforceIP"`, `id="viewBlockedIPs"`, `id="blockedIPsDialog"`}},
 		{"operators.gohtml", []string{`id="openCreateOperator"`, `<dialog id="createOperatorDialog"`, `id="closeCreateOperator"`, `id="operatorForm"`, `id="operatorUsername"`, "showModal()", "/v1/operators"}},
 		{"account.gohtml", []string{`id="totpSetupPanel"`, `id="openTOTPSetup"`, `>Setup 2FA</button>`, `<dialog id="totpSetupDialog"`, `id="closeTOTPSetup"`, `id="setupTOTP"`, `id="totpQRCode"`, `id="enableForm"`, `id="recoveryCodesPanel"`, "/qrcode.js", "/v1/account/totp"}},
-		{"audit.gohtml", []string{`id="events"`, `href="/audits.html"`, "/v1/audit", "create_token", "revoke_token", "issue_certificate", "rotate_certificate", "update_settings", "async function refresh()"}},
+		{"audit.gohtml", []string{`id="events"`, `href="/audits.html"`, "/v1/audit", "create_token", "revoke_token", "issue_certificate", "rotate_certificate", "update_settings", "block_login_ip", "unblock_login_ip", "async function refresh()"}},
 		{"401.gohtml", []string{"401", "Go to login"}},
 		{"404.gohtml", []string{"404", "Page not found"}},
 		{"lock.gohtml", []string{"423", "Setup locked"}},
@@ -347,31 +424,71 @@ func TestWebPagesUseExpectedStatusAndContent(t *testing.T) {
 	}
 }
 
-func TestHealthChecksDatabaseConnection(t *testing.T) {
-	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "vault.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	auditStore, err := openAnnualAuditStore(filepath.Join(t.TempDir(), "audit.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer auditStore.Close()
-	s := &server{db: db, auditStore: auditStore}
+func TestHealthChecksAllThreeDatabases(t *testing.T) {
+	for _, unavailable := range []string{"app", "secrets", "audit"} {
+		t.Run(unavailable, func(t *testing.T) {
+			dir := t.TempDir()
+			db, err := sql.Open("sqlite", filepath.Join(dir, "vault.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			secretsDB, err := sql.Open("sqlite", filepath.Join(dir, "secrets.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			auditStore, err := openAnnualAuditStore(filepath.Join(dir, "audit.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if db != nil {
+					if err := db.Close(); err != nil {
+						t.Errorf("close app database: %v", err)
+					}
+				}
+				if secretsDB != nil {
+					if err := secretsDB.Close(); err != nil {
+						t.Errorf("close secrets database: %v", err)
+					}
+				}
+				if auditStore != nil {
+					if err := auditStore.Close(); err != nil {
+						t.Errorf("close audit database: %v", err)
+					}
+				}
+			})
 
-	healthy := httptest.NewRecorder()
-	s.health(healthy, httptest.NewRequest(http.MethodGet, "/health", nil))
-	if healthy.Code != http.StatusOK || healthy.Body.String() != "{\"ok\":true}\n" {
-		t.Fatalf("healthy response = %d %q", healthy.Code, healthy.Body.String())
-	}
+			s := &server{db: db, secretsDB: secretsDB, auditStore: auditStore}
+			healthy := httptest.NewRecorder()
+			s.health(healthy, httptest.NewRequest(http.MethodGet, "/health", nil))
+			if healthy.Code != http.StatusOK || healthy.Body.String() != "{\"ok\":true}\n" {
+				t.Fatalf("healthy response = %d %q", healthy.Code, healthy.Body.String())
+			}
 
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	unhealthy := httptest.NewRecorder()
-	s.health(unhealthy, httptest.NewRequest(http.MethodGet, "/health", nil))
-	if unhealthy.Code != http.StatusServiceUnavailable || unhealthy.Body.String() != "{\"ok\":false}\n" {
-		t.Fatalf("unhealthy response = %d %q", unhealthy.Code, unhealthy.Body.String())
+			switch unavailable {
+			case "app":
+				if err := db.Close(); err != nil {
+					t.Fatal(err)
+				}
+				db = nil
+			case "secrets":
+				if err := secretsDB.Close(); err != nil {
+					t.Fatal(err)
+				}
+				secretsDB = nil
+			case "audit":
+				if err := auditStore.Close(); err != nil {
+					t.Fatal(err)
+				}
+				auditStore = nil
+			}
+
+			unhealthy := httptest.NewRecorder()
+			s.health(unhealthy, httptest.NewRequest(http.MethodGet, "/health", nil))
+			if unhealthy.Code != http.StatusServiceUnavailable || unhealthy.Body.String() != "{\"ok\":false}\n" {
+				t.Fatalf("unhealthy response = %d %q", unhealthy.Code, unhealthy.Body.String())
+			}
+		})
 	}
 }
 
@@ -407,7 +524,7 @@ func TestOpenAuditDatabaseIsSeparateAndQueryable(t *testing.T) {
 }
 
 func TestBrowseSecretsGroupsAndPaginates(t *testing.T) {
-	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "vault.db"))
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "secrets.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -428,8 +545,8 @@ func TestBrowseSecretsGroupsAndPaginates(t *testing.T) {
 	}
 
 	s := &server{
-		db:       db,
-		sessions: map[string]sessionInfo{"session": {expiresAt: time.Now().Add(time.Minute)}},
+		secretsDB: db,
+		sessions:  map[string]sessionInfo{"session": {expiresAt: time.Now().Add(time.Minute)}},
 	}
 	request := httptest.NewRequest(http.MethodGet, "/v1/secrets-browser?group=kv%2Fdummy&limit=1&offset=1", nil)
 	request.AddCookie(&http.Cookie{Name: "vault_session", Value: "session"})
@@ -454,7 +571,7 @@ func TestBrowseSecretsGroupsAndPaginates(t *testing.T) {
 }
 
 func TestBrowseSecretsUsesAllowedPageSizes(t *testing.T) {
-	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "vault.db"))
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "secrets.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -463,8 +580,8 @@ func TestBrowseSecretsUsesAllowedPageSizes(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := &server{
-		db:       db,
-		sessions: map[string]sessionInfo{"session": {expiresAt: time.Now().Add(time.Minute)}},
+		secretsDB: db,
+		sessions:  map[string]sessionInfo{"session": {expiresAt: time.Now().Add(time.Minute)}},
 	}
 
 	for _, test := range []struct {

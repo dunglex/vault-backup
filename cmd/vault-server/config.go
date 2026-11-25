@@ -20,6 +20,7 @@ type serverConfig struct {
 	Addr               string
 	HTTPAddr           string
 	DBPath             string
+	SecretsDBPath      string
 	AuditDBPath        string
 	TLSCertPath        string
 	TLSKeyPath         string
@@ -50,6 +51,7 @@ func loadServerConfig(args []string) (serverConfig, error) {
 	flags.StringVar(&config.Addr, "https-addr", envDefault("VAULT_SERVER_HTTPS_ADDR", "127.0.0.1:8200"), "HTTPS server address")
 	flags.StringVar(&config.HTTPAddr, "http-addr", envDefault("VAULT_SERVER_HTTP_ADDR", "127.0.0.1:8201"), "HTTP server address (disabled by default)")
 	flags.StringVar(&config.DBPath, "db", envDefault("VAULT_SERVER_DB", "vault.db"), "path to database file")
+	flags.StringVar(&config.SecretsDBPath, "secrets-db", envDefault("VAULT_SERVER_SECRETS_DB", ""), "path to encrypted secrets database")
 	flags.StringVar(&config.AuditDBPath, "audit-db", envDefault("VAULT_SERVER_AUDIT_DB", ""), "path to plaintext audit database file (default: alongside main database)")
 	flags.StringVar(&config.TLSCertPath, "tls-cert", envDefault("VAULT_SERVER_TLS_CERT", ""), "path to TLS certificate PEM")
 	flags.StringVar(&config.TLSKeyPath, "tls-key", envDefault("VAULT_SERVER_TLS_KEY", ""), "path to TLS private key PEM")
@@ -67,6 +69,7 @@ func loadServerConfig(args []string) (serverConfig, error) {
 	}
 	config.EnvFilePath = strings.TrimSpace(config.EnvFilePath)
 	config.HTTPAddr = strings.TrimSpace(config.HTTPAddr)
+	config.SecretsDBPath = strings.TrimSpace(config.SecretsDBPath)
 	config.TLSCertPath = strings.TrimSpace(config.TLSCertPath)
 	config.TLSKeyPath = strings.TrimSpace(config.TLSKeyPath)
 	config.SetupKey = os.Getenv("VAULT_SERVER_SETUP_KEY")
@@ -83,6 +86,11 @@ func loadServerConfig(args []string) (serverConfig, error) {
 		return serverConfig{}, fmt.Errorf("resolve database path: %w", err)
 	}
 	config.DBPath = filepath.Clean(resolvedDB)
+	if config.SecretsDBPath == "" {
+		config.SecretsDBPath = defaultSecretsDatabasePath(config.DBPath)
+	} else if config.SecretsDBPath, err = absoluteCleanPath(config.SecretsDBPath); err != nil {
+		return serverConfig{}, fmt.Errorf("resolve secrets database path: %w", err)
+	}
 	if config.TLSCertPath == "" {
 		config.TLSCertPath = filepath.Join(filepath.Dir(config.DBPath), "server.crt")
 		config.TLSKeyPath = filepath.Join(filepath.Dir(config.DBPath), "server.key")
@@ -104,6 +112,9 @@ func loadServerConfig(args []string) (serverConfig, error) {
 	if config.AuditDBPath == config.DBPath {
 		return serverConfig{}, fmt.Errorf("audit database path must differ from the encrypted main database path")
 	}
+	if config.SecretsDBPath == config.DBPath || config.SecretsDBPath == config.AuditDBPath {
+		return serverConfig{}, fmt.Errorf("secrets database path must differ from the app and audit database paths")
+	}
 	config.TrustedProxyRanges, err = parseTrustedProxies(*trustedProxies)
 	if err != nil {
 		return serverConfig{}, err
@@ -115,6 +126,12 @@ func loadServerConfig(args []string) (serverConfig, error) {
 		}
 	}
 	return config, nil
+}
+
+func defaultSecretsDatabasePath(appDBPath string) string {
+	extension := filepath.Ext(appDBPath)
+	name := strings.TrimSuffix(filepath.Base(appDBPath), extension)
+	return filepath.Join(filepath.Dir(appDBPath), name+"-secrets"+extension)
 }
 
 func absoluteCleanPath(path string) (string, error) {

@@ -1,6 +1,6 @@
 # vault-server
 
-`vault-server` is a SQLite-backed Vault-compatible server. HTTPS is the default transport. New databases are encrypted with SQLCipher using the protected `vault.db.key` file. Existing plaintext SQLite databases are rejected unless explicitly allowed with the plaintext opt-in; that mode is insecure and is not migrated automatically.
+`vault-server` is a SQLite-backed Vault-compatible server. HTTPS is the default transport. Application data and secret values are stored in separate SQLCipher databases, each with its own random key protected by the configured database password. Existing plaintext SQLite application databases are rejected unless explicitly allowed with the plaintext opt-in; that mode is insecure. This version does not migrate secrets from an older application database that still contains a `secrets` table.
 
 ## Requirements
 
@@ -58,6 +58,7 @@ VAULT_SERVER_DB_PASSWORD=use-a-long-random-password
 VAULT_SERVER_HTTPS_ADDR=127.0.0.1:8200
 VAULT_SERVER_HTTP_ADDR=
 VAULT_SERVER_DB=/var/lib/vault/vault.db
+VAULT_SERVER_SECRETS_DB=/var/lib/vault/vault-secrets.db
 VAULT_SERVER_AUDIT_DB=/var/lib/vault/audit.db
 VAULT_SERVER_TLS_CERT=/etc/vault/tls/server.crt
 VAULT_SERVER_TLS_KEY=/etc/vault/tls/server.key
@@ -77,6 +78,9 @@ Use another file with `--env-file` or `VAULT_SERVER_ENV_FILE`:
 ```
 
 Restrict `.env` permissions to `0600` because it contains the database password.
+The application and secrets databases each have a separate protected key file:
+`vault.db.key` and `vault-secrets.db.key`. Both keys are wrapped using the
+configured database password.
 
 Security events are stored separately in plaintext SQLite audit databases. The
 `--audit-db` or `VAULT_SERVER_AUDIT_DB` value is the database base path; for
@@ -87,7 +91,24 @@ On first startup after upgrading, records in the old single `audit.db` are
 migrated to their UTC-year files and that legacy database is retained read-only.
 Audit databases store event metadata only, never secret values or raw tokens.
 
-Web and LDAP-compatible username/password endpoints share a limit of five attempts per ten minutes, applied to both the client IP and account. By default, forwarding headers are ignored. If the server is behind a reverse proxy, configure `--trusted-proxies` or `VAULT_SERVER_TRUSTED_PROXIES` with the exact proxy IPs or CIDRs; only those peers may supply `X-Forwarded-For` or `X-Forwarded-Proto`. The proxy should preserve the external `Host`.
+Web and LDAP-compatible username/password endpoints apply a cryptographically
+random 3-5 second delay before credential verification for attempts admitted
+by their shared limit of five per ten minutes, applied to both the client IP
+and account. By default,
+forwarding headers are ignored. If the server is behind a reverse proxy,
+configure `--trusted-proxies` or `VAULT_SERVER_TRUSTED_PROXIES` with the exact
+proxy IPs or CIDRs; only those peers may supply `X-Forwarded-For` or
+`X-Forwarded-Proto`. The proxy should preserve the external `Host`.
+
+The Security page also offers **Auto block login bruteforce IP**, disabled by
+default. When enabled, five failed logins from the same client IP within ten
+minutes create a permanent block shared by web and LDAP-compatible login.
+Successful logins clear that IP's pending failure sequence. The **View blocked
+IPs** dialog lists permanent blocks; disabling the option stops enforcing them
+but does not remove stored blocks. Admins can unblock addresses from the dialog;
+automatic blocks, blocked login attempts, and manual unblocks are written to the
+audit log. Configure trusted proxies carefully so the server can identify the
+actual client IP.
 
 After setup, requests are served only when the `Host` and, when present, `Origin` use the configured main or alias domain. Health probes and the setup flow are exempt so probes and initial setup continue to work. These checks are not authentication: non-browser clients can forge these headers, so protected operations still require their normal credentials.
 
@@ -95,11 +116,12 @@ On `SIGINT` or `SIGTERM`, the server stops accepting new connections, drains act
 
 ## Back up server state
 
-Create a sensitive filesystem tarball containing the database, its protected key, TLS files, and optional `.env`:
+Create a sensitive filesystem tarball containing both encrypted databases, their protected keys, TLS files, and optional `.env`:
 
 ```bash
 ./scripts/backup-vault-server.sh \
   --db /var/lib/vault/vault.db \
+  --secrets-db /var/lib/vault/vault-secrets.db \
   --env-file /etc/vault/server.env \
   --tls-cert /etc/vault/tls/server.crt \
   --tls-key /etc/vault/tls/server.key \
@@ -149,6 +171,8 @@ POST   /v1/tokens/{id}/certificate
 DELETE /v1/tokens/{id}
 GET    /v1/settings
 PUT    /v1/settings
+GET    /v1/settings/blocked-login-ips
+DELETE /v1/settings/blocked-login-ips/{ip}
 GET    /v1/operators
 POST   /v1/operators
 DELETE /v1/operators

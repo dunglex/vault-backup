@@ -12,6 +12,7 @@ Usage: backup-vault-server.sh [options]
 Options:
   -o, --output PATH         Archive path (default: ./backups/vault-server-backup-YYYYMMDD-HHMMSS.tar.gz)
       --db PATH             SQLite database path (default: VAULT_SERVER_DB or tests/data/vault.db)
+      --secrets-db PATH     Encrypted secrets database path (default: alongside app database)
       --audit-db PATH       Audit database path (default: alongside the main database as audit.db)
       --env-file PATH       Server .env file to include (default: VAULT_SERVER_ENV_FILE or ./.env)
       --tls-cert PATH       Server TLS certificate (default: VAULT_SERVER_TLS_CERT)
@@ -25,6 +26,7 @@ TIMESTAMP=$(date -u +%Y%m%d-%H%M%S)
 mkdir -p "$ROOT_DIR/backups"
 OUTPUT="${ROOT_DIR}/backups/vault-server-backup-${TIMESTAMP}.tar.gz"
 DB_PATH="${VAULT_SERVER_DB:-$SCRIPT_DIR/data/vault.db}"
+SECRETS_DB_PATH="${VAULT_SERVER_SECRETS_DB:-}"
 ENV_FILE="${VAULT_SERVER_ENV_FILE:-$ROOT_DIR/.env}"
 TLS_CERT="${VAULT_SERVER_TLS_CERT:-}"
 TLS_KEY="${VAULT_SERVER_TLS_KEY:-}"
@@ -41,6 +43,11 @@ while [[ $# -gt 0 ]]; do
     --db)
       [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; exit 2; }
       DB_PATH=$2
+      shift 2
+      ;;
+    --secrets-db)
+      [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; exit 2; }
+      SECRETS_DB_PATH=$2
       shift 2
       ;;
     --audit-db)
@@ -82,6 +89,18 @@ done
 
 if [[ "$DB_PATH" != /* ]]; then
   DB_PATH="$ROOT_DIR/$DB_PATH"
+fi
+if [[ -z "$SECRETS_DB_PATH" ]]; then
+  DB_NAME=$(basename "$DB_PATH")
+  DB_EXTENSION="${DB_NAME##*.}"
+  if [[ "$DB_EXTENSION" == "$DB_NAME" ]]; then
+    SECRETS_DB_NAME="${DB_NAME}-secrets"
+  else
+    SECRETS_DB_NAME="${DB_NAME%.*}-secrets.${DB_EXTENSION}"
+  fi
+  SECRETS_DB_PATH="$(dirname "$DB_PATH")/$SECRETS_DB_NAME"
+elif [[ "$SECRETS_DB_PATH" != /* ]]; then
+  SECRETS_DB_PATH="$ROOT_DIR/$SECRETS_DB_PATH"
 fi
 if [[ -z "$AUDIT_DB_PATH" ]]; then
   AUDIT_DB_PATH="$(dirname "$DB_PATH")/audit.db"
@@ -128,6 +147,10 @@ copy_file "$DB_PATH" "database" "vault.db"
 copy_file "${DB_PATH}-wal" "database" "vault.db-wal"
 copy_file "${DB_PATH}-shm" "database" "vault.db-shm"
 copy_file "${DB_PATH}.key" "database" "vault.db.key"
+copy_file "$SECRETS_DB_PATH" "database" "vault-secrets.db"
+copy_file "${SECRETS_DB_PATH}-wal" "database" "vault-secrets.db-wal"
+copy_file "${SECRETS_DB_PATH}-shm" "database" "vault-secrets.db-shm"
+copy_file "${SECRETS_DB_PATH}.key" "database" "vault-secrets.db.key"
 copy_file "$AUDIT_DB_PATH" "database" "audit.db"
 copy_file "${AUDIT_DB_PATH}-wal" "database" "audit.db-wal"
 copy_file "${AUDIT_DB_PATH}-shm" "database" "audit.db-shm"
@@ -150,6 +173,10 @@ if [[ ! -f "$ARCHIVE_DIR/database/vault.db.key" ]]; then
   echo "Protected database key not found: ${DB_PATH}.key" >&2
   exit 1
 fi
+if [[ ! -f "$ARCHIVE_DIR/database/vault-secrets.db" || ! -f "$ARCHIVE_DIR/database/vault-secrets.db.key" ]]; then
+  echo "Encrypted secrets database or protected key not found: $SECRETS_DB_PATH" >&2
+  exit 1
+fi
 if [[ ! -f "$ARCHIVE_DIR/database/audit.db" ]] && ! compgen -G "$ARCHIVE_DIR/database/${AUDIT_BASENAME}-????.${AUDIT_EXTENSION}" >/dev/null; then
   echo "Audit database not found: $AUDIT_DB_PATH or its annual databases" >&2
   exit 1
@@ -161,6 +188,8 @@ MANIFEST="$ARCHIVE_DIR/manifest.txt"
   echo "# Created-UTC: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "# Database: vault.db"
   echo "# Protected key: vault.db.key"
+  echo "# Secrets database: vault-secrets.db"
+  echo "# Secrets database protected key: vault-secrets.db.key"
   find "$ARCHIVE_DIR" -type f ! -name manifest.txt -printf '%P\n' | sort | while read -r file; do
     hash=$(sha256sum "$ARCHIVE_DIR/$file" | awk '{print $1}')
     printf '%s  %s\n' "$hash" "$file"

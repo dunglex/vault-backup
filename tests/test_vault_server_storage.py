@@ -21,6 +21,13 @@ def main() -> None:
         print("PASS: database file is encrypted")
         require(mode(server.path / "vault.db.key") == 0o600, "key permissions")
         print("PASS: encryption key file permissions")
+        require(mode(server.path / "vault-secrets.db") == 0o600, "secrets database permissions")
+        require(
+            not (server.path / "vault-secrets.db").read_bytes().startswith(b"SQLite format 3\0"),
+            "secrets database is plaintext",
+        )
+        require(mode(server.path / "vault-secrets.db.key") == 0o600, "secrets key permissions")
+        print("PASS: separate secrets database is encrypted")
         audit_path = server.path / f"audit-{time.gmtime().tm_year}.db"
         require(mode(audit_path) == 0o600, "audit database permissions")
         require(audit_path.read_bytes().startswith(b"SQLite format 3\0"), "audit database is not plaintext")
@@ -31,6 +38,8 @@ def main() -> None:
             "./scripts/backup-vault-server.sh",
             "--db",
             server.path / "vault.db",
+            "--secrets-db",
+            server.path / "vault-secrets.db",
             "--env-file",
             "",
             "--output",
@@ -45,6 +54,11 @@ def main() -> None:
                     for name in names
                 ),
                 "server backup omitted annual audit database",
+            )
+            require(
+                "vault-server/database/vault-secrets.db" in names
+                and "vault-server/database/vault-secrets.db.key" in names,
+                "server backup omitted encrypted secrets database or protected key",
             )
         print("PASS: server backup includes annual audit database")
 
@@ -80,6 +94,8 @@ def main() -> None:
             "./scripts/backup-vault-server.sh",
             "--db",
             server.path / "vault.db",
+            "--secrets-db",
+            server.path / "vault-secrets.db",
             "--env-file",
             "",
             "--tls-cert",
@@ -98,6 +114,8 @@ def main() -> None:
         )
         require(mode(restore_dir / "vault.db") == 0o600, "restored database permissions")
         require(mode(restore_dir / "vault.db.key") == 0o600, "restored key permissions")
+        require(mode(restore_dir / "vault-secrets.db") == 0o600, "restored secrets database permissions")
+        require(mode(restore_dir / "vault-secrets.db.key") == 0o600, "restored secrets key permissions")
         print("PASS: restore installs protected database files")
 
         restored_port = 18230
@@ -106,6 +124,7 @@ def main() -> None:
             "VAULT_SERVER_HTTPS_ADDR": f"127.0.0.1:{restored_port}",
             "VAULT_SERVER_HTTP_ADDR": "",
             "VAULT_SERVER_DB": str(restore_dir / "vault.db"),
+            "VAULT_SERVER_SECRETS_DB": str(restore_dir / "vault-secrets.db"),
             "VAULT_SERVER_AUDIT_DB": str(restore_dir / "audit.db"),
             "VAULT_SERVER_DB_PASSWORD": server.password,
         }

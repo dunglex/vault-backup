@@ -112,6 +112,14 @@ if [[ ! -f "$RESTORE_ROOT/database/vault.db.key" ]]; then
   echo "Invalid backup archive: password-protected database key not found" >&2
   exit 1
 fi
+if [[ ! -f "$RESTORE_ROOT/database/vault-secrets.db" ]]; then
+  echo "Invalid backup archive: encrypted secrets database not found" >&2
+  exit 1
+fi
+if [[ ! -f "$RESTORE_ROOT/database/vault-secrets.db.key" ]]; then
+  echo "Invalid backup archive: secrets database protected key not found" >&2
+  exit 1
+fi
 
 if ! (cd "$RESTORE_ROOT" && sha256sum -c manifest.txt >/dev/null); then
   echo "Backup checksum verification failed" >&2
@@ -127,12 +135,20 @@ fi
 
 install -m 600 "$RESTORE_ROOT/database/vault.db" "$DATA_DIR/vault.db"
 install -m 600 "$RESTORE_ROOT/database/vault.db.key" "$DATA_DIR/vault.db.key"
+install -m 600 "$RESTORE_ROOT/database/vault-secrets.db" "$DATA_DIR/vault-secrets.db"
+install -m 600 "$RESTORE_ROOT/database/vault-secrets.db.key" "$DATA_DIR/vault-secrets.db.key"
 
 if [[ -f "$RESTORE_ROOT/database/vault.db-wal" ]]; then
   install -m 600 "$RESTORE_ROOT/database/vault.db-wal" "$DATA_DIR/vault.db-wal"
 fi
 if [[ -f "$RESTORE_ROOT/database/vault.db-shm" ]]; then
   install -m 600 "$RESTORE_ROOT/database/vault.db-shm" "$DATA_DIR/vault.db-shm"
+fi
+if [[ -f "$RESTORE_ROOT/database/vault-secrets.db-wal" ]]; then
+  install -m 600 "$RESTORE_ROOT/database/vault-secrets.db-wal" "$DATA_DIR/vault-secrets.db-wal"
+fi
+if [[ -f "$RESTORE_ROOT/database/vault-secrets.db-shm" ]]; then
+  install -m 600 "$RESTORE_ROOT/database/vault-secrets.db-shm" "$DATA_DIR/vault-secrets.db-shm"
 fi
 if [[ -f "$RESTORE_ROOT/database/audit.db" ]]; then
   install -m 600 "$RESTORE_ROOT/database/audit.db" "$DATA_DIR/audit.db"
@@ -178,5 +194,6 @@ Next:
   VAULT_SERVER_DB_PASSWORD='<database password>' \
   ./bin/vault-server \
     --env-file $DATA_DIR/server.env \
-    --db $DATA_DIR/vault.db
+    --db $DATA_DIR/vault.db \
+    --secrets-db $DATA_DIR/vault-secrets.db
 EOF

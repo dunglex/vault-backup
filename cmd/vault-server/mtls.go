@@ -272,8 +272,14 @@ func (s *server) getSettings(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read settings"})
 		return
 	}
+	autoBlock, err := s.autoBlockLoginIPEnabled()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read settings"})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]bool{
-		"enforce_mtls": enforced,
+		"enforce_mtls":                   enforced,
+		"auto_block_login_bruteforce_ip": autoBlock,
 	})
 }
 
@@ -286,11 +292,32 @@ func (s *server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var request struct {
-		EnforceMTLS bool `json:"enforce_mtls"`
+		EnforceMTLS                *bool `json:"enforce_mtls"`
+		AutoBlockLoginBruteforceIP *bool `json:"auto_block_login_bruteforce_ip"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid settings"})
 		return
+	}
+	if request.EnforceMTLS == nil && request.AutoBlockLoginBruteforceIP == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no settings provided"})
+		return
+	}
+	enforced, err := s.mtlsSettings()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read settings"})
+		return
+	}
+	autoBlock, err := s.autoBlockLoginIPEnabled()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read settings"})
+		return
+	}
+	if request.EnforceMTLS != nil {
+		enforced = *request.EnforceMTLS
+	}
+	if request.AutoBlockLoginBruteforceIP != nil {
+		autoBlock = *request.AutoBlockLoginBruteforceIP
 	}
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -298,12 +325,24 @@ func (s *server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(
-		"INSERT INTO server_settings(key, value) VALUES ('enforce_mtls', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-		strconv.FormatBool(request.EnforceMTLS),
-	); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not save settings"})
-		return
+	if request.EnforceMTLS != nil {
+		if _, err := tx.Exec(
+			"INSERT INTO server_settings(key, value) VALUES ('enforce_mtls', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+			strconv.FormatBool(enforced),
+		); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not save settings"})
+			return
+		}
+	}
+	if request.AutoBlockLoginBruteforceIP != nil {
+		if _, err := tx.Exec(
+			"INSERT INTO server_settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+			autoBlockLoginIPSetting,
+			strconv.FormatBool(autoBlock),
+		); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not save settings"})
+			return
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not save settings"})
@@ -311,7 +350,8 @@ func (s *server) updateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	s.recordAuditEvent(r, "update_settings", "success", s.auditRequestActor(r, "web"), "web", "server-settings", "")
 	writeJSON(w, http.StatusOK, map[string]bool{
-		"enforce_mtls": request.EnforceMTLS,
+		"enforce_mtls":                   enforced,
+		"auto_block_login_bruteforce_ip": autoBlock,
 	})
 }
 

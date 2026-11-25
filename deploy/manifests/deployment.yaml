@@ -30,6 +30,7 @@ spec:
           args:
             - --https-addr=0.0.0.0:8200
             - --db=/data/vault.db
+            - --secrets-db=/data/vault-secrets.db
             - --audit-db=/data/audit.db
             - --tls-cert=/var/run/vault/tls/tls.crt
             - --tls-key=/var/run/vault/tls/tls.key
