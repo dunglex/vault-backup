@@ -378,6 +378,7 @@ func main() {
 	mux.HandleFunc("GET /v1/account/totp", s.getAccountTOTP)
 	mux.HandleFunc("POST /v1/account/totp/setup", s.setupAccountTOTP)
 	mux.HandleFunc("POST /v1/account/totp/enable", s.enableAccountTOTP)
+	mux.HandleFunc("POST /v1/account/totp/recovery-codes", s.regenerateAccountRecoveryCodes)
 	mux.HandleFunc("DELETE /v1/account/totp", s.disableAccountTOTP)
 	mux.HandleFunc("POST /v1/account/password", s.changeAccountPassword)
 	mux.HandleFunc("GET /v1/audit/years", s.listAuditYears)

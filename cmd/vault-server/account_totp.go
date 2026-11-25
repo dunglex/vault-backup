@@ -157,6 +157,120 @@ func (s *server) enableAccountTOTP(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *server) regenerateAccountRecoveryCodes(w http.ResponseWriter, r *http.Request) {
+	session, ok := s.accountTOTPRequest(w, r)
+	if !ok {
+		return
+	}
+	auditFailure := func(outcome string) {
+		s.recordAuditEvent(r, "regenerate_mfa_recovery_codes", "failure", session.username, "web", "account:"+session.username, outcome)
+	}
+	var request struct {
+		Password string `json:"password"`
+		Code     string `json:"code"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		auditFailure("invalid_request")
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
+		return
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		auditFailure("storage_error")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not regenerate recovery codes"})
+		return
+	}
+	defer tx.Rollback()
+
+	var passwordHash, encodedHashes string
+	var secret sql.NullString
+	var enabled int
+	if err := tx.QueryRow(`
+		SELECT password_hash, totp_secret, totp_enabled, totp_recovery_codes
+		FROM accounts WHERE username = ?`, session.username,
+	).Scan(&passwordHash, &secret, &enabled, &encodedHashes); err != nil {
+		auditFailure("storage_error")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read account security settings"})
+		return
+	}
+	if enabled != 1 || !secret.Valid || secret.String == "" {
+		auditFailure("two_factor_not_enabled")
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "two-factor authentication is not enabled"})
+		return
+	}
+	if bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(request.Password)) != nil {
+		auditFailure("invalid_password")
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid password"})
+		return
+	}
+
+	validFactor := verifyTOTP(secret.String, request.Code, time.Now())
+	if !validFactor {
+		var hashes []string
+		if err := json.Unmarshal([]byte(encodedHashes), &hashes); err != nil {
+			auditFailure("storage_error")
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read recovery codes"})
+			return
+		}
+		candidate := hashRecoveryCode(request.Code)
+		for _, hash := range hashes {
+			if subtle.ConstantTimeCompare([]byte(hash), []byte(candidate)) == 1 {
+				validFactor = true
+			}
+		}
+	}
+	if !validFactor {
+		auditFailure("invalid_authentication_code")
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid authentication code"})
+		return
+	}
+
+	recoveryCodes, hashes, err := generateRecoveryCodes()
+	if err != nil {
+		auditFailure("generation_error")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not generate recovery codes"})
+		return
+	}
+	encodedNewHashes, err := json.Marshal(hashes)
+	if err != nil {
+		auditFailure("storage_error")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not save recovery codes"})
+		return
+	}
+	result, err := tx.Exec(
+		"UPDATE accounts SET totp_recovery_codes = ? WHERE username = ? AND totp_enabled = 1 AND totp_secret = ?",
+		string(encodedNewHashes),
+		session.username,
+		secret.String,
+	)
+	if err != nil {
+		auditFailure("storage_error")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not save recovery codes"})
+		return
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		auditFailure("storage_error")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not save recovery codes"})
+		return
+	}
+	if updated != 1 {
+		auditFailure("account_changed")
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "account security settings changed; reload and try again"})
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		auditFailure("storage_error")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not save recovery codes"})
+		return
+	}
+	s.recordAuditEvent(r, "regenerate_mfa_recovery_codes", "success", session.username, "web", "account:"+session.username, "")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"recovery_codes": recoveryCodes,
+	})
+}
+
 func (s *server) disableAccountTOTP(w http.ResponseWriter, r *http.Request) {
 	session, ok := s.accountTOTPRequest(w, r)
 	if !ok {

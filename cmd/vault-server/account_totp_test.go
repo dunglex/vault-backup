@@ -148,6 +148,68 @@ func TestAccountTOTPEnrollmentLoginRecoveryAndDisable(t *testing.T) {
 	}
 }
 
+func TestRegenerateAccountRecoveryCodes(t *testing.T) {
+	s := newTOTPTestServer(t)
+	request := func(password, code string) *httptest.ResponseRecorder {
+		t.Helper()
+		body, err := json.Marshal(map[string]string{"password": password, "code": code})
+		if err != nil {
+			t.Fatal(err)
+		}
+		response := httptest.NewRecorder()
+		s.regenerateAccountRecoveryCodes(response, totpRequest(
+			http.MethodPost,
+			"/v1/account/totp/recovery-codes",
+			string(body),
+		))
+		return response
+	}
+
+	if response := request(totpTestPassword, "123456"); response.Code != http.StatusConflict {
+		t.Fatalf("regenerate without 2FA status = %d, want %d", response.Code, http.StatusConflict)
+	}
+
+	secret, oldCodes := setupAndEnableTOTP(t, s)
+	if response := request("wrong-password", currentTOTPCode(t, secret)); response.Code != http.StatusUnauthorized {
+		t.Fatalf("regenerate with wrong password status = %d, want %d", response.Code, http.StatusUnauthorized)
+	}
+	if response := request(totpTestPassword, "invalid-code"); response.Code != http.StatusUnauthorized {
+		t.Fatalf("regenerate with wrong second factor status = %d, want %d", response.Code, http.StatusUnauthorized)
+	}
+
+	response := request(totpTestPassword, currentTOTPCode(t, secret))
+	if response.Code != http.StatusOK {
+		t.Fatalf("regenerate recovery codes status = %d, body %s", response.Code, response.Body.String())
+	}
+	var result struct {
+		RecoveryCodes []string `json:"recovery_codes"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.RecoveryCodes) != totpRecoveryCodeCount {
+		t.Fatalf("new recovery code count = %d, want %d", len(result.RecoveryCodes), totpRecoveryCodeCount)
+	}
+	for _, oldCode := range oldCodes {
+		if valid, err := s.verifyAccountSecondFactor("admin", secret, oldCode); err != nil || valid {
+			t.Fatalf("previous recovery code remains valid: valid=%v, err=%v", valid, err)
+		}
+	}
+	var encodedHashes string
+	if err := s.db.QueryRow("SELECT totp_recovery_codes FROM accounts WHERE username = 'admin'").Scan(&encodedHashes); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(encodedHashes, result.RecoveryCodes[0]) {
+		t.Fatal("raw recovery code was stored instead of its hash")
+	}
+	if valid, err := s.verifyAccountSecondFactor("admin", secret, result.RecoveryCodes[0]); err != nil || !valid {
+		t.Fatalf("new recovery code was not accepted: valid=%v, err=%v", valid, err)
+	}
+	if valid, err := s.verifyAccountSecondFactor("admin", secret, result.RecoveryCodes[0]); err != nil || valid {
+		t.Fatalf("new recovery code was reusable: valid=%v, err=%v", valid, err)
+	}
+}
+
 func TestWebSessionCookieLifetimeDependsOnTOTP(t *testing.T) {
 	s := newTOTPTestServer(t)
 

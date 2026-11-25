@@ -37,15 +37,15 @@
       </label>
       <p class="muted">When enabled, users without MFA can only access their account page to enroll. After enrollment, every web and LDAP-compatible login requires an authenticator or recovery code. LDAP-compatible login is unavailable until MFA is enrolled.</p>
       <label class="setting-option">
-        <input id="autoBlockLoginBruteforceIP" type="checkbox">
-        Auto block login bruteforce IP
-      </label>
-      <p class="muted">When enabled, an IP address is permanently blocked after five failed logins within ten minutes. Successful logins reset that IP's failure sequence. Blocks remain stored if this option is disabled.</p>
-      <label class="setting-option">
         <input id="fileLogging" type="checkbox">
         Also write access and error logs to files
       </label>
       <p class="muted">Logs are always written to standard output. When enabled, they are also written to daily log files beside the database and retained for seven days.</p>
+      <label class="setting-option">
+        <input id="autoBlockLoginBruteforceIP" type="checkbox">
+        Auto block login bruteforce IP
+      </label>
+      <p class="muted">When enabled, an IP address is permanently blocked after five failed logins within ten minutes. Successful logins reset that IP's failure sequence. Blocks remain stored if this option is disabled.</p>
       <p><button id="viewBlockedIPs" class="button button-outline" type="button">View blocked IPs</button></p>
       <div class="row-actions">
         <button id="saveSettings" type="submit">Save settings</button>

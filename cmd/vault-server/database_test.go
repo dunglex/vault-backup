@@ -294,7 +294,7 @@ func TestPageTemplatesRenderStandalonePages(t *testing.T) {
 		{"token.gohtml", []string{`id="tokens"`, `id="openCreateToken"`, `id="createTokenDialog"`, `id="createToken"`, `id="closeCreateToken"`, `id="finishCreateToken"`, `<select id="tokenLifetimeDays" name="expires_in_days" required>`, `<option value="30" selected>30 days</option>`, `<option value="60">60 days</option>`, `<option value="90">90 days</option>`, `<option value="180">180 days</option>`, `<option value="365">365 days</option>`, `id="tokenCopyPanel"`, `id="copyToken"`, "downloadClientCert", "downloadClientKey", "token-actions", "Sample vault-backup command", `id="sampleCommand"`, "window.confirm", "addEventListener('beforeunload'", "async function refreshTokens()"}},
 		{"security.gohtml", []string{`id="settingsForm"`, `id="enforceMTLS"`, `id="autoBlockLoginBruteforceIP"`, `id="fileLogging"`, `id="viewBlockedIPs"`, `id="blockedIPsDialog"`}},
 		{"operators.gohtml", []string{`id="openCreateOperator"`, `<dialog id="createOperatorDialog"`, `id="closeCreateOperator"`, `id="operatorForm"`, `id="operatorUsername"`, "setOperatorLock", "removeOperatorMFA", "/v1/operators"}},
-		{"account.gohtml", []string{`id="totpSetupPanel"`, `id="openTOTPSetup"`, `>Setup 2FA</button>`, `<dialog id="totpSetupDialog"`, `id="closeTOTPSetup"`, `id="setupTOTP"`, `id="totpQRCode"`, `id="enableForm"`, `id="recoveryCodesPanel"`, `<dialog id="passwordDialog"`, `id="passwordForm"`, `id="currentPassword"`, `id="newPassword"`, `id="repeatNewPassword"`, "/v1/account/password", "/qrcode.js", "/v1/account/totp"}},
+		{"account.gohtml", []string{`id="totpSetupPanel"`, `id="openTOTPSetup"`, `>Setup 2FA</button>`, `<dialog id="totpSetupDialog"`, `id="closeTOTPSetup"`, `id="setupTOTP"`, `id="totpQRCode"`, `id="enableForm"`, `id="totpEnabledPanel"`, `id="openRecoveryCodesDialog"`, `<dialog id="recoveryCodesDialog"`, `id="regenerateRecoveryCodesForm"`, `<dialog id="passwordDialog"`, `id="passwordForm"`, `id="currentPassword"`, `id="newPassword"`, `id="repeatNewPassword"`, "/v1/account/totp/recovery-codes", "/v1/account/password", "/qrcode.js", "/v1/account/totp"}},
 		{"audit.gohtml", []string{`id="events"`, `href="/audits.html"`, "/v1/audit", "create_token", "revoke_token", "issue_certificate", "rotate_certificate", "update_settings", "block_login_ip", "unblock_login_ip", "async function refresh()"}},
 		{"401.gohtml", []string{"401", "Go to login"}},
 		{"404.gohtml", []string{"404", "Page not found"}},
@@ -329,11 +329,6 @@ func TestPageTemplatesRenderStandalonePages(t *testing.T) {
 			}
 			if test.name == "index.gohtml" && strings.Contains(output.String(), `location.replace("\"`) {
 				t.Error("navigator includes quotes in the redirect URL")
-			}
-			if test.name == "account.gohtml" &&
-				(strings.Contains(output.String(), "Replace recovery codes") ||
-					strings.Contains(output.String(), `id="recoveryForm"`)) {
-				t.Error("account page still exposes recovery-code replacement")
 			}
 		})
 	}

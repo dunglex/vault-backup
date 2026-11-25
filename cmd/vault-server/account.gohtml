@@ -55,6 +55,7 @@
     <h2 class="section-label">Two-factor authentication enabled</h2>
     <p id="mfaEnforcedStatus" class="muted" hidden>Your administrator requires MFA. Two-factor authentication cannot be disabled while enforcement is on.</p>
     <p id="recoveryCodeCount" class="muted"></p>
+    <button id="openRecoveryCodesDialog" class="button button-outline" type="button">Show backup recovery codes</button>
     <form id="disableForm">
       <h3>Disable two-factor authentication</h3>
       <label for="disablePassword">Current password</label>
@@ -64,12 +65,32 @@
       <button id="disableTOTP" class="button button-outline" type="submit">Disable two-factor authentication</button>
     </form>
   </section>
-  <section id="recoveryCodesPanel" class="panel" hidden>
-    <h2 class="section-label">Save your recovery codes</h2>
-    <p>Each code works once. They will not be shown again. Keep them somewhere separate from your authenticator device.</p>
-    <ul id="recoveryCodes"></ul>
-    <button id="dismissRecoveryCodes" type="button">I saved these codes</button>
-  </section>
+  <dialog id="recoveryCodesDialog" class="admin-dialog" aria-labelledby="recoveryCodesTitle">
+    <div class="admin-dialog-heading">
+      <h2 id="recoveryCodesTitle">Backup recovery codes</h2>
+      <button id="closeRecoveryCodesDialog" class="button button-outline" type="button" aria-label="Close dialog">Close</button>
+    </div>
+    <section id="regenerateRecoveryCodesPanel" hidden>
+      <p>Recovery codes are stored as hashes and cannot be retrieved. Generating a new set invalidates all previous codes.</p>
+      <form id="regenerateRecoveryCodesForm">
+        <div id="regenerateRecoveryCodesError" class="notice" role="alert"></div>
+        <label for="recoveryCodesPassword">Current password</label>
+        <input id="recoveryCodesPassword" type="password" autocomplete="current-password" required>
+        <label for="recoveryCodesFactor">Authenticator or unused recovery code</label>
+        <input id="recoveryCodesFactor" autocomplete="one-time-code" required>
+        <div class="row-actions admin-dialog-actions">
+          <button id="regenerateRecoveryCodes" type="submit">Generate new codes</button>
+        </div>
+      </form>
+    </section>
+    <section id="recoveryCodesDisplay" hidden>
+      <p id="recoveryCodesDescription" class="muted"></p>
+      <ul id="recoveryCodes"></ul>
+      <div class="row-actions admin-dialog-actions">
+        <button id="dismissRecoveryCodes" type="button">I saved these codes</button>
+      </div>
+    </section>
+  </dialog>
   <section class="panel">
     <h2 class="section-label">Change password</h2>
     <button id="openPasswordDialog" type="button">Change password</button>
@@ -107,6 +128,7 @@ const setupDialog = document.getElementById('totpSetupDialog');
 const setupDialogError = document.getElementById('setupDialogError');
 const passwordDialog = document.getElementById('passwordDialog');
 const passwordDialogError = document.getElementById('passwordDialogError');
+const recoveryCodesDialog = document.getElementById('recoveryCodesDialog');
 let mfaSetupRequired = new URLSearchParams(location.search).get('mfa') === 'required';
 let passwordChangeRequired = new URLSearchParams(location.search).get('password') === 'required';
 let pendingTOTPProvisioningURI = '';
@@ -120,7 +142,7 @@ async function api(url, options = {}) {
   }
   return body;
 }
-function showRecoveryCodes(codes) {
+function showRecoveryCodes(codes, regenerated = false) {
   const list = document.getElementById('recoveryCodes');
   list.replaceChildren();
   for (const value of codes) {
@@ -130,7 +152,12 @@ function showRecoveryCodes(codes) {
     item.append(code);
     list.append(item);
   }
-  document.getElementById('recoveryCodesPanel').hidden = false;
+  document.getElementById('regenerateRecoveryCodesPanel').hidden = true;
+  document.getElementById('recoveryCodesDisplay').hidden = false;
+  document.getElementById('recoveryCodesDescription').textContent = regenerated
+    ? 'These new codes replace all previous backup codes. Save them now; each code works once.'
+    : 'Save these codes now. They are shown only once, and each code works once.';
+  if (!recoveryCodesDialog.open) recoveryCodesDialog.showModal();
 }
 async function loadTOTP() {
   errorBox.textContent = '';
@@ -248,7 +275,6 @@ document.getElementById('disableForm').addEventListener('submit', async event =>
       })
     });
     event.target.reset();
-    document.getElementById('recoveryCodesPanel').hidden = true;
     await loadTOTP();
   } catch (error) {
     errorBox.textContent = error.message;
@@ -257,7 +283,47 @@ document.getElementById('disableForm').addEventListener('submit', async event =>
   }
 });
 document.getElementById('dismissRecoveryCodes').addEventListener('click', () => {
-  document.getElementById('recoveryCodesPanel').hidden = true;
+  recoveryCodesDialog.close();
+});
+document.getElementById('openRecoveryCodesDialog').addEventListener('click', () => {
+  document.getElementById('regenerateRecoveryCodesForm').reset();
+  document.getElementById('regenerateRecoveryCodesError').textContent = '';
+  document.getElementById('recoveryCodesDisplay').hidden = true;
+  document.getElementById('regenerateRecoveryCodesPanel').hidden = false;
+  recoveryCodesDialog.showModal();
+  document.getElementById('recoveryCodesPassword').focus();
+});
+document.getElementById('closeRecoveryCodesDialog').addEventListener('click', () => recoveryCodesDialog.close());
+recoveryCodesDialog.addEventListener('close', () => {
+  document.getElementById('recoveryCodes').replaceChildren();
+  document.getElementById('regenerateRecoveryCodesForm').reset();
+  document.getElementById('regenerateRecoveryCodesError').textContent = '';
+  document.getElementById('regenerateRecoveryCodesPanel').hidden = true;
+  document.getElementById('recoveryCodesDisplay').hidden = true;
+});
+document.getElementById('regenerateRecoveryCodesForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  const error = document.getElementById('regenerateRecoveryCodesError');
+  error.textContent = '';
+  const button = document.getElementById('regenerateRecoveryCodes');
+  button.disabled = true;
+  try {
+    const result = await api('/v1/account/totp/recovery-codes', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        password:document.getElementById('recoveryCodesPassword').value,
+        code:document.getElementById('recoveryCodesFactor').value
+      })
+    });
+    document.getElementById('regenerateRecoveryCodesForm').reset();
+    showRecoveryCodes(result.recovery_codes, true);
+    await loadTOTP();
+  } catch (requestError) {
+    error.textContent = requestError.message;
+  } finally {
+    button.disabled = false;
+  }
 });
 document.getElementById('openPasswordDialog').addEventListener('click', () => {
   passwordDialogError.textContent = '';
@@ -290,7 +356,7 @@ document.getElementById('passwordForm').addEventListener('submit', async event =
     if (passwordChangeRequired) {
       passwordChangeRequired = false;
       document.getElementById('passwordChangeRequiredNotice').hidden = true;
-      for (const id of ['totpSetupPanel', 'totpEnabledPanel', 'recoveryCodesPanel']) {
+      for (const id of ['totpSetupPanel', 'totpEnabledPanel']) {
         document.getElementById(id).hidden = false;
       }
       history.replaceState(null, '', '/account.html');
@@ -314,7 +380,6 @@ if (passwordChangeRequired) {
   document.getElementById('passwordChangeRequiredNotice').hidden = false;
   document.getElementById('totpSetupPanel').hidden = true;
   document.getElementById('totpEnabledPanel').hidden = true;
-  document.getElementById('recoveryCodesPanel').hidden = true;
   passwordDialog.showModal();
   document.getElementById('currentPassword').focus();
 } else {

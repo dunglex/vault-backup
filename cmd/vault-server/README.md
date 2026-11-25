@@ -48,10 +48,12 @@ until the temporary password has been changed through the web interface.
 Two-factor authentication with TOTP is optional and disabled by default for
 each account. Users can change their password, enroll TOTP, and disable it from
 `/account.html`; setup displays a local QR code or the secret for manual entry.
-Recovery codes are shown once when TOTP is enabled. Once enabled, web and
-LDAP-compatible logins require an authenticator code or an unused recovery
-code. TOTP secrets and recovery-code hashes are stored in the encrypted main
-database.
+Recovery codes are shown once when TOTP is enabled. Users can generate and
+display a replacement set from their account page by confirming their password
+and second factor; this invalidates all previous recovery codes. Once enabled,
+web and LDAP-compatible logins require an authenticator code or an unused
+recovery code. TOTP secrets and recovery-code hashes are stored in the
+encrypted main database.
 
 Admins can enable **Enforce MFA for all users** in `/security.html`; it is
 disabled by default. Users without enrolled TOTP are restricted to their
@@ -210,6 +212,7 @@ DELETE /v1/operators/totp
 GET    /v1/account/totp
 POST   /v1/account/totp/setup
 POST   /v1/account/totp/enable
+POST   /v1/account/totp/recovery-codes
 DELETE /v1/account/totp
 POST   /v1/account/password
 ```
