@@ -17,8 +17,9 @@
       <a class="button button-outline" href="/secrets.html">Secrets</a>
       <a class="button" aria-current="page" href="/tokens.html">API tokens</a>
       <a class="button button-outline" href="/audits.html">Audit log</a>
-      <a class="button button-outline" href="/settings.html">Settings</a>
-      <button id="logout" class="button button-outline">Logout</button>
+      {{if .IsAdmin}}<a class="button button-outline" href="/operators.html">Operators</a>{{end}}
+      {{if .IsAdmin}}<a class="button button-outline" href="/security.html">Security</a>{{end}}
+      <a class="button button-outline" href="/account.html">Account</a>
     </nav>
   </header>
   <div id="error" class="notice" role="alert"></div>
@@ -30,9 +31,9 @@
     <ul id="tokens"></ul>
   </section>
 </main>
-<dialog id="createTokenDialog" class="token-dialog" aria-labelledby="createTokenTitle">
+<dialog id="createTokenDialog" class="admin-dialog" aria-labelledby="createTokenTitle">
   <form id="createTokenForm">
-    <div class="token-dialog-heading">
+    <div class="admin-dialog-heading">
       <h2 id="createTokenTitle">Add API token</h2>
       <button id="closeCreateToken" class="button button-outline" type="button" aria-label="Close dialog">Close</button>
     </div>
@@ -61,11 +62,9 @@
       <h3 id="sampleCommandTitle">Sample vault-backup command</h3>
       <div class="credential-copy-row">
         <pre id="sampleCommand"><code></code></pre>
-        <button id="copyCommand" class="button button-outline" type="button">Copy command</button>
       </div>
-      <span id="copyCommandStatus" class="success" role="status"></span>
     </section>
-    <div class="row-actions token-dialog-actions">
+    <div class="row-actions admin-dialog-actions">
       <button id="createToken" type="submit">Create token</button>
       <button id="finishCreateToken" type="button" hidden>Done</button>
     </div>
@@ -122,7 +121,6 @@ function showCreatedCredentials(certificate, privateKey, token) {
   document.getElementById('credentialDownloads').hidden = false;
   document.getElementById('sampleCommand').querySelector('code').textContent = sampleCommand();
   document.getElementById('sampleCommandPanel').hidden = false;
-  document.getElementById('copyCommandStatus').textContent = '';
   const tokenPanel = document.getElementById('tokenCopyPanel');
   tokenPanel.hidden = !token;
   if (token) {
@@ -239,7 +237,6 @@ createDialog.addEventListener('close', () => {
   document.getElementById('tokenValue').textContent = '';
   document.getElementById('copyTokenStatus').textContent = '';
   document.getElementById('sampleCommand').querySelector('code').textContent = '';
-  document.getElementById('copyCommandStatus').textContent = '';
   document.getElementById('tokenCopyPanel').hidden = true;
   document.getElementById('credentialDownloads').hidden = true;
   document.getElementById('sampleCommandPanel').hidden = true;
@@ -260,9 +257,6 @@ window.addEventListener('beforeunload', event => {
 });
 document.getElementById('copyToken').addEventListener('click', event => {
   copyText(document.getElementById('tokenValue').textContent, 'copyTokenStatus', event.currentTarget);
-});
-document.getElementById('copyCommand').addEventListener('click', event => {
-  copyText(document.getElementById('sampleCommand').innerText, 'copyCommandStatus', event.currentTarget);
 });
 
 document.getElementById('createTokenForm').addEventListener('submit', async event => {
@@ -298,10 +292,6 @@ document.getElementById('createTokenForm').addEventListener('submit', async even
   }
 });
 
-document.getElementById('logout').addEventListener('click', async () => {
-  try { await api('/v1/auth/logout', {method:'POST'}); } catch (_) {}
-  location.assign('/login.html');
-});
 
 refreshTokens();
 </script>

@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Operators - Vault Server</title>
+  <link rel="stylesheet" href="/normalize.css">
+  <link rel="stylesheet" href="/miligram.css">
+  <link rel="stylesheet" href="/admin.css">
+</head>
+<body>
+<main class="app-shell">
+  <header class="app-header">
+    <h1 class="brand">Vault Server</h1>
+    <nav class="app-nav" aria-label="Admin navigation">
+      <a class="button button-outline" href="/secrets.html">Secrets</a>
+      <a class="button button-outline" href="/tokens.html">API tokens</a>
+      <a class="button button-outline" href="/audits.html">Audit log</a>
+      {{if .IsAdmin}}<a class="button" aria-current="page" href="/operators.html">Operators</a>
+      <a class="button button-outline" href="/security.html">Security</a>{{end}}
+      <a class="button button-outline" href="/account.html">Account</a>
+    </nav>
+  </header>
+  <div id="error" class="notice" role="alert"></div>
+  <section class="panel">
+    <div class="token-page-header">
+      <h2 class="section-label">Operator accounts</h2>
+      <button id="openCreateOperator" type="button">Add operator</button>
+    </div>
+    <p>Operators can manage secrets, API tokens, and audit events. They cannot access Security or manage accounts.</p>
+    <h3 class="section-label">Current operators</h3>
+    <ul id="operators" aria-live="polite"></ul>
+  </section>
+  <dialog id="createOperatorDialog" class="admin-dialog" aria-labelledby="createOperatorTitle">
+    <form id="operatorForm">
+      <div class="admin-dialog-heading">
+        <h2 id="createOperatorTitle">Add operator</h2>
+        <button id="closeCreateOperator" class="button button-outline" type="button" aria-label="Close dialog">Close</button>
+      </div>
+      <div id="operatorDialogError" class="notice" role="alert"></div>
+      <label for="operatorUsername">Username</label>
+      <input id="operatorUsername" name="username" maxlength="128" required>
+      <label for="operatorPassword">Password</label>
+      <input id="operatorPassword" name="password" type="password" minlength="12" autocomplete="new-password" required>
+      <label for="operatorPasswordConfirmation">Confirm password</label>
+      <input id="operatorPasswordConfirmation" name="password_confirmation" type="password" minlength="12" autocomplete="new-password" required>
+      <div class="row-actions admin-dialog-actions">
+        <button id="createOperator" type="submit">Create operator</button>
+      </div>
+    </form>
+  </dialog>
+</main>
+<script>
+const errorBox = document.getElementById('error');
+const createDialog = document.getElementById('createOperatorDialog');
+async function api(url, options = {}) {
+  options.credentials = 'same-origin';
+  const response = await fetch(url, options);
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    if (response.status === 401) location.assign('/401.html');
+    throw new Error(body.error || 'Request failed');
+  }
+  return body;
+}
+function renderOperators(names) {
+  const list = document.getElementById('operators');
+  list.replaceChildren();
+  if (names.length === 0) {
+    const empty = document.createElement('li');
+    empty.textContent = 'No operators have been added.';
+    list.append(empty);
+    return;
+  }
+  for (const username of names) {
+    const item = document.createElement('li');
+    const label = document.createElement('span');
+    label.textContent = username;
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'button button-outline';
+    remove.textContent = 'Remove';
+    remove.addEventListener('click', () => removeOperator(username));
+    item.append(label, ' ', remove);
+    list.append(item);
+  }
+}
+async function loadOperators() {
+  try {
+    const result = await api('/v1/operators');
+    renderOperators(result.operators);
+  } catch (error) {
+    errorBox.textContent = error.message;
+  }
+}
+async function removeOperator(username) {
+  if (!window.confirm(`Remove operator "${username}"? Their active web sessions will be revoked.`)) return;
+  errorBox.textContent = '';
+  try {
+    await api('/v1/operators', {
+      method:'DELETE',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({username})
+    });
+    await loadOperators();
+  } catch (error) {
+    errorBox.textContent = error.message;
+  }
+}
+document.getElementById('operatorForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  const dialogError = document.getElementById('operatorDialogError');
+  dialogError.textContent = '';
+  const button = document.getElementById('createOperator');
+  button.disabled = true;
+  try {
+    await api('/v1/operators', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        username:document.getElementById('operatorUsername').value,
+        password:document.getElementById('operatorPassword').value,
+        password_confirmation:document.getElementById('operatorPasswordConfirmation').value
+      })
+    });
+    createDialog.close();
+    await loadOperators();
+  } catch (error) {
+    dialogError.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+});
+document.getElementById('openCreateOperator').addEventListener('click', () => {
+  document.getElementById('operatorDialogError').textContent = '';
+  createDialog.showModal();
+  document.getElementById('operatorUsername').focus();
+});
+document.getElementById('closeCreateOperator').addEventListener('click', () => createDialog.close());
+createDialog.addEventListener('close', () => {
+  document.getElementById('operatorForm').reset();
+  document.getElementById('operatorDialogError').textContent = '';
+});
+loadOperators();
+</script>
+</body>
+</html>

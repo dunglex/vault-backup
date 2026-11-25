@@ -90,6 +90,10 @@ func initializeDatabase(db *sql.DB) error {
 		CREATE TABLE IF NOT EXISTS accounts (
 			username TEXT PRIMARY KEY,
 			password_hash TEXT NOT NULL,
+			role TEXT NOT NULL DEFAULT 'admin' CHECK (role IN ('admin', 'operator')),
+			totp_secret TEXT,
+			totp_enabled INTEGER NOT NULL DEFAULT 0 CHECK (totp_enabled IN (0, 1)),
+			totp_recovery_codes TEXT NOT NULL DEFAULT '[]',
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		);
 		CREATE TABLE IF NOT EXISTS secrets (
@@ -124,7 +128,75 @@ func initializeDatabase(db *sql.DB) error {
 	if _, err := db.Exec("DELETE FROM server_settings WHERE key = 'auto_rotate_certificates'"); err != nil {
 		return err
 	}
+	if err := ensureAccountRoleColumn(db); err != nil {
+		return err
+	}
+	if err := ensureAccountTOTPColumns(db); err != nil {
+		return err
+	}
 	return allowDuplicateAPITokenNames(db)
+}
+
+func ensureAccountRoleColumn(db *sql.DB) error {
+	columns, err := accountColumns(db)
+	if err != nil {
+		return err
+	}
+	if columns["role"] {
+		return nil
+	}
+	_, err = db.Exec("ALTER TABLE accounts ADD COLUMN role TEXT NOT NULL DEFAULT 'admin' CHECK (role IN ('admin', 'operator'))")
+	return err
+}
+
+func ensureAccountTOTPColumns(db *sql.DB) error {
+	columns, err := accountColumns(db)
+	if err != nil {
+		return err
+	}
+	additions := []struct {
+		name       string
+		definition string
+	}{
+		{"totp_secret", "TEXT"},
+		{"totp_enabled", "INTEGER NOT NULL DEFAULT 0 CHECK (totp_enabled IN (0, 1))"},
+		{"totp_recovery_codes", "TEXT NOT NULL DEFAULT '[]'"},
+	}
+	for _, column := range additions {
+		if columns[column.name] {
+			continue
+		}
+		if _, err := db.Exec("ALTER TABLE accounts ADD COLUMN " + column.name + " " + column.definition); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func accountColumns(db *sql.DB) (map[string]bool, error) {
+	rows, err := db.Query("PRAGMA table_info(accounts)")
+	if err != nil {
+		return nil, err
+	}
+	columns := make(map[string]bool)
+	for rows.Next() {
+		var sequence, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue sql.NullString
+		if err := rows.Scan(&sequence, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		columns[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	return columns, nil
 }
 
 func allowDuplicateAPITokenNames(db *sql.DB) error {

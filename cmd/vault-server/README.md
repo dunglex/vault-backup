@@ -24,6 +24,21 @@ The startup script uses `tests/data/vault.db`, `tests/data/vault.db.key`, and ge
 
 An unconfigured server allows initial administrator setup for 20 minutes. The setup window is stored in the database, so restarting the server does not reset it. After expiry, the setup page returns `423 Locked` until an administrator resets the unconfigured server's database state.
 
+The initial account has the **Admin** role. Existing accounts are migrated to
+Admin when the server starts with the role update. Admins can create and remove
+Operator accounts from `/operators.html`. Operators can manage secrets, API
+tokens, and audit events, but cannot access `/security.html`, `/v1/settings`,
+`/operators.html`, or operator-management endpoints. Removing an Operator also
+revokes their active web sessions.
+
+Two-factor authentication with TOTP is optional and disabled by default for
+each account. Users can enroll, disable it, and manage one-time recovery codes
+from `/account.html`; setup displays a local QR code or the secret for manual
+entry. Once enabled, web and LDAP-compatible logins require an authenticator
+code or an unused recovery code. TOTP secrets and recovery-code hashes are
+stored in the encrypted main database; recovery codes are shown only when
+generated.
+
 ## Configuration from .env
 
 By default, the server loads `.env` from the current working directory. Existing process environment variables take precedence over values in the file:
@@ -105,7 +120,8 @@ Use **Issue certificate** or **Replace certificate** on an active token to
 download a new pair; this immediately revokes its previous certificate and
 does not extend the token's expiry. Protect both downloaded files as secrets.
 
-Management endpoints use the admin's web session:
+Management endpoints use a web session. Security settings and
+operator-management endpoints require the Admin role:
 
 ```bash
 POST   /v1/tokens
@@ -114,6 +130,14 @@ POST   /v1/tokens/{id}/certificate
 DELETE /v1/tokens/{id}
 GET    /v1/settings
 PUT    /v1/settings
+GET    /v1/operators
+POST   /v1/operators
+DELETE /v1/operators
+GET    /v1/account/totp
+POST   /v1/account/totp/setup
+POST   /v1/account/totp/enable
+POST   /v1/account/totp/recovery-codes
+DELETE /v1/account/totp
 ```
 
 Create a token:
@@ -132,7 +156,7 @@ Use managed API tokens through `X-Vault-Token` or the `Authorization: Bearer` he
 
 ## Mutual TLS
 
-The admin UI at `/settings.html` provides a persistent switch:
+The admin UI at `/security.html` provides a persistent switch:
 
 - **Enforce mutual TLS for Vault API clients** requires a valid managed
   certificate on `/api/...` requests. The certificate must be associated with

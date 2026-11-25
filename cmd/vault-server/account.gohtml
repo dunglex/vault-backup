@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Account - Vault Server</title>
+  <link rel="stylesheet" href="/normalize.css">
+  <link rel="stylesheet" href="/miligram.css">
+  <link rel="stylesheet" href="/admin.css">
+</head>
+<body>
+<main class="app-shell">
+  <header class="app-header">
+    <h1 class="brand">Vault Server</h1>
+    <nav class="app-nav" aria-label="Account navigation">
+      <a class="button button-outline" href="/secrets.html">Secrets</a>
+      <a class="button button-outline" href="/tokens.html">API tokens</a>
+      <a class="button button-outline" href="/audits.html">Audit log</a>
+      {{if .IsAdmin}}<a class="button button-outline" href="/operators.html">Operators</a>
+      <a class="button button-outline" href="/security.html">Security</a>{{end}}
+      <a class="button" aria-current="page" href="/account.html">Account</a>
+    </nav>
+  </header>
+  <div id="error" class="notice" role="alert"></div>
+  <section id="totpSetupPanel" class="panel" hidden>
+    <h2 class="section-label">Two-factor authentication</h2>
+    <p>Authenticator-based two-factor sign-in is optional and disabled by default. When enabled, sign-in requires your password and a current authenticator code or an unused recovery code.</p>
+    <div class="row-actions totp-setup-actions">
+      <button id="openTOTPSetup" type="button">Setup 2FA</button>
+    </div>
+  </section>
+  <dialog id="totpSetupDialog" class="admin-dialog" aria-labelledby="totpSetupTitle">
+    <div class="admin-dialog-heading">
+      <h2 id="totpSetupTitle">Set up two-factor authentication</h2>
+      <button id="closeTOTPSetup" class="button button-outline" type="button" aria-label="Close dialog">Close</button>
+    </div>
+    <div id="setupDialogError" class="notice" role="alert"></div>
+    <button id="setupTOTP" type="button">Generate authenticator secret</button>
+    <div id="totpPendingPanel" class="credential-panel" hidden>
+      <h3>Add this account to your authenticator app</h3>
+      <p>Scan this QR code with your authenticator app, then enter the code it generates:</p>
+      <div id="totpQRCode" class="totp-qr-code" role="img" aria-label="Authenticator setup QR code"></div>
+      <p>Choose time-based one-time password (TOTP), then enter this secret manually:</p>
+      <p><code id="totpSecret" class="credential-value"></code></p>
+      <form id="enableForm">
+        <label for="enableCode">Authenticator code</label>
+        <input id="enableCode" inputmode="numeric" autocomplete="one-time-code" minlength="6" maxlength="6" required>
+        <button id="enableTOTP" type="submit">Verify and enable</button>
+      </form>
+    </div>
+  </dialog>
+  <section id="totpEnabledPanel" class="panel" hidden>
+    <h2 class="section-label">Two-factor authentication enabled</h2>
+    <p id="recoveryCodeCount" class="muted"></p>
+    <form id="recoveryForm">
+      <h3>Replace recovery codes</h3>
+      <p>Replacement invalidates all existing recovery codes. Save the new codes securely.</p>
+      <label for="recoveryPassword">Current password</label>
+      <input id="recoveryPassword" type="password" autocomplete="current-password" required>
+      <label for="recoveryCode">Authenticator or recovery code</label>
+      <input id="recoveryCode" autocomplete="one-time-code" required>
+      <button id="replaceRecoveryCodes" type="submit">Replace recovery codes</button>
+    </form>
+    <form id="disableForm">
+      <h3>Disable two-factor authentication</h3>
+      <label for="disablePassword">Current password</label>
+      <input id="disablePassword" type="password" autocomplete="current-password" required>
+      <label for="disableCode">Authenticator or recovery code</label>
+      <input id="disableCode" autocomplete="one-time-code" required>
+      <button id="disableTOTP" class="button button-outline" type="submit">Disable two-factor authentication</button>
+    </form>
+  </section>
+  <section id="recoveryCodesPanel" class="panel" hidden>
+    <h2 class="section-label">Save your recovery codes</h2>
+    <p>Each code works once. They will not be shown again. Keep them somewhere separate from your authenticator device.</p>
+    <ul id="recoveryCodes"></ul>
+    <button id="dismissRecoveryCodes" type="button">I saved these codes</button>
+  </section>
+  <section class="panel">
+    <h2 class="section-label">Session</h2>
+    <p>Sign out of this account on this browser.</p>
+    <button id="logout" class="button button-outline" type="button">Logout</button>
+  </section>
+</main>
+<script src="/qrcode.js"></script>
+<script>
+const errorBox = document.getElementById('error');
+const setupDialog = document.getElementById('totpSetupDialog');
+const setupDialogError = document.getElementById('setupDialogError');
+let pendingTOTPProvisioningURI = '';
+async function api(url, options = {}) {
+  options.credentials = 'same-origin';
+  const response = await fetch(url, options);
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    if (response.status === 401 && body.error === 'unauthorized') location.assign('/401.html');
+    throw new Error(body.error || 'Request failed');
+  }
+  return body;
+}
+function showRecoveryCodes(codes) {
+  const list = document.getElementById('recoveryCodes');
+  list.replaceChildren();
+  for (const value of codes) {
+    const item = document.createElement('li');
+    const code = document.createElement('code');
+    code.textContent = value;
+    item.append(code);
+    list.append(item);
+  }
+  document.getElementById('recoveryCodesPanel').hidden = false;
+}
+async function loadTOTP() {
+  errorBox.textContent = '';
+  try {
+    const state = await api('/v1/account/totp');
+    document.getElementById('totpSetupPanel').hidden = state.enabled;
+    document.getElementById('totpEnabledPanel').hidden = !state.enabled;
+    document.getElementById('recoveryCodeCount').textContent =
+      `${state.recovery_codes_remaining} recovery codes remain.`;
+    const pending = state.setup_pending;
+    document.getElementById('totpPendingPanel').hidden = !pending;
+    document.getElementById('setupTOTP').textContent = pending
+      ? 'Generate a new authenticator secret'
+      : 'Set up authenticator';
+    pendingTOTPProvisioningURI = pending ? state.provisioning_uri : '';
+    if (pending) {
+      document.getElementById('totpSecret').textContent = state.secret;
+    }
+  } catch (error) {
+    errorBox.textContent = error.message;
+  }
+}
+function renderTOTPQRCode(uri) {
+  const container = document.getElementById('totpQRCode');
+  container.replaceChildren();
+  try {
+    new QRCode(container, {
+      text: uri,
+      width: 220,
+      height: 220,
+      correctLevel: QRCode.CorrectLevel.M
+    });
+  } catch (error) {
+    setupDialogError.textContent = `Could not display the QR code. Use the manual authenticator secret instead. (${error.message})`;
+  }
+}
+document.getElementById('openTOTPSetup').addEventListener('click', () => {
+  setupDialogError.textContent = '';
+  setupDialog.showModal();
+  if (pendingTOTPProvisioningURI) renderTOTPQRCode(pendingTOTPProvisioningURI);
+});
+document.getElementById('closeTOTPSetup').addEventListener('click', () => setupDialog.close());
+setupDialog.addEventListener('close', () => {
+  document.getElementById('enableForm').reset();
+  document.getElementById('totpQRCode').replaceChildren();
+  setupDialogError.textContent = '';
+});
+document.getElementById('setupTOTP').addEventListener('click', async () => {
+  setupDialogError.textContent = '';
+  const button = document.getElementById('setupTOTP');
+  button.disabled = true;
+  try {
+    const result = await api('/v1/account/totp/setup', {
+      method:'POST',
+    });
+    document.getElementById('totpPendingPanel').hidden = false;
+    document.getElementById('totpSecret').textContent = result.secret;
+    pendingTOTPProvisioningURI = result.provisioning_uri;
+    document.getElementById('setupTOTP').textContent = 'Generate a new authenticator secret';
+    renderTOTPQRCode(result.provisioning_uri);
+    document.getElementById('enableCode').focus();
+  } catch (error) {
+    setupDialogError.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+});
+document.getElementById('enableForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  setupDialogError.textContent = '';
+  const button = document.getElementById('enableTOTP');
+  button.disabled = true;
+  try {
+    const result = await api('/v1/account/totp/enable', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({code:document.getElementById('enableCode').value})
+    });
+    document.getElementById('enableForm').reset();
+    setupDialog.close();
+    showRecoveryCodes(result.recovery_codes);
+    await loadTOTP();
+  } catch (error) {
+    setupDialogError.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+});
+document.getElementById('recoveryForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  errorBox.textContent = '';
+  const button = document.getElementById('replaceRecoveryCodes');
+  button.disabled = true;
+  try {
+    const result = await api('/v1/account/totp/recovery-codes', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        password:document.getElementById('recoveryPassword').value,
+        code:document.getElementById('recoveryCode').value
+      })
+    });
+    event.target.reset();
+    showRecoveryCodes(result.recovery_codes);
+    await loadTOTP();
+  } catch (error) {
+    errorBox.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+});
+document.getElementById('disableForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  if (!window.confirm('Disable two-factor authentication for this account?')) return;
+  errorBox.textContent = '';
+  const button = document.getElementById('disableTOTP');
+  button.disabled = true;
+  try {
+    await api('/v1/account/totp', {
+      method:'DELETE',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        password:document.getElementById('disablePassword').value,
+        code:document.getElementById('disableCode').value
+      })
+    });
+    event.target.reset();
+    document.getElementById('recoveryCodesPanel').hidden = true;
+    await loadTOTP();
+  } catch (error) {
+    errorBox.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+});
+document.getElementById('dismissRecoveryCodes').addEventListener('click', () => {
+  document.getElementById('recoveryCodesPanel').hidden = true;
+});
+document.getElementById('logout').addEventListener('click', async () => {
+  if (!window.confirm('Are you sure you want to log out?')) return;
+  try { await api('/v1/auth/logout', {method:'POST'}); } catch (_) {}
+  location.assign('/login.html');
+});
+loadTOTP();
+</script>
+</body>
+</html>

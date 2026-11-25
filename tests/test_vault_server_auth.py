@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 from datetime import datetime, timezone
 
-from test_common import ServerTest, assert_status, require
+from test_common import HttpClient, ServerTest, assert_status, require
 
 
 def main() -> None:
@@ -27,6 +27,22 @@ def main() -> None:
         assert_status(409, status, "disable admin creation after setup")
 
         login_token = server.login()
+        status, account_page = server.client.request("GET", f"{server.https_url}/account.html")
+        assert_status(200, status, "open account security page")
+        require(
+            b"Two-factor authentication" in account_page
+            and b'<dialog id="totpSetupDialog"' in account_page
+            and b'id="setupPassword"' not in account_page
+            and b'id="totpQRCode"' in account_page,
+            "optional TOTP setup dialog",
+        )
+        require(b'id="logout"' in account_page, "keep Logout on the account page")
+        status, qr_library = server.client.request("GET", f"{server.https_url}/qrcode.js")
+        assert_status(200, status, "load local QR code library")
+        require(b"QRCode.CorrectLevel" in qr_library, "serve QR code library")
+        status, totp_settings = server.client.json("GET", f"{server.https_url}/v1/account/totp")
+        assert_status(200, status, "read default TOTP settings")
+        require(totp_settings["enabled"] is False, "TOTP is disabled by default")
         status, token_page = server.client.request("GET", f"{server.https_url}/tokens.html")
         assert_status(200, status, "open canonical API tokens page")
         require(b'<dialog id="createTokenDialog"' in token_page, "token creation dialog")
@@ -38,20 +54,91 @@ def main() -> None:
             "token and certificate controls",
         )
         require(
-            b"Sample vault-backup command" in token_page and b'id="copyCommand"' in token_page,
-            "copyable wrapped sample command",
+            b"Sample vault-backup command" in token_page and b'id="sampleCommand"' in token_page,
+            "wrapped sample command",
         )
+        require(b'id="copyCommand"' not in token_page, "remove sample command copy button")
         require(
             b"window.confirm" in token_page and b"addEventListener('beforeunload'" in token_page,
             "confirm dialog close and prevent accidental unload",
         )
         require(b">Cancel</button>" not in token_page, "remove cancel action")
-        status, settings_page = server.client.request("GET", f"{server.https_url}/settings.html")
-        assert_status(200, status, "open mTLS settings page")
+        status, security_page = server.client.request("GET", f"{server.https_url}/security.html")
+        assert_status(200, status, "open mTLS security page")
         require(
-            b'id="enforceMTLS"' in settings_page and b'id="autoRotate"' not in settings_page,
+            b'id="enforceMTLS"' in security_page and b'id="autoRotate"' not in security_page,
             "mTLS setting controls",
         )
+        require(b'id="logout"' not in security_page, "remove Logout from Security navigation")
+        require(b'id="operatorForm"' not in security_page, "keep operator management out of Security")
+        status, _ = server.client.request("GET", f"{server.https_url}/settings.html")
+        assert_status(200, status, "open Security through the legacy Settings URL")
+        status, operators_page = server.client.request("GET", f"{server.https_url}/operators.html")
+        assert_status(200, status, "open operator management page")
+        require(
+            b'<dialog id="createOperatorDialog"' in operators_page
+            and b'id="openCreateOperator"' in operators_page
+            and b'id="operatorForm"' in operators_page
+            and b'id="logout"' not in operators_page,
+            "popup operator creation form",
+        )
+        status, _ = server.client.json(
+            "POST",
+            f"{server.https_url}/v1/operators",
+            data={
+                "username": "night-shift",
+                "password": "operator-test-password",
+                "password_confirmation": "operator-test-password",
+            },
+        )
+        assert_status(201, status, "create operator as admin")
+        status, operators = server.client.json("GET", f"{server.https_url}/v1/operators")
+        assert_status(200, status, "list operators as admin")
+        require(operators == {"operators": ["night-shift"]}, "operator listing")
+
+        operator_client = HttpClient()
+        status, _ = operator_client.json(
+            "POST",
+            f"{server.https_url}/v1/auth/login",
+            data={"username": "night-shift", "password": "operator-test-password"},
+        )
+        assert_status(200, status, "login as operator")
+        status, operator_session = operator_client.json("GET", f"{server.https_url}/v1/session")
+        assert_status(200, status, "read operator session")
+        require(operator_session == {"authenticated": True, "role": "operator"}, "operator session role")
+        status, _ = operator_client.request("GET", f"{server.https_url}/v1/settings")
+        assert_status(403, status, "deny operator settings API access")
+        status, _ = operator_client.json(
+            "PUT",
+            f"{server.https_url}/v1/settings",
+            data={"enforce_mtls": True},
+        )
+        assert_status(403, status, "deny operator settings updates")
+        status, _ = operator_client.request("GET", f"{server.https_url}/security.html")
+        assert_status(403, status, "deny operator security page access")
+        status, _ = operator_client.request("GET", f"{server.https_url}/settings.html")
+        assert_status(403, status, "deny operator access through legacy Settings URL")
+        status, _ = operator_client.request("GET", f"{server.https_url}/operators.html")
+        assert_status(403, status, "deny operator management page access")
+        status, operator_secrets = operator_client.request("GET", f"{server.https_url}/secrets.html")
+        assert_status(200, status, "allow operator secrets page access")
+        require(
+            b'href="/security.html"' not in operator_secrets and b'href="/operators.html"' not in operator_secrets,
+            "hide Admin navigation from operators",
+        )
+        status, _ = operator_client.request("GET", f"{server.https_url}/v1/tokens")
+        assert_status(200, status, "allow operator token management")
+        status, _ = operator_client.request("GET", f"{server.https_url}/v1/audit")
+        assert_status(200, status, "allow operator audit access")
+        status, _ = server.client.json(
+            "DELETE",
+            f"{server.https_url}/v1/operators",
+            data={"username": "night-shift"},
+        )
+        assert_status(200, status, "remove operator as admin")
+        status, _ = operator_client.request("GET", f"{server.https_url}/v1/session")
+        assert_status(401, status, "revoke deleted operator web session")
+
         require(b'id="tokenLifetimeDays"' in token_page, "token expiry control")
         status, legacy_token_page = server.client.request("GET", f"{server.https_url}/token.html")
         assert_status(200, status, "redirect legacy API tokens URL")
@@ -204,8 +291,8 @@ def main() -> None:
         assert_status(403, status, "reject a certificate paired with a different token")
         status, _ = server.client.request("GET", f"{server.https_url}/api/health")
         assert_status(200, status, "keep health checks available without mTLS")
-        status, _ = server.client.request("GET", f"{server.https_url}/settings.html")
-        assert_status(200, status, "keep admin settings page available without mTLS")
+        status, _ = server.client.request("GET", f"{server.https_url}/security.html")
+        assert_status(200, status, "keep admin security page available without mTLS")
         status, _ = server.client.json(
             "PUT",
             f"{server.https_url}/v1/settings",
@@ -263,7 +350,7 @@ def main() -> None:
 
         attempts = [
             ("POST", server.https_url + "/v1/auth/login", {"username": "admin", "password": "wrong-password"}, 401),
-            ("PUT", server.https_url + "/api/v1/auth/ldap/login/admin", {"password": "wrong-password"}, 401),
+            ("PUT", server.https_url + "/api/v1/auth/ldap/login/admin", {"password": "wrong-password"}, 429),
             ("POST", server.http_url + "/v1/auth/login", {"username": "admin", "password": "wrong-password"}, 429),
             ("PUT", server.https_url + "/api/v1/auth/ldap/login/admin", {"password": "wrong-password"}, 429),
         ]

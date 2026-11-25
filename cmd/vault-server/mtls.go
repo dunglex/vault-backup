@@ -244,8 +244,8 @@ func apiTokenFromRequest(r *http.Request) string {
 	token := r.Header.Get("X-Vault-Token")
 	if token == "" {
 		token = r.Header.Get("Authorization")
-		if strings.HasPrefix(token, "Bearer ") {
-			token = strings.TrimPrefix(token, "Bearer ")
+		if after, ok := strings.CutPrefix(token, "Bearer "); ok {
+			token = after
 		}
 	}
 	return token
@@ -264,8 +264,7 @@ func (s *server) lookupActiveAPIToken(token string, tokenID *int64) error {
 }
 
 func (s *server) getSettings(w http.ResponseWriter, r *http.Request) {
-	if !s.authorizedWeb(r) {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+	if !s.requireAdmin(w, r) {
 		return
 	}
 	enforced, err := s.mtlsSettings()
@@ -279,8 +278,7 @@ func (s *server) getSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) updateSettings(w http.ResponseWriter, r *http.Request) {
-	if !s.authorizedWeb(r) {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+	if !s.requireAdmin(w, r) {
 		return
 	}
 	if r.TLS == nil {
@@ -311,7 +309,7 @@ func (s *server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not save settings"})
 		return
 	}
-	s.recordAuditEvent(r, "update_settings", "success", s.adminName, "web", "server-settings", "")
+	s.recordAuditEvent(r, "update_settings", "success", s.auditRequestActor(r, "web"), "web", "server-settings", "")
 	writeJSON(w, http.StatusOK, map[string]bool{
 		"enforce_mtls": request.EnforceMTLS,
 	})
@@ -371,7 +369,7 @@ func (s *server) issueAPITokenCertificate(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not issue client certificate"})
 		return
 	}
-	s.recordAuditEvent(r, "issue_certificate", "success", s.adminName, "web", "api-token:"+strconv.FormatInt(id, 10), "")
+	s.recordAuditEvent(r, "issue_certificate", "success", s.auditRequestActor(r, "web"), "web", "api-token:"+strconv.FormatInt(id, 10), "")
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"client_certificate":            issued.Certificate,
 		"client_private_key":            issued.PrivateKey,

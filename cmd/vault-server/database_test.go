@@ -87,6 +87,101 @@ func TestInitializeDatabaseRemovesLegacyUniqueTokenNameConstraint(t *testing.T) 
 	}
 }
 
+func TestInitializeDatabaseMigratesExistingAccountsToAdmin(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "vault.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+
+	if _, err := db.Exec(`
+		CREATE TABLE accounts (
+			username TEXT PRIMARY KEY,
+			password_hash TEXT NOT NULL,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);
+		INSERT INTO accounts(username, password_hash) VALUES ('existing-admin', 'hash');
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if err := initializeDatabase(db); err != nil {
+		t.Fatalf("initialize database: %v", err)
+	}
+
+	var role string
+	if err := db.QueryRow("SELECT role FROM accounts WHERE username = 'existing-admin'").Scan(&role); err != nil {
+		t.Fatal(err)
+	}
+	if role != "admin" {
+		t.Fatalf("migrated account role = %q, want admin", role)
+	}
+	var totpEnabled int
+	var totpSecret sql.NullString
+	var recoveryCodes string
+	if err := db.QueryRow(
+		"SELECT totp_enabled, totp_secret, totp_recovery_codes FROM accounts WHERE username = 'existing-admin'",
+	).Scan(&totpEnabled, &totpSecret, &recoveryCodes); err != nil {
+		t.Fatal(err)
+	}
+	if totpEnabled != 0 || totpSecret.Valid || recoveryCodes != "[]" {
+		t.Fatalf("migrated account TOTP state = enabled:%d secret:%v codes:%q, want disabled and empty", totpEnabled, totpSecret, recoveryCodes)
+	}
+}
+
+func TestAuthenticatedPagesShareAccountSecurityNavigation(t *testing.T) {
+	pages := []string{
+		"secret.gohtml",
+		"secrets.gohtml",
+		"token.gohtml",
+		"audit.gohtml",
+		"operators.gohtml",
+		"security.gohtml",
+		"account.gohtml",
+	}
+	for _, name := range pages {
+		t.Run(name, func(t *testing.T) {
+			content, err := embeddedFiles.ReadFile(name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			html := string(content)
+			if !strings.Contains(html, `href="/account.html"`) {
+				t.Errorf("%s is missing the Account link", name)
+			}
+			if !strings.Contains(html, `href="/account.html">Account</a>`) {
+				t.Errorf("%s Account button text is not Account", name)
+			}
+			if !strings.Contains(html, `href="/security.html"`) {
+				t.Errorf("%s is missing the Security link", name)
+			}
+			hasLogout := strings.Contains(html, `id="logout"`)
+			if wantLogout := name == "account.gohtml"; hasLogout != wantLogout {
+				t.Errorf("%s Logout presence = %t, want %t", name, hasLogout, wantLogout)
+			}
+			if name == "account.gohtml" {
+				if strings.Contains(html, "Provisioning URI") || strings.Contains(html, `id="totpProvisioningURI"`) {
+					t.Error("provisioning URI is still displayed in the setup dialog")
+				}
+				if !strings.Contains(html, "window.confirm('Are you sure you want to log out?')") {
+					t.Error("Logout does not confirm before signing out")
+				}
+				navStart := strings.Index(html, "<nav")
+				if navStart < 0 {
+					t.Fatal("account navigation is missing")
+				}
+				navEnd := strings.Index(html[navStart:], "</nav>")
+				if navEnd < 0 {
+					t.Fatal("account navigation is missing")
+				}
+				if strings.Contains(html[navStart:navStart+navEnd], `id="logout"`) {
+					t.Error("Logout button is still in the top navigation")
+				}
+			}
+		})
+	}
+}
+
 func TestPageTemplatesRenderStandalonePages(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -94,11 +189,13 @@ func TestPageTemplatesRenderStandalonePages(t *testing.T) {
 	}{
 		{"index.gohtml", []string{"http-equiv=\"refresh\"", "/secrets.html"}},
 		{"setup.gohtml", []string{`id="setupForm"`, `name="password_confirmation"`, "/v1/setup"}},
-		{"login.gohtml", []string{`id="loginForm"`, "/v1/auth/login"}},
+		{"login.gohtml", []string{`id="loginForm"`, `id="totpChallenge"`, "/v1/auth/login"}},
 		{"secret.gohtml", []string{`id="paths"`, `id="secretPath"`, `id="convert-format"`, `id="convert-case"`, "parseDotenv", "validateEditorData", "Duplicate dotenv key", ".slice(0, 5)", "location.assign('/secrets.html?group='"}},
 		{"secrets.gohtml", []string{`id="secret-groups"`, `id="secret-list"`, "/v1/secrets-browser", `get('group')`}},
-		{"token.gohtml", []string{`id="tokens"`, `id="openCreateToken"`, `id="createTokenDialog"`, `id="createToken"`, `id="closeCreateToken"`, `id="finishCreateToken"`, `id="tokenLifetimeDays"`, `id="tokenCopyPanel"`, `id="copyToken"`, `id="downloadClientCert"`, `id="downloadClientKey"`, "Sample vault-backup command", `id="copyCommand"`, "window.confirm", "addEventListener('beforeunload'", "async function refreshTokens()"}},
-		{"settings.gohtml", []string{`id="settingsForm"`, `id="enforceMTLS"`, "client_cert", "client_key"}},
+		{"token.gohtml", []string{`id="tokens"`, `id="openCreateToken"`, `id="createTokenDialog"`, `id="createToken"`, `id="closeCreateToken"`, `id="finishCreateToken"`, `id="tokenLifetimeDays"`, `id="tokenCopyPanel"`, `id="copyToken"`, `id="downloadClientCert"`, `id="downloadClientKey"`, "Sample vault-backup command", `id="sampleCommand"`, "window.confirm", "addEventListener('beforeunload'", "async function refreshTokens()"}},
+		{"security.gohtml", []string{`id="settingsForm"`, `id="enforceMTLS"`}},
+		{"operators.gohtml", []string{`id="openCreateOperator"`, `<dialog id="createOperatorDialog"`, `id="closeCreateOperator"`, `id="operatorForm"`, `id="operatorUsername"`, "showModal()", "/v1/operators"}},
+		{"account.gohtml", []string{`id="totpSetupPanel"`, `id="openTOTPSetup"`, `>Setup 2FA</button>`, `<dialog id="totpSetupDialog"`, `id="closeTOTPSetup"`, `id="setupTOTP"`, `id="totpQRCode"`, `id="enableForm"`, `id="recoveryCodesPanel"`, "/qrcode.js", "/v1/account/totp"}},
 		{"audit.gohtml", []string{`id="events"`, `href="/audits.html"`, "/v1/audit", "create_token", "revoke_token", "issue_certificate", "rotate_certificate", "update_settings", "async function refresh()"}},
 		{"401.gohtml", []string{"401", "Go to login"}},
 		{"404.gohtml", []string{"404", "Page not found"}},
@@ -110,6 +207,8 @@ func TestPageTemplatesRenderStandalonePages(t *testing.T) {
 			data := any(nil)
 			if test.name == "index.gohtml" {
 				data = map[string]string{"Destination": "/secrets.html"}
+			} else if test.name == "secret.gohtml" || test.name == "secrets.gohtml" || test.name == "token.gohtml" || test.name == "audit.gohtml" || test.name == "operators.gohtml" || test.name == "account.gohtml" {
+				data = map[string]bool{"IsAdmin": true}
 			}
 			var output bytes.Buffer
 			if err := pageTemplate.ExecuteTemplate(&output, test.name, data); err != nil {
@@ -129,7 +228,7 @@ func TestPageTemplatesRenderStandalonePages(t *testing.T) {
 
 func TestSecretBrowserGroupButtonKeepsClickedSelection(t *testing.T) {
 	var output bytes.Buffer
-	if err := pageTemplate.ExecuteTemplate(&output, "secrets.gohtml", nil); err != nil {
+	if err := pageTemplate.ExecuteTemplate(&output, "secrets.gohtml", map[string]bool{"IsAdmin": true}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -168,14 +267,14 @@ func TestIndexNavigatesByServerState(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			s := &server{adminName: test.adminName, sessions: map[string]time.Time{}}
+			s := &server{adminName: test.adminName, sessions: map[string]sessionInfo{}}
 			if test.locked {
 				s.setupDeadline = time.Now().Add(-time.Second)
 			}
 			request := httptest.NewRequest(http.MethodGet, "/", nil)
 			if test.authenticated {
 				const token = "session-token"
-				s.sessions[token] = time.Now().Add(time.Minute)
+				s.sessions[token] = sessionInfo{username: "admin", role: "admin", expiresAt: time.Now().Add(time.Minute)}
 				request.AddCookie(&http.Cookie{Name: "vault_session", Value: token})
 			}
 			response := httptest.NewRecorder()
@@ -188,7 +287,7 @@ func TestIndexNavigatesByServerState(t *testing.T) {
 }
 
 func TestWebPagesUseExpectedStatusAndContent(t *testing.T) {
-	s := &server{adminName: "admin", sessions: map[string]time.Time{}}
+	s := &server{adminName: "admin", sessions: map[string]sessionInfo{}}
 
 	login := httptest.NewRecorder()
 	s.serveLogin(login, httptest.NewRequest(http.MethodGet, "/login", nil))
@@ -309,7 +408,7 @@ func TestBrowseSecretsGroupsAndPaginates(t *testing.T) {
 
 	s := &server{
 		db:       db,
-		sessions: map[string]time.Time{"session": time.Now().Add(time.Minute)},
+		sessions: map[string]sessionInfo{"session": {expiresAt: time.Now().Add(time.Minute)}},
 	}
 	request := httptest.NewRequest(http.MethodGet, "/v1/secrets-browser?group=kv%2Fdummy&limit=1&offset=1", nil)
 	request.AddCookie(&http.Cookie{Name: "vault_session", Value: "session"})
@@ -344,7 +443,7 @@ func TestBrowseSecretsUsesAllowedPageSizes(t *testing.T) {
 	}
 	s := &server{
 		db:       db,
-		sessions: map[string]time.Time{"session": time.Now().Add(time.Minute)},
+		sessions: map[string]sessionInfo{"session": {expiresAt: time.Now().Add(time.Minute)}},
 	}
 
 	for _, test := range []struct {

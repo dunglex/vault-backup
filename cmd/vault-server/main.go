@@ -57,9 +57,15 @@ type server struct {
 	clientCA      *managedClientCA
 
 	mu             sync.Mutex
-	sessions       map[string]time.Time
+	sessions       map[string]sessionInfo
 	attempts       map[string][]time.Time
 	trustedProxies []*net.IPNet
+}
+
+type sessionInfo struct {
+	username  string
+	role      string
+	expiresAt time.Time
 }
 
 type accountRequest struct {
@@ -67,6 +73,7 @@ type accountRequest struct {
 	Username             string `json:"username"`
 	Password             string `json:"password"`
 	PasswordConfirmation string `json:"password_confirmation"`
+	TOTPCode             string `json:"totp_code"`
 }
 
 type secretRequest struct {
@@ -85,7 +92,7 @@ func (w httpErrorLogWriter) Write(p []byte) (int, error) {
 	return w.output.Write(p)
 }
 
-//go:embed *.gohtml *.css
+//go:embed *.gohtml *.css *.js
 var embeddedFiles embed.FS
 
 var pageTemplate = template.Must(template.ParseFS(embeddedFiles, "*.gohtml"))
@@ -190,7 +197,7 @@ func main() {
 	}
 
 	var adminName string
-	if err := db.QueryRow("SELECT username FROM accounts LIMIT 1").Scan(&adminName); err != nil && err != sql.ErrNoRows {
+	if err := db.QueryRow("SELECT username FROM accounts WHERE role = 'admin' ORDER BY rowid LIMIT 1").Scan(&adminName); err != nil && err != sql.ErrNoRows {
 		log.Fatal(err)
 	}
 
@@ -230,7 +237,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	s := &server{db: db, auditDB: auditDB, setupKey: setupKey, setupKeyPath: setupKeyPath, setupDeadline: setupDeadline, adminName: adminName, aead: aead, sessions: map[string]time.Time{}, attempts: map[string][]time.Time{}, trustedProxies: trustedProxyRanges}
+	s := &server{db: db, auditDB: auditDB, setupKey: setupKey, setupKeyPath: setupKeyPath, setupDeadline: setupDeadline, adminName: adminName, aead: aead, sessions: map[string]sessionInfo{}, attempts: map[string][]time.Time{}, trustedProxies: trustedProxyRanges}
 	if err := s.loadOrCreateManagedClientCA(); err != nil {
 		log.Fatal(err)
 	}
@@ -239,6 +246,7 @@ func main() {
 	mux.HandleFunc("GET /normalize.css", serveEmbeddedAsset("normalize.css", "text/css; charset=utf-8"))
 	mux.HandleFunc("GET /miligram.css", serveEmbeddedAsset("miligram.css", "text/css; charset=utf-8"))
 	mux.HandleFunc("GET /admin.css", serveEmbeddedAsset("admin.css", "text/css; charset=utf-8"))
+	mux.HandleFunc("GET /qrcode.js", serveEmbeddedAsset("qrcode.js", "text/javascript; charset=utf-8"))
 	for _, path := range []string{"/setup", "/setup.html"} {
 		mux.HandleFunc("GET "+path, s.serveSetup)
 	}
@@ -257,8 +265,13 @@ func main() {
 	for _, path := range []string{"/tokens", "/tokens.html"} {
 		mux.HandleFunc("GET "+path, s.serveTokens)
 	}
-	for _, path := range []string{"/settings", "/settings.html"} {
-		mux.HandleFunc("GET "+path, s.serveSettings)
+	for _, path := range []string{"/security", "/security.html"} {
+		mux.HandleFunc("GET "+path, s.serveSecurity)
+	}
+	mux.HandleFunc("GET /settings", redirectSecurityPage)
+	mux.HandleFunc("GET /settings.html", redirectSecurityPage)
+	for _, path := range []string{"/operators", "/operators.html"} {
+		mux.HandleFunc("GET "+path, s.serveOperators)
 	}
 	for _, path := range []string{"/token", "/token.html"} {
 		mux.HandleFunc("GET "+path, func(w http.ResponseWriter, r *http.Request) {
@@ -267,6 +280,9 @@ func main() {
 	}
 	for _, path := range []string{"/audits", "/audits.html"} {
 		mux.HandleFunc("GET "+path, s.serveAudit)
+	}
+	for _, path := range []string{"/account", "/account.html"} {
+		mux.HandleFunc("GET "+path, s.serveAccount)
 	}
 	for _, path := range []string{"/audit", "/audit.html"} {
 		mux.HandleFunc("GET "+path, func(w http.ResponseWriter, r *http.Request) {
@@ -296,6 +312,14 @@ func main() {
 	mux.HandleFunc("POST /v1/tokens/{id}/certificate", s.issueAPITokenCertificate)
 	mux.HandleFunc("GET /v1/settings", s.getSettings)
 	mux.HandleFunc("PUT /v1/settings", s.updateSettings)
+	mux.HandleFunc("GET /v1/operators", s.listOperators)
+	mux.HandleFunc("POST /v1/operators", s.createOperator)
+	mux.HandleFunc("DELETE /v1/operators", s.deleteOperator)
+	mux.HandleFunc("GET /v1/account/totp", s.getAccountTOTP)
+	mux.HandleFunc("POST /v1/account/totp/setup", s.setupAccountTOTP)
+	mux.HandleFunc("POST /v1/account/totp/enable", s.enableAccountTOTP)
+	mux.HandleFunc("POST /v1/account/totp/recovery-codes", s.regenerateAccountTOTPRecoveryCodes)
+	mux.HandleFunc("DELETE /v1/account/totp", s.disableAccountTOTP)
 	mux.HandleFunc("GET /v1/audit", s.listAuditEvents)
 
 	// API endpoints: require bearer/X-Vault-Token authentication.
@@ -637,7 +661,7 @@ func (s *server) setup(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not create account"})
 		return
 	}
-	if _, err := s.db.Exec("INSERT INTO accounts(username, password_hash) VALUES (?, ?)", req.Username, string(hash)); err != nil {
+	if _, err := s.db.Exec("INSERT INTO accounts(username, password_hash, role) VALUES (?, ?, 'admin')", req.Username, string(hash)); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not create account"})
 		return
 	}
@@ -663,8 +687,13 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var hash string
-	if err := s.db.QueryRow("SELECT password_hash FROM accounts WHERE username = ?", req.Username).Scan(&hash); err != nil {
+	var hash, role string
+	var totpSecret sql.NullString
+	var totpEnabled int
+	if err := s.db.QueryRow(
+		"SELECT password_hash, role, totp_secret, totp_enabled FROM accounts WHERE username = ?",
+		req.Username,
+	).Scan(&hash, &role, &totpSecret, &totpEnabled); err != nil {
 		s.recordAuditEvent(r, "login", "failure", req.Username, "web", "", "invalid_credentials")
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid username or password"})
 		return
@@ -674,6 +703,27 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid username or password"})
 		return
 	}
+	if totpEnabled == 1 {
+		if r.TLS == nil {
+			writeJSON(w, http.StatusUpgradeRequired, map[string]string{"error": "HTTPS is required for two-factor login"})
+			return
+		}
+		if req.TOTPCode == "" {
+			s.recordAuditEvent(r, "login", "challenge", req.Username, "web", "", "totp_required")
+			writeJSON(w, http.StatusOK, map[string]bool{"requires_totp": true})
+			return
+		}
+		valid, err := s.verifyAccountSecondFactor(req.Username, totpSecret.String, req.TOTPCode)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not verify authentication code"})
+			return
+		}
+		if !valid {
+			s.recordAuditEvent(r, "login", "failure", req.Username, "web", "", "invalid_second_factor")
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid username, password, or authentication code"})
+			return
+		}
+	}
 
 	tokenBytes := make([]byte, 32)
 	if _, err := io.ReadFull(rand.Reader, tokenBytes); err != nil {
@@ -682,7 +732,10 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
 	s.mu.Lock()
-	s.sessions[token] = time.Now().Add(30 * time.Minute)
+	if s.sessions == nil {
+		s.sessions = make(map[string]sessionInfo)
+	}
+	s.sessions[token] = sessionInfo{username: req.Username, role: role, expiresAt: time.Now().Add(30 * time.Minute)}
 	s.mu.Unlock()
 	http.SetCookie(w, &http.Cookie{
 		Name:     "vault_session",
@@ -710,8 +763,13 @@ func (s *server) loginLDAP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many login attempts"})
 		return
 	}
-	var hash string
-	if err := s.db.QueryRow("SELECT password_hash FROM accounts WHERE username = ?", username).Scan(&hash); err != nil {
+	var hash, role string
+	var totpSecret sql.NullString
+	var totpEnabled int
+	if err := s.db.QueryRow(
+		"SELECT password_hash, role, totp_secret, totp_enabled FROM accounts WHERE username = ?",
+		username,
+	).Scan(&hash, &role, &totpSecret, &totpEnabled); err != nil {
 		s.recordAuditEvent(r, "login", "failure", username, "api", "", "invalid_credentials")
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid username or password"})
 		return
@@ -721,6 +779,27 @@ func (s *server) loginLDAP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid username or password"})
 		return
 	}
+	if totpEnabled == 1 {
+		if r.TLS == nil {
+			writeJSON(w, http.StatusUpgradeRequired, map[string]string{"error": "HTTPS is required for two-factor login"})
+			return
+		}
+		if req.TOTPCode == "" {
+			s.recordAuditEvent(r, "login", "failure", username, "api", "", "totp_required")
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authentication code required"})
+			return
+		}
+		valid, err := s.verifyAccountSecondFactor(username, totpSecret.String, req.TOTPCode)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not verify authentication code"})
+			return
+		}
+		if !valid {
+			s.recordAuditEvent(r, "login", "failure", username, "api", "", "invalid_second_factor")
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid username, password, or authentication code"})
+			return
+		}
+	}
 	tokenBytes := make([]byte, 32)
 	if _, err := io.ReadFull(rand.Reader, tokenBytes); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not create session"})
@@ -728,7 +807,10 @@ func (s *server) loginLDAP(w http.ResponseWriter, r *http.Request) {
 	}
 	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
 	s.mu.Lock()
-	s.sessions[token] = time.Now().Add(30 * time.Minute)
+	if s.sessions == nil {
+		s.sessions = make(map[string]sessionInfo)
+	}
+	s.sessions[token] = sessionInfo{username: username, role: role, expiresAt: time.Now().Add(30 * time.Minute)}
 	s.mu.Unlock()
 	s.recordAuditEvent(r, "login", "success", username, "api", "", "")
 	writeJSON(w, http.StatusOK, map[string]any{"auth": map[string]any{"client_token": token}})
@@ -763,7 +845,10 @@ func (s *server) recordAuditEvent(r *http.Request, action, outcome, actor, sourc
 
 func (s *server) auditRequestActor(r *http.Request, source string) string {
 	if source == "web" {
-		return s.adminName
+		if session, ok := s.sessionFromRequest(r); ok {
+			return session.username
+		}
+		return "anonymous"
 	}
 	token := r.Header.Get("X-Vault-Token")
 	if token == "" {
@@ -875,11 +960,45 @@ func ipInRanges(ip net.IP, ranges []*net.IPNet) bool {
 }
 
 func (s *server) authorizedWeb(r *http.Request) bool {
+	_, ok := s.sessionFromRequest(r)
+	return ok
+}
+
+func (s *server) sessionFromRequest(r *http.Request) (sessionInfo, bool) {
 	cookie, err := r.Cookie("vault_session")
 	if err != nil {
+		return sessionInfo{}, false
+	}
+	return s.sessionForToken(cookie.Value)
+}
+
+func (s *server) sessionForToken(token string) (sessionInfo, bool) {
+	if token == "" {
+		return sessionInfo{}, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session, ok := s.sessions[token]
+	if !ok || time.Now().After(session.expiresAt) {
+		delete(s.sessions, token)
+		return sessionInfo{}, false
+	}
+	session.expiresAt = time.Now().Add(30 * time.Minute)
+	s.sessions[token] = session
+	return session, true
+}
+
+func (s *server) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
+	session, ok := s.sessionFromRequest(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return false
 	}
-	return s.authorizedToken(cookie.Value)
+	if session.role != "admin" {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "administrator access required"})
+		return false
+	}
+	return true
 }
 
 func (s *server) authorizedAPI(r *http.Request) bool {
@@ -900,18 +1019,8 @@ func (s *server) authorizedAPI(r *http.Request) bool {
 }
 
 func (s *server) authorizedToken(token string) bool {
-	if token == "" {
-		return false
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	expires, ok := s.sessions[token]
-	if !ok || time.Now().After(expires) {
-		delete(s.sessions, token)
-		return false
-	}
-	s.sessions[token] = time.Now().Add(30 * time.Minute)
-	return true
+	_, ok := s.sessionForToken(token)
+	return ok
 }
 
 func (s *server) authorizedAPIToken(token string) bool {
@@ -1691,8 +1800,41 @@ func (s *server) serveAudit(w http.ResponseWriter, r *http.Request) {
 	s.serveProtectedPage(w, r, "audit.gohtml")
 }
 
-func (s *server) serveSettings(w http.ResponseWriter, r *http.Request) {
-	s.serveProtectedPage(w, r, "settings.gohtml")
+func (s *server) serveAccount(w http.ResponseWriter, r *http.Request) {
+	s.serveProtectedPage(w, r, "account.gohtml")
+}
+
+func redirectSecurityPage(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, "/security.html", http.StatusMovedPermanently)
+}
+
+func (s *server) serveSecurity(w http.ResponseWriter, r *http.Request) {
+	s.serveAdminProtectedPage(w, r, "security.gohtml")
+}
+
+func (s *server) serveOperators(w http.ResponseWriter, r *http.Request) {
+	s.serveAdminProtectedPage(w, r, "operators.gohtml")
+}
+
+func (s *server) serveAdminProtectedPage(w http.ResponseWriter, r *http.Request, name string) {
+	if s.adminName == "" {
+		destination := "/setup.html"
+		if s.setupLocked() {
+			destination = "/lock.html"
+		}
+		http.Redirect(w, r, destination, http.StatusSeeOther)
+		return
+	}
+	session, ok := s.sessionFromRequest(r)
+	if !ok {
+		s.renderPage(w, "401.gohtml", http.StatusUnauthorized, nil)
+		return
+	}
+	if session.role != "admin" {
+		http.Error(w, "administrator access required", http.StatusForbidden)
+		return
+	}
+	s.renderPage(w, name, http.StatusOK, map[string]bool{"IsAdmin": true})
 }
 
 func (s *server) serveProtectedPage(w http.ResponseWriter, r *http.Request, name string) {
@@ -1704,11 +1846,12 @@ func (s *server) serveProtectedPage(w http.ResponseWriter, r *http.Request, name
 		http.Redirect(w, r, destination, http.StatusSeeOther)
 		return
 	}
-	if !s.authorizedWeb(r) {
+	session, ok := s.sessionFromRequest(r)
+	if !ok {
 		s.renderPage(w, "401.gohtml", http.StatusUnauthorized, nil)
 		return
 	}
-	s.renderPage(w, name, http.StatusOK, nil)
+	s.renderPage(w, name, http.StatusOK, map[string]bool{"IsAdmin": session.role == "admin"})
 }
 
 func (s *server) setupLocked() bool {
@@ -1747,9 +1890,10 @@ func (s *server) renderPage(w http.ResponseWriter, name string, status int, data
 }
 
 func (s *server) webSession(w http.ResponseWriter, r *http.Request) {
-	if !s.authorizedWeb(r) {
+	session, ok := s.sessionFromRequest(r)
+	if !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"authenticated": true})
+	writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "role": session.role})
 }

@@ -152,6 +152,11 @@ textarea {
   margin-bottom: 0;
 }
 
+.totp-setup-actions {
+  justify-content: flex-start;
+  margin-top: 1.2rem;
+}
+
 .editor-actions {
   margin-top: 0.8rem;
 }
@@ -386,7 +391,7 @@ table {
   margin-bottom: 0;
 }
 
-.token-dialog {
+.admin-dialog {
   border: 0.1rem solid var(--border);
   border-radius: 0.6rem;
   box-shadow: var(--shadow);
@@ -397,45 +402,62 @@ table {
   width: calc(100% - 3.2rem);
 }
 
-.token-dialog::backdrop {
+.admin-dialog::backdrop {
   background: rgba(29, 38, 55, 0.48);
 }
 
-.token-dialog form {
+.admin-dialog form {
   margin-bottom: 0;
 }
 
-.token-dialog-heading {
+.admin-dialog-heading {
   align-items: flex-start;
   display: flex;
   gap: 1rem;
   justify-content: space-between;
 }
 
-.token-dialog-heading h2 {
+.admin-dialog-heading h2 {
   margin-bottom: 1.6rem;
 }
 
-.token-dialog-heading button {
+.admin-dialog-heading button {
   flex: 0 0 auto;
   margin-bottom: 1.6rem;
 }
 
-.token-dialog h2 {
+.admin-dialog h2 {
   margin-bottom: 1.6rem;
 }
 
-.token-dialog-actions {
+.admin-dialog-actions {
   justify-content: flex-end;
   margin-top: 1.6rem;
 }
 
-.token-dialog-actions button {
+.admin-dialog-actions button {
   margin-bottom: 0;
 }
 
 .credential-panel {
   margin-top: 1.6rem;
+}
+
+.totp-qr-code {
+  background: #fff;
+  border-radius: 0.4rem;
+  display: inline-block;
+  margin: 1.2rem 0;
+  max-width: 100%;
+  overflow: auto;
+  padding: 0.8rem;
+}
+
+.totp-qr-code canvas,
+.totp-qr-code img {
+  display: block;
+  height: auto;
+  max-width: 100%;
 }
 
 .credential-panel h3 {
@@ -491,10 +513,6 @@ table {
 
 .setting-option input {
   margin-bottom: 0;
-}
-
-.settings-example {
-  margin-top: 2.4rem;
 }
 
 pre {

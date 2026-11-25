@@ -17,12 +17,18 @@
     <form id="loginForm">
       <label>Username<input name="username" autocomplete="username" required></label>
       <label>Password<input name="password" type="password" autocomplete="current-password" required></label>
-      <button type="submit">Login</button>
+      <label id="totpChallenge" hidden>Authenticator or recovery code
+        <input id="totpCode" name="totp_code" autocomplete="one-time-code" disabled required>
+      </label>
+      <button id="submitLogin" type="submit">Login</button>
     </form>
 </main>
 <script>
 const form = document.getElementById('loginForm');
 const errorBox = document.getElementById('error');
+const totpChallenge = document.getElementById('totpChallenge');
+const totpCode = document.getElementById('totpCode');
+const submitButton = document.getElementById('submitLogin');
 
 form.addEventListener('submit', async event => {
   event.preventDefault();
@@ -37,6 +43,14 @@ form.addEventListener('submit', async event => {
     });
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(body.error || 'Login failed');
+    if (body.requires_totp) {
+      totpChallenge.hidden = false;
+      totpCode.disabled = false;
+      submitButton.textContent = 'Verify and sign in';
+      errorBox.textContent = 'Enter a current authenticator code or an unused recovery code.';
+      totpCode.focus();
+      return;
+    }
     location.assign('/secrets.html');
   } catch (error) {
     errorBox.textContent = error.message;

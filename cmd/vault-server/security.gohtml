@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Settings - Vault Server</title>
+  <title>Security - Vault Server</title>
   <link rel="stylesheet" href="/normalize.css">
   <link rel="stylesheet" href="/miligram.css">
   <link rel="stylesheet" href="/admin.css">
@@ -12,12 +12,13 @@
 <main class="app-shell">
   <header class="app-header">
     <h1 class="brand">Vault Server</h1>
-    <nav class="app-nav" aria-label="Admin navigation">
+    <nav class="app-nav" aria-label="Security navigation">
       <a class="button button-outline" href="/secrets.html">Secrets</a>
       <a class="button button-outline" href="/tokens.html">API tokens</a>
       <a class="button button-outline" href="/audits.html">Audit log</a>
-      <a class="button" aria-current="page" href="/settings.html">Settings</a>
-      <button id="logout" class="button button-outline">Logout</button>
+      {{if .IsAdmin}}<a class="button button-outline" href="/operators.html">Operators</a>{{end}}
+      <a class="button" aria-current="page" href="/security.html">Security</a>
+      <a class="button button-outline" href="/account.html">Account</a>
     </nav>
   </header>
   <div id="error" class="notice" role="alert"></div>
@@ -36,22 +37,6 @@
         <span id="saved" class="success" role="status"></span>
       </div>
     </form>
-  </section>
-  <section class="panel settings-example">
-    <h2 class="section-label">vault-backup example</h2>
-    <p>Create a managed API token to download its client certificate and private key. Use a trusted CA certificate for your Vault server; do not use <code>--insecure</code> with mTLS.</p>
-    <pre><code>VAULT_TOKEN="YOUR_MANAGED_API_TOKEN" ./bin/vault-backup \
-  --url https://vault.example:8200/api \
-  --token "$VAULT_TOKEN" \
-  --ca_cert /path/to/vault-server-ca.pem \
-  --client_cert ./vault-client-cert.pem \
-  --client_key ./vault-client-key.pem \
-  --secret_name kv \
-  --secret_path app/database \
-  --output_mode file \
-  --output_format env \
-  --output_path ./database.env</code></pre>
-    <p class="muted">The token is shown only when created. Certificate files contain a private key; protect them (for example, run <code>chmod 600 vault-client-cert.pem vault-client-key.pem</code>).</p>
   </section>
 </main>
 <script>
@@ -95,10 +80,6 @@ document.getElementById('settingsForm').addEventListener('submit', async event =
   } finally {
     button.disabled = false;
   }
-});
-document.getElementById('logout').addEventListener('click', async () => {
-  try { await api('/v1/auth/logout', {method:'POST'}); } catch (_) {}
-  location.assign('/login.html');
 });
 loadSettings();
 </script>
