@@ -8,7 +8,11 @@
   --primary: #4b3f92;
   --primary-dark: #382d70;
   --danger: #b83250;
+  --danger-soft: #fff0f2;
+  --danger-border: #f0cbd2;
   --success: #26734d;
+  --success-soft: #e9f5ee;
+  --success-border: #cfe6d8;
   --shadow: 0 0.8rem 2.4rem rgba(29, 38, 55, 0.08);
 }
 
@@ -265,6 +269,77 @@ textarea {
 #paths button,
 #tokens button {
   margin-bottom: 0;
+}
+
+.operator-list {
+  display: grid;
+  gap: 1rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.operator-item {
+  align-items: center;
+  background: var(--surface-muted);
+  border: 0.1rem solid var(--border);
+  border-radius: 0.6rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.2rem;
+  justify-content: space-between;
+  margin: 0;
+  min-width: 0;
+  padding: 1.2rem 1.4rem;
+}
+
+.operator-identity,
+.operator-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.8rem;
+  min-width: 0;
+}
+
+.operator-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.operator-badge {
+  background: var(--surface);
+  border: 0.1rem solid var(--border);
+  border-radius: 99rem;
+  color: var(--muted);
+  display: inline-flex;
+  font-size: 1.2rem;
+  line-height: 1.5;
+  padding: 0.2rem 0.8rem;
+}
+
+.operator-badge-active {
+  background: var(--success-soft);
+  border-color: var(--success-border);
+  color: var(--success);
+}
+
+.operator-badge-locked {
+  background: var(--danger-soft);
+  border-color: var(--danger-border);
+  color: var(--danger);
+}
+
+.operator-actions button {
+  margin: 0;
+}
+
+.operator-empty {
+  background: var(--surface-muted);
+  border: 0.1rem dashed var(--border);
+  border-radius: 0.6rem;
+  color: var(--muted);
+  padding: 1.4rem;
 }
 
 .secret-groups,
@@ -581,5 +656,13 @@ pre {
   .pager {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .operator-item {
+    align-items: stretch;
+  }
+
+  .operator-actions button {
+    flex: 1 1 12rem;
   }
 }

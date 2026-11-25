@@ -27,9 +27,9 @@
       <h2 class="section-label">Operator accounts</h2>
       <button id="openCreateOperator" type="button">Add operator</button>
     </div>
-    <p>Operators can manage secrets, API tokens, and audit events. They cannot access Security or manage accounts. Locking an operator revokes active sessions. Removing their 2FA also revokes sessions; if MFA enforcement is enabled, they must enroll again before continuing.</p>
+    <p>Operators can manage secrets, API tokens, and audit events. Locking an operator revokes their sessions. If MFA is enforced, operators must re-enroll after 2FA is removed.</p>
     <h3 class="section-label">Current operators</h3>
-    <ul id="operators" aria-live="polite"></ul>
+    <ul id="operators" class="operator-list" aria-live="polite"></ul>
   </section>
   <dialog id="createOperatorDialog" class="admin-dialog" aria-labelledby="createOperatorTitle">
     <form id="operatorForm">
@@ -48,7 +48,7 @@
         <p>This password is shown only once. The operator must change it when they first sign in.</p>
         <label for="generatedOperatorPassword">Temporary password</label>
         <input id="generatedOperatorPassword" type="text" readonly autocomplete="off">
-        <div class="row-actions admin-dialog-actions">
+        <div class="row-actions admin-dialog-actions">SAP 
           <button id="copyOperatorPassword" type="button">Copy password</button>
         </div>
         <p id="operatorPasswordCopyStatus" role="status" class="muted">Copy the password or select it to copy manually.</p>
@@ -76,19 +76,29 @@ function renderOperators(operators) {
   list.replaceChildren();
   if (operators.length === 0) {
     const empty = document.createElement('li');
+    empty.className = 'operator-empty';
     empty.textContent = 'No operators have been added.';
     list.append(empty);
     return;
   }
   for (const operator of operators) {
     const item = document.createElement('li');
+    item.className = 'operator-item';
+    const identity = document.createElement('div');
+    identity.className = 'operator-identity';
     const label = document.createElement('span');
+    label.className = 'operator-name';
     label.textContent = operator.username;
     const status = document.createElement('span');
+    status.className = `operator-badge ${operator.locked ? 'operator-badge-locked' : 'operator-badge-active'}`;
     status.textContent = operator.locked ? 'Locked' : 'Active';
     const mfaStatus = document.createElement('span');
+    mfaStatus.className = 'operator-badge operator-badge-muted';
     mfaStatus.textContent = operator.mfa_enabled ? '2FA enabled' :
       operator.mfa_configured ? '2FA setup pending' : '2FA disabled';
+    identity.append(label, status, mfaStatus);
+    const actions = document.createElement('div');
+    actions.className = 'operator-actions';
     const lock = document.createElement('button');
     lock.type = 'button';
     lock.className = 'button button-outline';
@@ -100,7 +110,8 @@ function renderOperators(operators) {
     removeMFA.textContent = 'Remove 2FA';
     removeMFA.disabled = !operator.mfa_configured;
     removeMFA.addEventListener('click', () => removeOperatorMFA(operator.username));
-    item.append(label, ' — ', status, ' — ', mfaStatus, ' ', lock, ' ', removeMFA);
+    actions.append(lock, removeMFA);
+    item.append(identity, actions);
     list.append(item);
   }
 }
