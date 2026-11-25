@@ -119,6 +119,11 @@ textarea {
   font-weight: 700;
 }
 
+.brand a,
+.brand a:hover {
+  color: inherit;
+}
+
 .setup-page .setup-title {
   font-size: 3.6rem;
 }

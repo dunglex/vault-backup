@@ -327,6 +327,13 @@ func TestPageTemplatesRenderStandalonePages(t *testing.T) {
 				(strings.Contains(output.String(), " of 4:") || strings.Contains(output.String(), `id="setupProgress"`)) {
 				t.Error("setup page exposes a public setup-step list")
 			}
+			switch test.name {
+			case "login.gohtml", "secret.gohtml", "secrets.gohtml", "token.gohtml",
+				"security.gohtml", "operators.gohtml", "account.gohtml", "audit.gohtml":
+				if !strings.Contains(output.String(), `<h1 class="brand"><a href="/">Vault Server</a></h1>`) {
+					t.Errorf("%s brand heading does not link to the root page", test.name)
+				}
+			}
 			if test.name == "index.gohtml" && strings.Contains(output.String(), `location.replace("\"`) {
 				t.Error("navigator includes quotes in the redirect URL")
 			}
