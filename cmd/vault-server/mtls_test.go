@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -114,5 +115,70 @@ func TestMFAEnforcementSettingPersistsAndSupportsPartialUpdates(t *testing.T) {
 	}
 	if settings := readSettings(); !settings["enforce_mfa"] {
 		t.Fatal("partial settings update did not preserve MFA enforcement")
+	}
+}
+
+func TestFileLoggingSecuritySettingPersistsAndControlsLogger(t *testing.T) {
+	s := newOperatorTestServer(t)
+	writer := newServerLogWriter(io.Discard, filepath.Join(t.TempDir(), "vault-server"))
+	s.logWriter = writer
+	t.Cleanup(func() {
+		if err := writer.DisableFileLogging(); err != nil {
+			t.Errorf("disable file logging: %v", err)
+		}
+	})
+
+	enabled, err := s.fileLoggingEnabled()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if enabled {
+		t.Fatal("file logging should be disabled by default")
+	}
+	settingsResponse := httptest.NewRecorder()
+	s.getSettings(settingsResponse, operatorRequestWithSession(
+		http.MethodGet,
+		"/v1/settings",
+		"",
+		"admin-session",
+		true,
+	))
+	if settingsResponse.Code != http.StatusOK ||
+		!strings.Contains(settingsResponse.Body.String(), `"file_logging":false`) {
+		t.Fatalf("read default file logging setting = %d, body %s", settingsResponse.Code, settingsResponse.Body.String())
+	}
+
+	enable := httptest.NewRecorder()
+	s.updateSettings(enable, operatorRequestWithSession(
+		http.MethodPut,
+		"/v1/settings",
+		`{"file_logging":true}`,
+		"admin-session",
+		true,
+	))
+	if enable.Code != http.StatusOK || !strings.Contains(enable.Body.String(), `"file_logging":true`) {
+		t.Fatalf("enable file logging = %d, body %s", enable.Code, enable.Body.String())
+	}
+	enabled, err = s.fileLoggingEnabled()
+	if err != nil || !enabled {
+		t.Fatalf("file logging setting = %t, error %v", enabled, err)
+	}
+	if writer.file == nil {
+		t.Fatal("file logging was not enabled")
+	}
+
+	disable := httptest.NewRecorder()
+	s.updateSettings(disable, operatorRequestWithSession(
+		http.MethodPut,
+		"/v1/settings",
+		`{"file_logging":false}`,
+		"admin-session",
+		true,
+	))
+	if disable.Code != http.StatusOK || !strings.Contains(disable.Body.String(), `"file_logging":false`) {
+		t.Fatalf("disable file logging = %d, body %s", disable.Code, disable.Body.String())
+	}
+	if writer.file != nil {
+		t.Fatal("file logging remained enabled")
 	}
 }

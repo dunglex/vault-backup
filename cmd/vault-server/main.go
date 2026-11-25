@@ -59,6 +59,7 @@ type server struct {
 	clientCA      *managedClientCA
 	serverCerts   *serverCertificateManager
 	acmeAvailable bool
+	logWriter     *serverLogWriter
 
 	mu             sync.Mutex
 	sessions       map[string]sessionInfo
@@ -120,6 +121,7 @@ var embeddedFiles embed.FS
 var pageTemplate = template.Must(template.ParseFS(embeddedFiles, "*.gohtml"))
 
 func main() {
+	log.SetOutput(os.Stdout)
 	config, err := loadServerConfigFromProcess()
 	if errors.Is(err, errHelpRequested) {
 		return
@@ -127,6 +129,13 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	logWriter := newServerLogWriter(os.Stdout, filepath.Join(filepath.Dir(config.DBPath), "vault-server"))
+	log.SetOutput(logWriter)
+	defer func() {
+		if err := logWriter.DisableFileLogging(); err != nil {
+			log.Printf("ERROR: could not close file logging cleanly: %v", err)
+		}
+	}()
 	if config.HTTPAddr != "" {
 		log.Printf("WARNING: insecure HTTP listener enabled on %s; traffic is not encrypted", config.HTTPAddr)
 	}
@@ -188,6 +197,15 @@ func main() {
 
 	if err := initializeDatabase(db); err != nil {
 		log.Fatal(err)
+	}
+	fileLogging, err := readFileLoggingSetting(db)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if fileLogging {
+		if err := logWriter.EnableFileLogging(); err != nil {
+			log.Fatal(err)
+		}
 	}
 	if err := initializeSecretsDatabase(secretsDB); err != nil {
 		log.Fatal(err)
@@ -262,6 +280,7 @@ func main() {
 		secretsAEAD:    secretsAEAD,
 		serverCerts:    serverCerts,
 		acmeAvailable:  config.HTTPAddr != "",
+		logWriter:      logWriter,
 		sessions:       map[string]sessionInfo{},
 		attempts:       map[string][]time.Time{},
 		trustedProxies: config.TrustedProxyRanges,
@@ -371,7 +390,7 @@ func main() {
 
 	mux.HandleFunc("/", s.serveHome)
 
-	handler := s.middleware(mux)
+	handler := withAccessLogging(s.middleware(mux), logWriter)
 	tlsConfig := &tls.Config{
 		MinVersion: tls.VersionTLS12,
 		ClientAuth: tls.VerifyClientCertIfGiven,
@@ -385,7 +404,7 @@ func main() {
 	}
 	clientCAs.AddCert(s.clientCA.certificate)
 	tlsConfig.ClientCAs = clientCAs
-	httpErrorLog := log.New(httpErrorLogWriter{output: os.Stderr}, "", log.LstdFlags)
+	httpErrorLog := log.New(httpErrorLogWriter{output: logWriter}, "", log.LstdFlags)
 	httpsServer := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,

@@ -101,6 +101,13 @@ On first startup after upgrading, records in the old single `audit.db` are
 migrated to their UTC-year files and that legacy database is retained read-only.
 Audit databases store event metadata only, never secret values or raw tokens.
 
+HTTP access logs and server error logs are written to standard output by default.
+Admins can enable **Also write access and error logs to files** on the Security
+page; file logging is disabled by default and duplicates the stdout logs. Files
+are written beside the main database as `vault-server-YYYY-MM-DD.log`, rotated
+daily, restricted to mode `0600`, and cleaned up after seven days. Access logs
+record the request path but omit query strings.
+
 Web and LDAP-compatible username/password endpoints apply a cryptographically
 random 3-5 second delay before credential verification for attempts admitted
 by their shared limit of five per ten minutes, applied to both the client IP

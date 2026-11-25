@@ -41,6 +41,11 @@
         Auto block login bruteforce IP
       </label>
       <p class="muted">When enabled, an IP address is permanently blocked after five failed logins within ten minutes. Successful logins reset that IP's failure sequence. Blocks remain stored if this option is disabled.</p>
+      <label class="setting-option">
+        <input id="fileLogging" type="checkbox">
+        Also write access and error logs to files
+      </label>
+      <p class="muted">Logs are always written to standard output. When enabled, they are also written to daily log files beside the database and retained for seven days.</p>
       <p><button id="viewBlockedIPs" class="button button-outline" type="button">View blocked IPs</button></p>
       <div class="row-actions">
         <button id="saveSettings" type="submit">Save settings</button>
@@ -82,6 +87,7 @@ async function loadSettings() {
     document.getElementById('enforceMTLS').checked = settings.enforce_mtls;
     document.getElementById('autoBlockLoginBruteforceIP').checked = settings.auto_block_login_bruteforce_ip;
     document.getElementById('enforceMFA').checked = settings.enforce_mfa;
+    document.getElementById('fileLogging').checked = settings.file_logging;
   } catch (error) {
     errorBox.textContent = error.message;
   }
@@ -100,7 +106,8 @@ document.getElementById('settingsForm').addEventListener('submit', async event =
       body:JSON.stringify({
         enforce_mtls:document.getElementById('enforceMTLS').checked,
         auto_block_login_bruteforce_ip:document.getElementById('autoBlockLoginBruteforceIP').checked,
-        enforce_mfa:document.getElementById('enforceMFA').checked
+        enforce_mfa:document.getElementById('enforceMFA').checked,
+        file_logging:document.getElementById('fileLogging').checked
       })
     });
     saved.textContent = 'Settings saved.';

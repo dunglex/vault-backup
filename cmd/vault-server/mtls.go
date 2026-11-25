@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"log"
 	"math/big"
 	"net/http"
 	"strconv"
@@ -300,10 +301,16 @@ func (s *server) getSettings(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read settings"})
 		return
 	}
+	fileLogging, err := s.fileLoggingEnabled()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read settings"})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]bool{
 		"enforce_mtls":                   enforced,
 		"auto_block_login_bruteforce_ip": autoBlock,
 		"enforce_mfa":                    enforceMFA,
+		"file_logging":                   fileLogging,
 	})
 }
 
@@ -319,12 +326,14 @@ func (s *server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		EnforceMTLS                *bool `json:"enforce_mtls"`
 		AutoBlockLoginBruteforceIP *bool `json:"auto_block_login_bruteforce_ip"`
 		EnforceMFA                 *bool `json:"enforce_mfa"`
+		FileLogging                *bool `json:"file_logging"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid settings"})
 		return
 	}
-	if request.EnforceMTLS == nil && request.AutoBlockLoginBruteforceIP == nil && request.EnforceMFA == nil {
+	if request.EnforceMTLS == nil && request.AutoBlockLoginBruteforceIP == nil &&
+		request.EnforceMFA == nil && request.FileLogging == nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no settings provided"})
 		return
 	}
@@ -343,6 +352,12 @@ func (s *server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read settings"})
 		return
 	}
+	fileLogging, err := s.fileLoggingEnabled()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read settings"})
+		return
+	}
+	fileLoggingWasEnabled := fileLogging
 	if request.EnforceMTLS != nil {
 		enforced = *request.EnforceMTLS
 	}
@@ -352,6 +367,30 @@ func (s *server) updateSettings(w http.ResponseWriter, r *http.Request) {
 	if request.EnforceMFA != nil {
 		enforceMFA = *request.EnforceMFA
 	}
+	if request.FileLogging != nil {
+		fileLogging = *request.FileLogging
+	}
+	enableFileLogging := request.FileLogging != nil && *request.FileLogging && !fileLoggingWasEnabled
+	preparedFileLogging := false
+	if enableFileLogging && s.logWriter == nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "file logging is unavailable"})
+		return
+	}
+	if enableFileLogging {
+		if err := s.logWriter.EnableFileLogging(); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not enable file logging"})
+			return
+		}
+		preparedFileLogging = true
+	}
+	fileLoggingSaved := false
+	defer func() {
+		if preparedFileLogging && !fileLoggingSaved {
+			if err := s.logWriter.DisableFileLogging(); err != nil {
+				log.Printf("ERROR: could not roll back file logging: %v", err)
+			}
+		}
+	}()
 	tx, err := s.db.Begin()
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not save settings"})
@@ -387,19 +426,44 @@ func (s *server) updateSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if request.FileLogging != nil {
+		if _, err := tx.Exec(
+			"INSERT INTO server_settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+			serverFileLoggingSetting,
+			strconv.FormatBool(fileLogging),
+		); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not save settings"})
+			return
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not save settings"})
 		return
 	}
+	fileLoggingSaved = preparedFileLogging
+	if request.FileLogging != nil && !*request.FileLogging && s.logWriter != nil {
+		if err := s.logWriter.DisableFileLogging(); err != nil {
+			log.Printf("ERROR: could not disable file logging cleanly: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "file logging was disabled but the log file could not be closed cleanly"})
+			return
+		}
+	}
 	detail := ""
 	if request.EnforceMFA != nil {
 		detail = enforceMFASetting + "=" + strconv.FormatBool(enforceMFA)
+	}
+	if request.FileLogging != nil {
+		if detail != "" {
+			detail += ","
+		}
+		detail += serverFileLoggingSetting + "=" + strconv.FormatBool(fileLogging)
 	}
 	s.recordAuditEvent(r, "update_settings", "success", s.auditRequestActor(r, "web"), "web", "server-settings", detail)
 	writeJSON(w, http.StatusOK, map[string]bool{
 		"enforce_mtls":                   enforced,
 		"auto_block_login_bruteforce_ip": autoBlock,
 		"enforce_mfa":                    enforceMFA,
+		"file_logging":                   fileLogging,
 	})
 }
 
