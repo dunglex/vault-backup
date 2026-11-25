@@ -162,7 +162,11 @@ def main() -> None:
         )
         status, forced_password_page = operator_client.request("GET", f"{server.https_url}/secrets.html")
         assert_status(200, status, "redirect temporary-password session to account page")
-        require(b'id="passwordChangeRequiredNotice"' in forced_password_page, "show required password-change notice")
+        require(
+            b'id="passwordChangeRequiredNotice"' in forced_password_page
+            and b'<dialog id="passwordDialog"' in forced_password_page,
+            "prompt for password change in a dialog",
+        )
         status, _ = operator_client.json(
             "POST",
             f"{server.https_url}/v1/account/password",
