@@ -45,7 +45,7 @@ func newOperatorTestServer(t *testing.T) *server {
 	if _, err := db.Exec("INSERT INTO accounts(username, password_hash, role) VALUES ('admin', 'hash', 'admin')"); err != nil {
 		t.Fatal(err)
 	}
-	return &server{
+	s := &server{
 		db:        db,
 		secretsDB: secretsDB,
 		adminName: "admin",
@@ -53,9 +53,13 @@ func newOperatorTestServer(t *testing.T) *server {
 			return nil
 		},
 		sessions: map[string]sessionInfo{
-			"admin-session": {username: "admin", role: "admin", expiresAt: time.Now().Add(time.Hour)},
+			"admin-session": {username: "admin", role: "admin", expiresAt: time.Now().Add(time.Hour), ttl: time.Hour},
 		},
 	}
+	if err := s.storeSession("admin-session", s.sessions["admin-session"]); err != nil {
+		t.Fatalf("store admin test session: %v", err)
+	}
+	return s
 }
 
 func operatorRequestWithSession(method, path, body, session string, https bool) *http.Request {
@@ -100,13 +104,14 @@ func TestOperatorManagementIsAdminOnlyAndRevokesDeletedSessions(t *testing.T) {
 	if role != "operator" {
 		t.Fatalf("new account role = %q, want operator", role)
 	}
-	s.mu.Lock()
-	s.sessions["operator-session"] = sessionInfo{
+	if err := s.storeSession("operator-session", sessionInfo{
 		username:  "night-shift",
 		role:      "operator",
 		expiresAt: time.Now().Add(time.Hour),
+		ttl:       time.Hour,
+	}); err != nil {
+		t.Fatalf("store operator test session: %v", err)
 	}
-	s.mu.Unlock()
 
 	operatorRequest := func(method, path string) *http.Request {
 		return operatorRequestWithSession(method, path, "", "operator-session", true)

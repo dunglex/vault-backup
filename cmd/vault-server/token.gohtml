@@ -40,8 +40,14 @@
     <div id="tokenFormFields">
       <label for="tokenName">Token name</label>
       <input id="tokenName" name="name" maxlength="128" autocomplete="off" required>
-      <label for="tokenLifetimeDays">Token lifetime in days (maximum 365)</label>
-      <input id="tokenLifetimeDays" name="expires_in_days" type="number" min="1" max="365" value="30" required>
+      <label for="tokenLifetimeDays">Token lifetime</label>
+      <select id="tokenLifetimeDays" name="expires_in_days" required>
+        <option value="30" selected>30 days</option>
+        <option value="60">60 days</option>
+        <option value="90">90 days</option>
+        <option value="180">180 days</option>
+        <option value="365">365 days</option>
+      </select>
       <p class="muted">The client certificate expires at the same time as the token.</p>
     </div>
     <p id="dialogError" class="notice" role="alert"></p>

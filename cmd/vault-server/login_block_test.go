@@ -219,8 +219,16 @@ func TestLoginHandlerPermanentlyBlocksIPAfterFiveFailures(t *testing.T) {
 
 func TestAdminUnblockWritesAuditEvent(t *testing.T) {
 	s := newLoginBlockTestServer(t, false)
-	s.sessions = map[string]sessionInfo{
-		"admin-session": {username: "admin", role: "admin", expiresAt: time.Now().Add(time.Hour)},
+	if _, err := s.db.Exec("INSERT INTO accounts(username, password_hash, role) VALUES ('admin', 'hash', 'admin')"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.storeSession("admin-session", sessionInfo{
+		username:  "admin",
+		role:      "admin",
+		expiresAt: time.Now().Add(time.Hour),
+		ttl:       time.Hour,
+	}); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := s.db.Exec(
 		"INSERT INTO blocked_login_ips(client_ip, blocked_at, failure_count) VALUES (?, ?, ?)",

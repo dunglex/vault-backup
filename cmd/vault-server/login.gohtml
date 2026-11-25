@@ -8,11 +8,32 @@
   <link rel="stylesheet" href="/normalize.css">
   <link rel="stylesheet" href="/miligram.css">
   <link rel="stylesheet" href="/admin.css">
+  <style>
+    .login-spinner {
+      display: inline-block;
+      width: 1.2rem;
+      height: 1.2rem;
+      margin-right: 0.8rem;
+      vertical-align: middle;
+      border: 0.2rem solid currentColor;
+      border-right-color: transparent;
+      border-radius: 50%;
+      animation: login-spin 0.7s linear infinite;
+    }
+    .login-spinner[hidden] { display: none; }
+    @keyframes login-spin {
+      to { transform: rotate(360deg); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .login-spinner { animation-duration: 1.5s; }
+    }
+  </style>
 </head>
 <body class="auth-page">
 <main class="panel auth-card">
     <h1 class="brand">Vault Server</h1>
     <p class="muted">Sign in to manage secrets and API tokens.</p>
+    <p class="notice" role="note">Failed sign-in attempts are recorded with your IP address. Repeated failed attempts may result in this IP being blocked from signing in.</p>
     <div id="error" class="notice" role="alert"></div>
     <form id="loginForm">
       <label>Username<input name="username" autocomplete="username" required></label>
@@ -20,7 +41,10 @@
       <label id="totpChallenge" hidden>Authenticator or recovery code
         <input id="totpCode" name="totp_code" autocomplete="one-time-code" disabled required>
       </label>
-      <button id="submitLogin" type="submit">Login</button>
+      <button id="submitLogin" type="submit">
+        <span id="loginSpinner" class="login-spinner" aria-hidden="true" hidden></span>
+        <span id="loginButtonLabel">Login</span>
+      </button>
     </form>
 </main>
 <script>
@@ -29,12 +53,19 @@ const errorBox = document.getElementById('error');
 const totpChallenge = document.getElementById('totpChallenge');
 const totpCode = document.getElementById('totpCode');
 const submitButton = document.getElementById('submitLogin');
+const loginSpinner = document.getElementById('loginSpinner');
+const loginButtonLabel = document.getElementById('loginButtonLabel');
 
 form.addEventListener('submit', async event => {
   event.preventDefault();
+  if (submitButton.disabled) return;
   errorBox.textContent = '';
-  const values = Object.fromEntries(new FormData(form));
+  submitButton.disabled = true;
+  submitButton.setAttribute('aria-busy', 'true');
+  loginSpinner.hidden = false;
+  loginButtonLabel.textContent = 'Signing in...';
   try {
+    const values = Object.fromEntries(new FormData(form));
     const response = await fetch('/v1/auth/login', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
@@ -46,14 +77,22 @@ form.addEventListener('submit', async event => {
     if (body.requires_totp) {
       totpChallenge.hidden = false;
       totpCode.disabled = false;
-      submitButton.textContent = 'Verify and sign in';
       errorBox.textContent = 'Enter a current authenticator code or an unused recovery code.';
       totpCode.focus();
+      return;
+    }
+    if (body.requires_mfa_setup) {
+      location.assign('/account.html?mfa=required');
       return;
     }
     location.assign('/secrets.html');
   } catch (error) {
     errorBox.textContent = error.message;
+  } finally {
+    submitButton.disabled = false;
+    submitButton.setAttribute('aria-busy', 'false');
+    loginSpinner.hidden = true;
+    loginButtonLabel.textContent = totpChallenge.hidden ? 'Login' : 'Verify and sign in';
   }
 });
 </script>

@@ -59,7 +59,10 @@ def main() -> None:
         require(b"QRCode.CorrectLevel" in qr_library, "serve QR code library")
         status, totp_settings = server.client.json("GET", f"{server.https_url}/v1/account/totp")
         assert_status(200, status, "read default TOTP settings")
-        require(totp_settings["enabled"] is False, "TOTP is disabled by default")
+        require(
+            totp_settings["enabled"] is False and totp_settings["enforced"] is False,
+            "TOTP enforcement is disabled by default",
+        )
         status, token_page = server.client.request("GET", f"{server.https_url}/tokens.html")
         assert_status(200, status, "open canonical API tokens page")
         require(b'<dialog id="createTokenDialog"' in token_page, "token creation dialog")
@@ -84,6 +87,7 @@ def main() -> None:
         assert_status(200, status, "open mTLS security page")
         require(
             b'id="enforceMTLS"' in security_page
+            and b'id="enforceMFA"' in security_page
             and b'id="autoBlockLoginBruteforceIP"' in security_page
             and b'id="viewBlockedIPs"' in security_page
             and b'id="blockedIPsDialog"' in security_page
@@ -282,6 +286,7 @@ def main() -> None:
             == {
                 "enforce_mtls": False,
                 "auto_block_login_bruteforce_ip": False,
+                "enforce_mfa": False,
             },
             "default security settings",
         )

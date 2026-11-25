@@ -37,17 +37,27 @@ tokens, and audit events, but cannot access `/security.html`, `/v1/settings`,
 revokes their active web sessions.
 
 Two-factor authentication with TOTP is optional and disabled by default for
-each account. Users can enroll, disable it, and manage one-time recovery codes
-from `/account.html`; setup displays a local QR code or the secret for manual
-entry. Once enabled, web and LDAP-compatible logins require an authenticator
-code or an unused recovery code. TOTP secrets and recovery-code hashes are
-stored in the encrypted main database; recovery codes are shown only when
-generated.
+each account. Users can change their password, enroll TOTP, and disable it from
+`/account.html`; setup displays a local QR code or the secret for manual entry.
+Recovery codes are shown once when TOTP is enabled. Once enabled, web and
+LDAP-compatible logins require an authenticator code or an unused recovery
+code. TOTP secrets and recovery-code hashes are stored in the encrypted main
+database.
+
+Admins can enable **Enforce MFA for all users** in `/security.html`; it is
+disabled by default. Users without enrolled TOTP are restricted to their
+account page and MFA enrollment until setup is complete. LDAP-compatible login
+cannot issue a client token for an unenrolled account. Once enrolled, users
+must complete TOTP or recovery-code verification at every web and
+LDAP-compatible login. MFA cannot be disabled while enforcement is active.
 
 Web session cookies last 30 minutes for accounts without TOTP and 8 hours
 after a successful TOTP or recovery-code login. The session duration is chosen
 at login, so an account that just enabled TOTP receives the longer duration on
-its next sign-in.
+its next sign-in. Session records are stored in the encrypted main database
+with only a hash of each cookie token, so valid sessions survive server
+restarts. Logging out removes the persistent session; inactive or expired
+sessions are rejected and cleaned up.
 
 ## Configuration from .env
 
@@ -179,8 +189,8 @@ DELETE /v1/operators
 GET    /v1/account/totp
 POST   /v1/account/totp/setup
 POST   /v1/account/totp/enable
-POST   /v1/account/totp/recovery-codes
 DELETE /v1/account/totp
+POST   /v1/account/password
 ```
 
 Create a token:

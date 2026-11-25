@@ -16,10 +16,75 @@ func (s *server) middleware(handler http.Handler) http.Handler {
 	handler = http.MaxBytesHandler(handler, 1<<20)        // Limit incoming request bodies to 1 MiB.
 	handler = s.setupLockAPIs(handler)                    // Lock setup APIs after the setup window expires.
 	handler = s.apiClientCertificateGuard(handler)        // Enforce client-certificate rules on API requests.
+	handler = s.mfaEnrollmentGuard(handler)               // Restrict accounts until required MFA is enrolled.
 	handler = s.hostOriginGuard(handler)                  // Allow only configured hosts and origins.
 	handler = withRequestTimeout(handler, requestTimeout) // Stop handlers that exceed the request time limit.
 	handler = s.securityHeaders(handler)                  // Add standard security headers to responses.
 	return handler
+}
+
+func (s *server) mfaEnrollmentGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" || r.URL.Path == "/api/health" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		session, ok := s.sessionFromRequest(r)
+		if !ok {
+			next.ServeHTTP(w, r)
+			return
+		}
+		var totpEnabled int
+		if err := s.db.QueryRow(
+			"SELECT totp_enabled FROM accounts WHERE username = ?",
+			session.username,
+		).Scan(&totpEnabled); err != nil {
+			log.Printf("ERROR: could not read MFA enrollment state: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not verify MFA enrollment"})
+			return
+		}
+		if totpEnabled == 1 {
+			next.ServeHTTP(w, r)
+			return
+		}
+		enforced, err := s.mfaEnforcementEnabled()
+		if err != nil {
+			log.Printf("ERROR: could not read MFA enforcement setting: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not verify MFA enforcement"})
+			return
+		}
+		if !enforced || allowedMFAEnrollmentRequest(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/v1/") {
+			writeJSON(w, http.StatusForbidden, map[string]any{
+				"error":              "MFA setup is required",
+				"requires_mfa_setup": true,
+				"setup_url":          "/account.html?mfa=required",
+			})
+			return
+		}
+		http.Redirect(w, r, "/account.html?mfa=required", http.StatusSeeOther)
+	})
+}
+
+func allowedMFAEnrollmentRequest(r *http.Request) bool {
+	if r.Method == http.MethodGet {
+		switch r.URL.Path {
+		case "/account", "/account.html", "/normalize.css", "/miligram.css", "/admin.css", "/qrcode.js":
+			return true
+		case "/v1/account/totp":
+			return true
+		}
+	}
+	if r.Method == http.MethodPost {
+		switch r.URL.Path {
+		case "/v1/auth/logout", "/v1/account/totp/setup", "/v1/account/totp/enable":
+			return true
+		}
+	}
+	return false
 }
 
 func (s *server) securityHeaders(next http.Handler) http.Handler {

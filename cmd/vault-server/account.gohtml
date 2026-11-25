@@ -24,7 +24,8 @@
   <div id="error" class="notice" role="alert"></div>
   <section id="totpSetupPanel" class="panel" hidden>
     <h2 class="section-label">Two-factor authentication</h2>
-    <p>Authenticator-based two-factor sign-in is optional and disabled by default. When enabled, sign-in requires your password and a current authenticator code or an unused recovery code.</p>
+    <p id="totpDescription">Authenticator-based two-factor sign-in is optional and disabled by default. When enabled, sign-in requires your password and a current authenticator code or an unused recovery code.</p>
+    <p id="mfaEnforcementNotice" class="notice" role="status" hidden>Your administrator requires MFA. Enroll an authenticator before accessing the rest of the application.</p>
     <div class="row-actions totp-setup-actions">
       <button id="openTOTPSetup" type="button">Setup 2FA</button>
     </div>
@@ -51,16 +52,8 @@
   </dialog>
   <section id="totpEnabledPanel" class="panel" hidden>
     <h2 class="section-label">Two-factor authentication enabled</h2>
+    <p id="mfaEnforcedStatus" class="muted" hidden>Your administrator requires MFA. Two-factor authentication cannot be disabled while enforcement is on.</p>
     <p id="recoveryCodeCount" class="muted"></p>
-    <form id="recoveryForm">
-      <h3>Replace recovery codes</h3>
-      <p>Replacement invalidates all existing recovery codes. Save the new codes securely.</p>
-      <label for="recoveryPassword">Current password</label>
-      <input id="recoveryPassword" type="password" autocomplete="current-password" required>
-      <label for="recoveryCode">Authenticator or recovery code</label>
-      <input id="recoveryCode" autocomplete="one-time-code" required>
-      <button id="replaceRecoveryCodes" type="submit">Replace recovery codes</button>
-    </form>
     <form id="disableForm">
       <h3>Disable two-factor authentication</h3>
       <label for="disablePassword">Current password</label>
@@ -77,6 +70,20 @@
     <button id="dismissRecoveryCodes" type="button">I saved these codes</button>
   </section>
   <section class="panel">
+    <h2 class="section-label">Change password</h2>
+    <form id="passwordForm">
+      <label for="currentPassword">Current password</label>
+      <input id="currentPassword" type="password" autocomplete="current-password" required>
+      <label for="newPassword">New password</label>
+      <input id="newPassword" type="password" autocomplete="new-password" minlength="12" required>
+      <label for="repeatNewPassword">Repeat new password</label>
+      <input id="repeatNewPassword" type="password" autocomplete="new-password" minlength="12" required>
+      <p class="muted">New passwords must be at least 12 characters and no more than 72 bytes.</p>
+      <button id="changePassword" type="submit">Change password</button>
+      <p id="passwordStatus" role="status" class="muted"></p>
+    </form>
+  </section>
+  <section class="panel">
     <h2 class="section-label">Session</h2>
     <p>Sign out of this account on this browser.</p>
     <button id="logout" class="button button-outline" type="button">Logout</button>
@@ -87,6 +94,7 @@
 const errorBox = document.getElementById('error');
 const setupDialog = document.getElementById('totpSetupDialog');
 const setupDialogError = document.getElementById('setupDialogError');
+let mfaSetupRequired = new URLSearchParams(location.search).get('mfa') === 'required';
 let pendingTOTPProvisioningURI = '';
 async function api(url, options = {}) {
   options.credentials = 'same-origin';
@@ -116,6 +124,12 @@ async function loadTOTP() {
     const state = await api('/v1/account/totp');
     document.getElementById('totpSetupPanel').hidden = state.enabled;
     document.getElementById('totpEnabledPanel').hidden = !state.enabled;
+    document.getElementById('mfaEnforcedStatus').hidden = !state.enforced;
+    document.getElementById('disableForm').hidden = state.enforced;
+    document.getElementById('mfaEnforcementNotice').hidden = !mfaSetupRequired || state.enabled;
+    if (mfaSetupRequired) {
+      document.getElementById('totpDescription').textContent = 'Your administrator requires MFA. Sign-in requires your password and a current authenticator code or an unused recovery code.';
+    }
     document.getElementById('recoveryCodeCount').textContent =
       `${state.recovery_codes_remaining} recovery codes remain.`;
     const pending = state.setup_pending;
@@ -126,6 +140,13 @@ async function loadTOTP() {
     pendingTOTPProvisioningURI = pending ? state.provisioning_uri : '';
     if (pending) {
       document.getElementById('totpSecret').textContent = state.secret;
+    }
+    if (mfaSetupRequired && state.enabled) {
+      mfaSetupRequired = false;
+      history.replaceState(null, '', '/account.html');
+    } else if (mfaSetupRequired) {
+      setupDialog.showModal();
+      if (pendingTOTPProvisioningURI) renderTOTPQRCode(pendingTOTPProvisioningURI);
     }
   } catch (error) {
     errorBox.textContent = error.message;
@@ -197,29 +218,6 @@ document.getElementById('enableForm').addEventListener('submit', async event => 
     button.disabled = false;
   }
 });
-document.getElementById('recoveryForm').addEventListener('submit', async event => {
-  event.preventDefault();
-  errorBox.textContent = '';
-  const button = document.getElementById('replaceRecoveryCodes');
-  button.disabled = true;
-  try {
-    const result = await api('/v1/account/totp/recovery-codes', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({
-        password:document.getElementById('recoveryPassword').value,
-        code:document.getElementById('recoveryCode').value
-      })
-    });
-    event.target.reset();
-    showRecoveryCodes(result.recovery_codes);
-    await loadTOTP();
-  } catch (error) {
-    errorBox.textContent = error.message;
-  } finally {
-    button.disabled = false;
-  }
-});
 document.getElementById('disableForm').addEventListener('submit', async event => {
   event.preventDefault();
   if (!window.confirm('Disable two-factor authentication for this account?')) return;
@@ -246,6 +244,30 @@ document.getElementById('disableForm').addEventListener('submit', async event =>
 });
 document.getElementById('dismissRecoveryCodes').addEventListener('click', () => {
   document.getElementById('recoveryCodesPanel').hidden = true;
+});
+document.getElementById('passwordForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  errorBox.textContent = '';
+  document.getElementById('passwordStatus').textContent = '';
+  const button = document.getElementById('changePassword');
+  button.disabled = true;
+  try {
+    await api('/v1/account/password', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        current_password:document.getElementById('currentPassword').value,
+        new_password:document.getElementById('newPassword').value,
+        repeat_new_password:document.getElementById('repeatNewPassword').value
+      })
+    });
+    event.target.reset();
+    document.getElementById('passwordStatus').textContent = 'Password changed.';
+  } catch (error) {
+    errorBox.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
 });
 document.getElementById('logout').addEventListener('click', async () => {
   if (!window.confirm('Are you sure you want to log out?')) return;

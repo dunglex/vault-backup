@@ -355,8 +355,8 @@ func main() {
 	mux.HandleFunc("GET /v1/account/totp", s.getAccountTOTP)
 	mux.HandleFunc("POST /v1/account/totp/setup", s.setupAccountTOTP)
 	mux.HandleFunc("POST /v1/account/totp/enable", s.enableAccountTOTP)
-	mux.HandleFunc("POST /v1/account/totp/recovery-codes", s.regenerateAccountTOTPRecoveryCodes)
 	mux.HandleFunc("DELETE /v1/account/totp", s.disableAccountTOTP)
+	mux.HandleFunc("POST /v1/account/password", s.changeAccountPassword)
 	mux.HandleFunc("GET /v1/audit/years", s.listAuditYears)
 	mux.HandleFunc("GET /v1/audit", s.listAuditEvents)
 
@@ -860,6 +860,12 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid username or password"})
 		return
 	}
+	enforceMFA, err := s.mfaEnforcementEnabled()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read MFA settings"})
+		return
+	}
+	mfaSetupRequired := enforceMFA && totpEnabled != 1
 	if totpEnabled == 1 {
 		if r.TLS == nil {
 			writeJSON(w, http.StatusUpgradeRequired, map[string]string{"error": "HTTPS is required for two-factor login"})
@@ -888,23 +894,26 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not create session"})
 		return
 	}
-	s.resetLoginFailuresAfterSuccess(r)
 	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
 	sessionTTL := defaultSessionTTL
 	if totpEnabled == 1 {
 		sessionTTL = totpSessionTTL
 	}
-	s.mu.Lock()
-	if s.sessions == nil {
-		s.sessions = make(map[string]sessionInfo)
-	}
-	s.sessions[token] = sessionInfo{
+	session := sessionInfo{
 		username:  req.Username,
 		role:      role,
 		expiresAt: time.Now().Add(sessionTTL),
 		ttl:       sessionTTL,
 	}
-	s.mu.Unlock()
+	if err := s.storeSession(token, session); err != nil {
+		s.recordAuditEvent(r, "login", "failure", req.Username, "web", "", "session_storage_error")
+		log.Printf("ERROR: could not store web session: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not create session"})
+		return
+	}
+	if !mfaSetupRequired {
+		s.resetLoginFailuresAfterSuccess(r)
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     "vault_session",
 		Value:    token,
@@ -914,6 +923,11 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteStrictMode,
 		MaxAge:   int(sessionTTL.Seconds()),
 	})
+	if mfaSetupRequired {
+		s.recordAuditEvent(r, "login", "challenge", req.Username, "web", "", "mfa_setup_required")
+		writeJSON(w, http.StatusOK, map[string]any{"token": token, "requires_mfa_setup": true})
+		return
+	}
 	s.recordAuditEvent(r, "login", "success", req.Username, "web", "", "")
 	writeJSON(w, http.StatusOK, map[string]string{"token": token})
 }
@@ -956,6 +970,19 @@ func (s *server) loginLDAP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid username or password"})
 		return
 	}
+	enforceMFA, err := s.mfaEnforcementEnabled()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read MFA settings"})
+		return
+	}
+	if enforceMFA && totpEnabled != 1 {
+		s.recordAuditEvent(r, "login", "challenge", username, "api", "", "mfa_setup_required")
+		writeJSON(w, http.StatusForbidden, map[string]any{
+			"error":              "MFA setup is required through web login",
+			"requires_mfa_setup": true,
+		})
+		return
+	}
 	if totpEnabled == 1 {
 		if r.TLS == nil {
 			writeJSON(w, http.StatusUpgradeRequired, map[string]string{"error": "HTTPS is required for two-factor login"})
@@ -984,19 +1011,20 @@ func (s *server) loginLDAP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not create session"})
 		return
 	}
-	s.resetLoginFailuresAfterSuccess(r)
 	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
-	s.mu.Lock()
-	if s.sessions == nil {
-		s.sessions = make(map[string]sessionInfo)
-	}
-	s.sessions[token] = sessionInfo{
+	session := sessionInfo{
 		username:  username,
 		role:      role,
 		expiresAt: time.Now().Add(defaultSessionTTL),
 		ttl:       defaultSessionTTL,
 	}
-	s.mu.Unlock()
+	if err := s.storeSession(token, session); err != nil {
+		s.recordAuditEvent(r, "login", "failure", username, "api", "", "session_storage_error")
+		log.Printf("ERROR: could not store LDAP login session: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not create session"})
+		return
+	}
+	s.resetLoginFailuresAfterSuccess(r)
 	s.recordAuditEvent(r, "login", "success", username, "api", "", "")
 	writeJSON(w, http.StatusOK, map[string]any{"auth": map[string]any{"client_token": token}})
 }
@@ -1026,6 +1054,14 @@ func (s *server) recordAuditEvent(r *http.Request, action, outcome, actor, sourc
 
 func (s *server) auditRequestActor(r *http.Request, source string) string {
 	if source == "web" {
+		if cookie, err := r.Cookie("vault_session"); err == nil {
+			s.mu.Lock()
+			session, ok := s.sessions[cookie.Value]
+			s.mu.Unlock()
+			if ok {
+				return session.username
+			}
+		}
 		if session, ok := s.sessionFromRequest(r); ok {
 			return session.username
 		}
@@ -1126,25 +1162,6 @@ func (s *server) sessionFromRequest(r *http.Request) (sessionInfo, bool) {
 	return s.sessionForToken(cookie.Value)
 }
 
-func (s *server) sessionForToken(token string) (sessionInfo, bool) {
-	if token == "" {
-		return sessionInfo{}, false
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	session, ok := s.sessions[token]
-	if !ok || time.Now().After(session.expiresAt) {
-		delete(s.sessions, token)
-		return sessionInfo{}, false
-	}
-	if session.ttl <= 0 {
-		session.ttl = defaultSessionTTL
-	}
-	session.expiresAt = time.Now().Add(session.ttl)
-	s.sessions[token] = session
-	return session, true
-}
-
 func (s *server) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 	session, ok := s.sessionFromRequest(r)
 	if !ok {
@@ -1190,10 +1207,12 @@ func (s *server) logout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie("vault_session"); err == nil {
 		token = cookie.Value
 	}
-	s.mu.Lock()
-	delete(s.sessions, token)
-	s.mu.Unlock()
 	http.SetCookie(w, &http.Cookie{Name: "vault_session", Value: "", Path: "/", HttpOnly: true, Secure: r.TLS != nil, SameSite: http.SameSiteStrictMode, MaxAge: -1})
+	if err := s.deleteSession(token); err != nil {
+		log.Printf("ERROR: could not complete logout: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not complete logout"})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "logged out"})
 }
 

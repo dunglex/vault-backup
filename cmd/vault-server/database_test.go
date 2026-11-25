@@ -281,13 +281,13 @@ func TestPageTemplatesRenderStandalonePages(t *testing.T) {
 	}{
 		{"index.gohtml", []string{"http-equiv=\"refresh\"", "/secrets.html"}},
 		{"setup.gohtml", []string{"<title>Initial setup - Vault Server</title>", `<h1 class="brand setup-title">Enter setup key</h1>`, `id="phase1"`, `id="phase2"`, `id="phase3"`, `id="phase4"`, `id="setupKeyForm"`, `id="skipDomains"`, `id="loginLink"`, `name="password_confirmation"`, `name="main_domain"`, `name="alias_domains"`, `name="certificate_mode"`, `value="acme"`, "/v1/setup/validate-key", "/v1/setup/domains", "/v1/setup", "location.assign(result.redirect_url)"}},
-		{"login.gohtml", []string{`id="loginForm"`, `id="totpChallenge"`, "/v1/auth/login"}},
+		{"login.gohtml", []string{`id="loginForm"`, `id="totpChallenge"`, `id="loginSpinner"`, `id="loginButtonLabel"`, "Signing in...", "Failed sign-in attempts are recorded with your IP address.", "Repeated failed attempts may result in this IP being blocked from signing in.", "/v1/auth/login"}},
 		{"secret.gohtml", []string{`id="paths"`, `id="secretPath"`, `id="convert-format"`, `id="convert-case"`, "parseDotenv", "validateEditorData", "Duplicate dotenv key", ".slice(0, 5)", "location.assign('/secrets.html?group='"}},
 		{"secrets.gohtml", []string{`id="secret-groups"`, `id="secret-list"`, "/v1/secrets-browser", `get('group')`}},
-		{"token.gohtml", []string{`id="tokens"`, `id="openCreateToken"`, `id="createTokenDialog"`, `id="createToken"`, `id="closeCreateToken"`, `id="finishCreateToken"`, `id="tokenLifetimeDays"`, `id="tokenCopyPanel"`, `id="copyToken"`, `id="downloadClientCert"`, `id="downloadClientKey"`, "Sample vault-backup command", `id="sampleCommand"`, "window.confirm", "addEventListener('beforeunload'", "async function refreshTokens()"}},
+		{"token.gohtml", []string{`id="tokens"`, `id="openCreateToken"`, `id="createTokenDialog"`, `id="createToken"`, `id="closeCreateToken"`, `id="finishCreateToken"`, `<select id="tokenLifetimeDays" name="expires_in_days" required>`, `<option value="30" selected>30 days</option>`, `<option value="60">60 days</option>`, `<option value="90">90 days</option>`, `<option value="180">180 days</option>`, `<option value="365">365 days</option>`, `id="tokenCopyPanel"`, `id="copyToken"`, `id="downloadClientCert"`, `id="downloadClientKey"`, "Sample vault-backup command", `id="sampleCommand"`, "window.confirm", "addEventListener('beforeunload'", "async function refreshTokens()"}},
 		{"security.gohtml", []string{`id="settingsForm"`, `id="enforceMTLS"`, `id="autoBlockLoginBruteforceIP"`, `id="viewBlockedIPs"`, `id="blockedIPsDialog"`}},
 		{"operators.gohtml", []string{`id="openCreateOperator"`, `<dialog id="createOperatorDialog"`, `id="closeCreateOperator"`, `id="operatorForm"`, `id="operatorUsername"`, "showModal()", "/v1/operators"}},
-		{"account.gohtml", []string{`id="totpSetupPanel"`, `id="openTOTPSetup"`, `>Setup 2FA</button>`, `<dialog id="totpSetupDialog"`, `id="closeTOTPSetup"`, `id="setupTOTP"`, `id="totpQRCode"`, `id="enableForm"`, `id="recoveryCodesPanel"`, "/qrcode.js", "/v1/account/totp"}},
+		{"account.gohtml", []string{`id="totpSetupPanel"`, `id="openTOTPSetup"`, `>Setup 2FA</button>`, `<dialog id="totpSetupDialog"`, `id="closeTOTPSetup"`, `id="setupTOTP"`, `id="totpQRCode"`, `id="enableForm"`, `id="recoveryCodesPanel"`, `id="passwordForm"`, `id="currentPassword"`, `id="newPassword"`, `id="repeatNewPassword"`, "/v1/account/password", "/qrcode.js", "/v1/account/totp"}},
 		{"audit.gohtml", []string{`id="events"`, `href="/audits.html"`, "/v1/audit", "create_token", "revoke_token", "issue_certificate", "rotate_certificate", "update_settings", "block_login_ip", "unblock_login_ip", "async function refresh()"}},
 		{"401.gohtml", []string{"401", "Go to login"}},
 		{"404.gohtml", []string{"404", "Page not found"}},
@@ -319,6 +319,11 @@ func TestPageTemplatesRenderStandalonePages(t *testing.T) {
 			}
 			if test.name == "index.gohtml" && strings.Contains(output.String(), `location.replace("\"`) {
 				t.Error("navigator includes quotes in the redirect URL")
+			}
+			if test.name == "account.gohtml" &&
+				(strings.Contains(output.String(), "Replace recovery codes") ||
+					strings.Contains(output.String(), `id="recoveryForm"`)) {
+				t.Error("account page still exposes recovery-code replacement")
 			}
 		})
 	}

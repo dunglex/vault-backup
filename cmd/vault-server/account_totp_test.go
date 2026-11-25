@@ -178,6 +178,73 @@ func TestWebSessionCookieLifetimeDependsOnTOTP(t *testing.T) {
 	}
 }
 
+func TestMFAEnforcementRestrictsExistingSessionsUntilEnrollment(t *testing.T) {
+	s := newTOTPTestServer(t)
+	enforced, err := s.mfaEnforcementEnabled()
+	if err != nil || enforced {
+		t.Fatalf("default MFA enforcement = %t, %v; want false", enforced, err)
+	}
+	if _, err := s.db.Exec(
+		"INSERT INTO server_settings(key, value) VALUES (?, 'true')",
+		enforceMFASetting,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	login := httptest.NewRecorder()
+	s.login(login, totpLoginRequest(`{"username":"admin","password":"`+totpTestPassword+`"}`))
+	if login.Code != http.StatusOK || !strings.Contains(login.Body.String(), `"requires_mfa_setup":true`) {
+		t.Fatalf("enforced login = %d, body %s", login.Code, login.Body.String())
+	}
+	cookies := login.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("enrollment login cookies = %d, want 1", len(cookies))
+	}
+
+	guard := s.mfaEnrollmentGuard(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	request := func(method, path, sessionToken string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		req := httptest.NewRequest(method, path, nil)
+		req.AddCookie(&http.Cookie{Name: "vault_session", Value: sessionToken})
+		guard.ServeHTTP(recorder, req)
+		return recorder
+	}
+	if response := request(http.MethodGet, "/v1/secrets", cookies[0].Value); response.Code != http.StatusForbidden ||
+		!strings.Contains(response.Body.String(), `"requires_mfa_setup":true`) {
+		t.Fatalf("protected API request = %d, body %s", response.Code, response.Body.String())
+	}
+	if response := request(http.MethodGet, "/v1/secrets", "admin-session"); response.Code != http.StatusForbidden {
+		t.Fatalf("pre-existing session request = %d, want %d", response.Code, http.StatusForbidden)
+	}
+	if response := request(http.MethodGet, "/secrets.html", cookies[0].Value); response.Code != http.StatusSeeOther ||
+		response.Header().Get("Location") != "/account.html?mfa=required" {
+		t.Fatalf("protected page request = %d, location %q", response.Code, response.Header().Get("Location"))
+	}
+	if response := request(http.MethodGet, "/account.html", cookies[0].Value); response.Code != http.StatusNoContent {
+		t.Fatalf("account page request = %d, body %s", response.Code, response.Body.String())
+	}
+	if response := request(http.MethodPost, "/v1/account/totp/setup", cookies[0].Value); response.Code != http.StatusNoContent {
+		t.Fatalf("MFA enrollment request = %d, body %s", response.Code, response.Body.String())
+	}
+
+	setupAndEnableTOTP(t, s)
+	if response := request(http.MethodGet, "/v1/secrets", cookies[0].Value); response.Code != http.StatusNoContent {
+		t.Fatalf("request after MFA enrollment = %d, body %s", response.Code, response.Body.String())
+	}
+
+	disable := httptest.NewRecorder()
+	s.disableAccountTOTP(disable, totpRequest(
+		http.MethodDelete,
+		"/v1/account/totp",
+		`{"password":"`+totpTestPassword+`","code":"unused"}`,
+	))
+	if disable.Code != http.StatusConflict {
+		t.Fatalf("disable MFA while enforced = %d, want %d", disable.Code, http.StatusConflict)
+	}
+}
+
 func TestLDAPLoginRequiresTOTPAndDoesNotConsumeRecoveryForWrongPassword(t *testing.T) {
 	s := newTOTPTestServer(t)
 	_, recoveryCodes := setupAndEnableTOTP(t, s)
@@ -210,6 +277,31 @@ func TestLDAPLoginRequiresTOTPAndDoesNotConsumeRecoveryForWrongPassword(t *testi
 	}
 }
 
+func TestLDAPLoginCannotBypassMFAEnrollment(t *testing.T) {
+	s := newTOTPTestServer(t)
+	if _, err := s.db.Exec(
+		"INSERT INTO server_settings(key, value) VALUES (?, 'true')",
+		enforceMFASetting,
+	); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(
+		http.MethodPut,
+		"/api/v1/auth/ldap/login/admin",
+		strings.NewReader(`{"password":"`+totpTestPassword+`"}`),
+	)
+	request.SetPathValue("username", "admin")
+	request.TLS = &tls.ConnectionState{}
+	response := httptest.NewRecorder()
+	s.loginLDAP(response, request)
+	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), `"requires_mfa_setup":true`) {
+		t.Fatalf("unenrolled LDAP login = %d, body %s", response.Code, response.Body.String())
+	}
+	if len(s.sessions) != 1 {
+		t.Fatalf("LDAP login created a session; session count = %d", len(s.sessions))
+	}
+}
+
 func TestAccountTOTPRequiresHTTPS(t *testing.T) {
 	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "plain.db"))
 	if err != nil {
@@ -221,9 +313,17 @@ func TestAccountTOTPRequiresHTTPS(t *testing.T) {
 	}
 	s := &server{
 		db:       db,
-		sessions: map[string]sessionInfo{"admin-session": {username: "admin", role: "admin", expiresAt: time.Now().Add(time.Hour)}},
+		sessions: map[string]sessionInfo{},
 	}
 	if _, err := db.Exec("INSERT INTO accounts(username, password_hash, role) VALUES ('admin', 'hash', 'admin')"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.storeSession("admin-session", sessionInfo{
+		username:  "admin",
+		role:      "admin",
+		expiresAt: time.Now().Add(time.Hour),
+		ttl:       time.Hour,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	request := httptest.NewRequest(http.MethodGet, "/v1/account/totp", nil)

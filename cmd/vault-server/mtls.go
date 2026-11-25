@@ -33,6 +33,8 @@ type issuedClientCertificate struct {
 	Serial      string
 }
 
+const enforceMFASetting = "enforce_mfa"
+
 func (s *server) loadOrCreateManagedClientCA() error {
 	const certKey = "managed_client_ca_certificate"
 	const signerKey = "managed_client_ca_signer"
@@ -218,6 +220,22 @@ func (s *server) mtlsSettings() (bool, error) {
 	return enforced == "true", nil
 }
 
+func (s *server) mfaEnforcementEnabled() (bool, error) {
+	var value string
+	err := s.db.QueryRow("SELECT value FROM server_settings WHERE key = ?", enforceMFASetting).Scan(&value)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	enabled, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, fmt.Errorf("invalid %s setting: %w", enforceMFASetting, err)
+	}
+	return enabled, nil
+}
+
 func (s *server) certificateTokenID(r *http.Request) (int64, bool) {
 	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 || len(r.TLS.VerifiedChains) == 0 {
 		return 0, false
@@ -277,9 +295,15 @@ func (s *server) getSettings(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read settings"})
 		return
 	}
+	enforceMFA, err := s.mfaEnforcementEnabled()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read settings"})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]bool{
 		"enforce_mtls":                   enforced,
 		"auto_block_login_bruteforce_ip": autoBlock,
+		"enforce_mfa":                    enforceMFA,
 	})
 }
 
@@ -294,12 +318,13 @@ func (s *server) updateSettings(w http.ResponseWriter, r *http.Request) {
 	var request struct {
 		EnforceMTLS                *bool `json:"enforce_mtls"`
 		AutoBlockLoginBruteforceIP *bool `json:"auto_block_login_bruteforce_ip"`
+		EnforceMFA                 *bool `json:"enforce_mfa"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid settings"})
 		return
 	}
-	if request.EnforceMTLS == nil && request.AutoBlockLoginBruteforceIP == nil {
+	if request.EnforceMTLS == nil && request.AutoBlockLoginBruteforceIP == nil && request.EnforceMFA == nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no settings provided"})
 		return
 	}
@@ -313,11 +338,19 @@ func (s *server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read settings"})
 		return
 	}
+	enforceMFA, err := s.mfaEnforcementEnabled()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read settings"})
+		return
+	}
 	if request.EnforceMTLS != nil {
 		enforced = *request.EnforceMTLS
 	}
 	if request.AutoBlockLoginBruteforceIP != nil {
 		autoBlock = *request.AutoBlockLoginBruteforceIP
+	}
+	if request.EnforceMFA != nil {
+		enforceMFA = *request.EnforceMFA
 	}
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -344,14 +377,29 @@ func (s *server) updateSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if request.EnforceMFA != nil {
+		if _, err := tx.Exec(
+			"INSERT INTO server_settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+			enforceMFASetting,
+			strconv.FormatBool(enforceMFA),
+		); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not save settings"})
+			return
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not save settings"})
 		return
 	}
-	s.recordAuditEvent(r, "update_settings", "success", s.auditRequestActor(r, "web"), "web", "server-settings", "")
+	detail := ""
+	if request.EnforceMFA != nil {
+		detail = enforceMFASetting + "=" + strconv.FormatBool(enforceMFA)
+	}
+	s.recordAuditEvent(r, "update_settings", "success", s.auditRequestActor(r, "web"), "web", "server-settings", detail)
 	writeJSON(w, http.StatusOK, map[string]bool{
 		"enforce_mtls":                   enforced,
 		"auto_block_login_bruteforce_ip": autoBlock,
+		"enforce_mfa":                    enforceMFA,
 	})
 }
 

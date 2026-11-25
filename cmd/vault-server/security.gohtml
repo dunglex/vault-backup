@@ -31,7 +31,11 @@
         Enforce mutual TLS for Vault API clients
       </label>
       <p class="muted">Before enabling, issue and install a certificate for every client that needs API access. When enabled, requests must use a valid certificate issued for the same managed API token. Older vault-backup clients will be rejected and must be upgraded.</p>
-      <p class="muted">Choose the token lifetime when creating an API token (1-365 days). Its client certificate expires at the same time. To renew credentials, create a replacement token and certificate before expiry.</p>
+      <label class="setting-option">
+        <input id="enforceMFA" type="checkbox">
+        Enforce MFA for all users
+      </label>
+      <p class="muted">When enabled, users without MFA can only access their account page to enroll. After enrollment, every web and LDAP-compatible login requires an authenticator or recovery code. LDAP-compatible login is unavailable until MFA is enrolled.</p>
       <label class="setting-option">
         <input id="autoBlockLoginBruteforceIP" type="checkbox">
         Auto block login bruteforce IP
@@ -77,6 +81,7 @@ async function loadSettings() {
     const settings = await api('/v1/settings');
     document.getElementById('enforceMTLS').checked = settings.enforce_mtls;
     document.getElementById('autoBlockLoginBruteforceIP').checked = settings.auto_block_login_bruteforce_ip;
+    document.getElementById('enforceMFA').checked = settings.enforce_mfa;
   } catch (error) {
     errorBox.textContent = error.message;
   }
@@ -94,7 +99,8 @@ document.getElementById('settingsForm').addEventListener('submit', async event =
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({
         enforce_mtls:document.getElementById('enforceMTLS').checked,
-        auto_block_login_bruteforce_ip:document.getElementById('autoBlockLoginBruteforceIP').checked
+        auto_block_login_bruteforce_ip:document.getElementById('autoBlockLoginBruteforceIP').checked,
+        enforce_mfa:document.getElementById('enforceMFA').checked
       })
     });
     saved.textContent = 'Settings saved.';

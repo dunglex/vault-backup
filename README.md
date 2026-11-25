@@ -27,6 +27,6 @@ See each application's guide for configuration, deployment, and tests:
 
 Automation tests:
 
- - Test actual data backup/restore [`test_data`](test_data/README.md)
- - Test using a test server [`tests`](test/README.md)
+ - For tests using actual server (non-prod) [`test_data`](test_data/README.md)
+ - For tests using a test server [`tests`](test/README.md)
  

@@ -5,8 +5,12 @@ import (
 	"crypto/cipher"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -57,5 +61,58 @@ func TestManagedCertificateUsesTokenExpiry(t *testing.T) {
 	}
 	if _, err := tls.X509KeyPair([]byte(issued.Certificate), []byte(issued.PrivateKey)); err != nil {
 		t.Fatalf("issued certificate and key do not match: %v", err)
+	}
+}
+
+func TestMFAEnforcementSettingPersistsAndSupportsPartialUpdates(t *testing.T) {
+	s := newOperatorTestServer(t)
+	readSettings := func() map[string]bool {
+		t.Helper()
+		response := httptest.NewRecorder()
+		s.getSettings(response, operatorRequestWithSession(
+			http.MethodGet,
+			"/v1/settings",
+			"",
+			"admin-session",
+			true,
+		))
+		if response.Code != http.StatusOK {
+			t.Fatalf("read settings status = %d, body %s", response.Code, response.Body.String())
+		}
+		var settings map[string]bool
+		if err := json.Unmarshal(response.Body.Bytes(), &settings); err != nil {
+			t.Fatal(err)
+		}
+		return settings
+	}
+
+	if settings := readSettings(); settings["enforce_mfa"] {
+		t.Fatal("MFA enforcement should be disabled by default")
+	}
+	enable := httptest.NewRecorder()
+	s.updateSettings(enable, operatorRequestWithSession(
+		http.MethodPut,
+		"/v1/settings",
+		`{"enforce_mfa":true}`,
+		"admin-session",
+		true,
+	))
+	if enable.Code != http.StatusOK || !strings.Contains(enable.Body.String(), `"enforce_mfa":true`) {
+		t.Fatalf("enable MFA enforcement = %d, body %s", enable.Code, enable.Body.String())
+	}
+
+	partialUpdate := httptest.NewRecorder()
+	s.updateSettings(partialUpdate, operatorRequestWithSession(
+		http.MethodPut,
+		"/v1/settings",
+		`{"enforce_mtls":false}`,
+		"admin-session",
+		true,
+	))
+	if partialUpdate.Code != http.StatusOK || !strings.Contains(partialUpdate.Body.String(), `"enforce_mfa":true`) {
+		t.Fatalf("partial settings update = %d, body %s", partialUpdate.Code, partialUpdate.Body.String())
+	}
+	if settings := readSettings(); !settings["enforce_mfa"] {
+		t.Fatal("partial settings update did not preserve MFA enforcement")
 	}
 }

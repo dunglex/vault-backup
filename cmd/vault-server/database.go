@@ -106,6 +106,16 @@ func initializeDatabase(db *sql.DB) error {
 			totp_recovery_codes TEXT NOT NULL DEFAULT '[]',
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		);
+		CREATE TABLE IF NOT EXISTS web_sessions (
+			token_hash TEXT PRIMARY KEY,
+			username TEXT NOT NULL,
+			expires_at INTEGER NOT NULL,
+			ttl_seconds INTEGER NOT NULL CHECK (ttl_seconds > 0),
+			created_at INTEGER NOT NULL,
+			FOREIGN KEY(username) REFERENCES accounts(username) ON DELETE CASCADE
+		);
+		CREATE INDEX IF NOT EXISTS idx_web_sessions_user ON web_sessions(username);
+		CREATE INDEX IF NOT EXISTS idx_web_sessions_expires_at ON web_sessions(expires_at);
 		CREATE TABLE IF NOT EXISTS api_tokens (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			name TEXT NOT NULL,
@@ -151,7 +161,13 @@ func initializeDatabase(db *sql.DB) error {
 	if err := ensureAccountTOTPColumns(db); err != nil {
 		return err
 	}
-	return allowDuplicateAPITokenNames(db)
+	if err := allowDuplicateAPITokenNames(db); err != nil {
+		return err
+	}
+	if _, err := db.Exec("DELETE FROM web_sessions WHERE expires_at <= ?", time.Now().Unix()); err != nil {
+		return fmt.Errorf("remove expired web sessions: %w", err)
+	}
+	return nil
 }
 
 func initializeSecretsDatabase(db *sql.DB) error {

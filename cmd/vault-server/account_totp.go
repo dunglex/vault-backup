@@ -30,8 +30,14 @@ func (s *server) getAccountTOTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pending := !state.enabled && state.secret.Valid && state.secret.String != ""
+	enforced, err := s.mfaEnforcementEnabled()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read MFA settings"})
+		return
+	}
 	response := map[string]any{
 		"enabled":                  state.enabled,
+		"enforced":                 enforced,
 		"setup_pending":            pending,
 		"recovery_codes_remaining": len(state.recoveryCodeHashes),
 	}
@@ -151,76 +157,18 @@ func (s *server) enableAccountTOTP(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *server) regenerateAccountTOTPRecoveryCodes(w http.ResponseWriter, r *http.Request) {
-	session, ok := s.accountTOTPRequest(w, r)
-	if !ok {
-		return
-	}
-	var request struct {
-		Password string `json:"password"`
-		Code     string `json:"code"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
-		return
-	}
-	state, err := s.loadAccountTOTP(session.username)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read account security settings"})
-		return
-	}
-	if !state.enabled {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "two-factor authentication is not enabled"})
-		return
-	}
-	if bcrypt.CompareHashAndPassword([]byte(state.passwordHash), []byte(request.Password)) != nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid password"})
-		return
-	}
-	valid, err := s.verifyAccountSecondFactor(session.username, state.secret.String, request.Code)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not verify authentication code"})
-		return
-	}
-	if !valid {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid authentication code"})
-		return
-	}
-	recoveryCodes, hashes, err := generateRecoveryCodes()
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not generate recovery codes"})
-		return
-	}
-	encodedHashes, err := json.Marshal(hashes)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not save recovery codes"})
-		return
-	}
-	result, err := s.db.Exec(
-		"UPDATE accounts SET totp_recovery_codes = ? WHERE username = ? AND totp_enabled = 1",
-		string(encodedHashes),
-		session.username,
-	)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not replace recovery codes"})
-		return
-	}
-	updated, err := result.RowsAffected()
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not replace recovery codes"})
-		return
-	}
-	if updated != 1 {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "account security settings changed; reload and try again"})
-		return
-	}
-	s.recordAuditEvent(r, "regenerate_mfa_recovery_codes", "success", session.username, "web", "account:"+session.username, "")
-	writeJSON(w, http.StatusOK, map[string][]string{"recovery_codes": recoveryCodes})
-}
-
 func (s *server) disableAccountTOTP(w http.ResponseWriter, r *http.Request) {
 	session, ok := s.accountTOTPRequest(w, r)
 	if !ok {
+		return
+	}
+	enforced, err := s.mfaEnforcementEnabled()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read MFA settings"})
+		return
+	}
+	if enforced {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "MFA cannot be disabled while enforcement is enabled"})
 		return
 	}
 	var request struct {

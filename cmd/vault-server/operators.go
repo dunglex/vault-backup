@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"log"
 	"net/http"
 	"strings"
 
@@ -115,7 +116,13 @@ func (s *server) deleteOperator(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "valid username is required"})
 		return
 	}
-	result, err := s.db.Exec("DELETE FROM accounts WHERE username = ? AND role = 'operator'", request.Username)
+	tx, err := s.db.Begin()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not remove operator"})
+		return
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec("DELETE FROM accounts WHERE username = ? AND role = 'operator'", request.Username)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not remove operator"})
 		return
@@ -129,7 +136,15 @@ func (s *server) deleteOperator(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "operator not found"})
 		return
 	}
-
+	if _, err := tx.Exec("DELETE FROM web_sessions WHERE username = ?", request.Username); err != nil {
+		log.Printf("ERROR: could not revoke deleted operator sessions: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not revoke operator sessions"})
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not remove operator"})
+		return
+	}
 	s.mu.Lock()
 	for token, session := range s.sessions {
 		if session.username == request.Username {
