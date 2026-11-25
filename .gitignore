@@ -3,8 +3,9 @@
 *.json
 *.env
 *.log
+__pycache__/
+*.pyc
 /backups/
 /bin/
 /data/
-__pycache__/
-*.pyc
+/test_data/*.pem

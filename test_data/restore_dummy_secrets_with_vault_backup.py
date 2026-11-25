@@ -38,11 +38,11 @@ def main() -> None:
         default=ROOT / "bin" / "vault-backup",
         help="vault-backup executable (default: ./bin/vault-backup)",
     )
+    parser.add_argument("--tls-server-name", help="TLS server name override")
     parser.add_argument("--insecure-tls", action="store_true", help="skip TLS verification")
     parser.add_argument("--ca-cert", help="CA certificate PEM")
     parser.add_argument("--client-cert", help="mTLS client certificate PEM")
     parser.add_argument("--client-key", help="mTLS client private key PEM")
-    parser.add_argument("--tls-server-name", help="TLS server name override")
     args = parser.parse_args()
 
     input_dir = args.input_dir.expanduser().resolve()
@@ -55,6 +55,15 @@ def main() -> None:
         parser.error(f"input directory does not exist: {input_dir}")
     if not binary.is_file():
         parser.error(f"vault-backup executable not found: {binary}")
+
+    tls_files = {}
+    for option in ("ca_cert", "client_cert", "client_key"):
+        value = getattr(args, option)
+        if value:
+            path = Path(value).expanduser().resolve()
+            if not path.is_file():
+                parser.error(f"{option.replace('_', '-')} file not found: {path}")
+            tls_files[option] = str(path)
 
     files = sorted(input_dir.rglob("*.json"))
     if not files:
@@ -78,12 +87,9 @@ def main() -> None:
         ]
         if args.insecure_tls:
             command.append("--insecure")
-        if args.ca_cert:
-            command.extend(["--ca_cert", args.ca_cert])
-        if args.client_cert:
-            command.extend(["--client_cert", args.client_cert])
-        if args.client_key:
-            command.extend(["--client_key", args.client_key])
+        for option in ("ca_cert", "client_cert", "client_key"):
+            if option in tls_files:
+                command.extend([f"--{option}", tls_files[option]])
         if args.tls_server_name:
             command.extend(["--tls_server_name", args.tls_server_name])
         subprocess.run(command, cwd=ROOT, env=child_env, check=True)
