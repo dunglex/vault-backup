@@ -396,7 +396,7 @@ curl --cacert /path/to/ca.pem \
 
 Web routes such as `/`, `/v1/setup`, `/v1/auth/login`, and `/v1/secrets/...` use an HttpOnly session cookie.
 
-Open `/secrets.html` to browse secrets grouped by their first two path segments. Each group is paginated independently, and selecting a secret opens it in the editor at `/secret.html`.
+Open `/secrets.html` to browse secrets grouped by their first two path segments. Each group is paginated independently, and selecting a secret opens it in the editor at `/secret.html`. The editor breadcrumb links back to each ancestor path; nested prefixes open a filtered secret list.
 Secret path segments are 1–127 characters and may contain only ASCII letters, digits, and hyphens. Underscores and dots are rejected. Full paths remain unique by the primary database key.
 
 ## Audit log

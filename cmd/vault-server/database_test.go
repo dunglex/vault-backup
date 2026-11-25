@@ -289,7 +289,7 @@ func TestPageTemplatesRenderStandalonePages(t *testing.T) {
 		{"index.gohtml", []string{"http-equiv=\"refresh\"", "/secrets.html"}},
 		{"setup.gohtml", []string{"<title>Initial setup - Vault Server</title>", `<h1 class="brand setup-title">Enter setup key</h1>`, `id="phase1"`, `id="phase2"`, `id="phase3"`, `id="phase4"`, `id="setupKeyForm"`, `id="skipDomains"`, `id="loginLink"`, `name="password_confirmation"`, `name="main_domain"`, `name="alias_domains"`, `name="certificate_mode"`, `value="acme"`, "/v1/setup/validate-key", "/v1/setup/domains", "/v1/setup", "location.assign(result.redirect_url)"}},
 		{"login.gohtml", []string{`id="loginForm"`, `id="totpChallenge"`, `id="loginSpinner"`, `id="loginButtonLabel"`, "Signing in...", "Failed sign-in attempts are recorded with your IP address.", "Repeated failed attempts may result in this IP being blocked from signing in.", "/v1/auth/login"}},
-		{"secret.gohtml", []string{`id="paths"`, `id="secretPath"`, `id="convert-format"`, `id="convert-case"`, "parseDotenv", "validateEditorData", "Duplicate dotenv key", ".slice(0, 5)", "location.assign('/secrets.html?group='"}},
+		{"secret.gohtml", []string{`id="paths"`, `id="secretPath"`, `id="secretBreadcrumb"`, `id="secretBreadcrumbItems"`, "renderBreadcrumb", `id="convert-format"`, `id="convert-case"`, "parseDotenv", "validateEditorData", "Duplicate dotenv key", ".slice(0, 5)", "location.assign('/secrets.html?group='"}},
 		{"secrets.gohtml", []string{`id="secret-groups"`, `id="secret-list"`, "/v1/secrets-browser", `get('group')`}},
 		{"token.gohtml", []string{`id="tokens"`, `id="openCreateToken"`, `id="createTokenDialog"`, `id="createToken"`, `id="closeCreateToken"`, `id="finishCreateToken"`, `<select id="tokenLifetimeDays" name="expires_in_days" required>`, `<option value="30" selected>30 days</option>`, `<option value="60">60 days</option>`, `<option value="90">90 days</option>`, `<option value="180">180 days</option>`, `<option value="365">365 days</option>`, `id="tokenCopyPanel"`, `id="copyToken"`, "downloadClientCert", "downloadClientKey", "token-actions", "Sample vault-backup command", `id="sampleCommand"`, "window.confirm", "addEventListener('beforeunload'", "async function refreshTokens()"}},
 		{"security.gohtml", []string{`id="settingsForm"`, `id="enforceMTLS"`, `id="autoBlockLoginBruteforceIP"`, `id="fileLogging"`, `id="viewBlockedIPs"`, `id="blockedIPsDialog"`}},
@@ -561,6 +561,7 @@ func TestBrowseSecretsGroupsAndPaginates(t *testing.T) {
 	paths := []string{
 		"kv/dummy/secret1",
 		"kv/dummy/secret2",
+		"kv/dummy/z-nested/secret3",
 		"kv/production/database",
 		"other",
 	}
@@ -574,7 +575,7 @@ func TestBrowseSecretsGroupsAndPaginates(t *testing.T) {
 		secretsDB: db,
 		sessions:  map[string]sessionInfo{"session": {expiresAt: time.Now().Add(time.Minute)}},
 	}
-	request := httptest.NewRequest(http.MethodGet, "/v1/secrets-browser?group=kv%2Fdummy&limit=1&offset=1", nil)
+	request := httptest.NewRequest(http.MethodGet, "/v1/secrets-browser?group=kv%2Fdummy&limit=10&offset=1", nil)
 	request.AddCookie(&http.Cookie{Name: "vault_session", Value: "session"})
 	response := httptest.NewRecorder()
 	s.browseSecrets(response, request)
@@ -585,14 +586,23 @@ func TestBrowseSecretsGroupsAndPaginates(t *testing.T) {
 	body := response.Body.String()
 	for _, want := range []string{
 		`"group":"kv/dummy"`,
-		`"paths":["kv/dummy/secret2"]`,
-		`"total":2`,
-		`"count":2`,
+		`"paths":["kv/dummy/secret2","kv/dummy/z-nested/secret3"]`,
+		`"total":3`,
+		`"count":3`,
 		`"name":"kv/production"`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("browse response %q does not contain %q", body, want)
 		}
+	}
+	nestedRequest := httptest.NewRequest(http.MethodGet, "/v1/secrets-browser?group=kv%2Fdummy%2Fz-nested", nil)
+	nestedRequest.AddCookie(&http.Cookie{Name: "vault_session", Value: "session"})
+	nestedResponse := httptest.NewRecorder()
+	s.browseSecrets(nestedResponse, nestedRequest)
+	if nestedResponse.Code != http.StatusOK ||
+		!strings.Contains(nestedResponse.Body.String(), `"group":"kv/dummy/z-nested"`) ||
+		!strings.Contains(nestedResponse.Body.String(), `"paths":["kv/dummy/z-nested/secret3"]`) {
+		t.Fatalf("nested browse response = status %d, body %s", nestedResponse.Code, nestedResponse.Body.String())
 	}
 }
 

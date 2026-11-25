@@ -392,6 +392,36 @@ textarea {
   margin-bottom: 0;
 }
 
+.secret-breadcrumb {
+  margin-bottom: 1.6rem;
+  min-width: 0;
+}
+
+.secret-breadcrumb ol {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.secret-breadcrumb li {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.secret-breadcrumb li + li::before {
+  color: var(--muted);
+  content: "/";
+  margin: 0 0.8rem;
+}
+
+.secret-breadcrumb [aria-current="page"] {
+  color: var(--text);
+  font-weight: 600;
+}
+
 .page-size-label {
   align-items: center;
   display: flex;

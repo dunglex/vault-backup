@@ -1811,7 +1811,8 @@ func (s *server) browseSecrets(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	groupCounts := make(map[string]int)
-	allPaths := make(map[string][]string)
+	groupPaths := make(map[string][]string)
+	allPaths := make([]string, 0)
 	for rows.Next() {
 		var path string
 		if err := rows.Scan(&path); err != nil {
@@ -1820,7 +1821,8 @@ func (s *server) browseSecrets(w http.ResponseWriter, r *http.Request) {
 		}
 		group := secretGroup(path)
 		groupCounts[group]++
-		allPaths[group] = append(allPaths[group], path)
+		groupPaths[group] = append(groupPaths[group], path)
+		allPaths = append(allPaths, path)
 	}
 	if err := rows.Err(); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not list secrets"})
@@ -1849,7 +1851,19 @@ func (s *server) browseSecrets(w http.ResponseWriter, r *http.Request) {
 	if err != nil || offset < 0 {
 		offset = 0
 	}
-	paths := allPaths[selected]
+	paths, groupExists := groupPaths[selected]
+	if selected != "" && (!groupExists || !strings.Contains(selected, "/")) {
+		if !validSecretPath(selected) {
+			writeInvalidSecretPath(w)
+			return
+		}
+		paths = make([]string, 0)
+		for _, path := range allPaths {
+			if path == selected || strings.HasPrefix(path, selected+"/") {
+				paths = append(paths, path)
+			}
+		}
+	}
 	total := len(paths)
 	if offset > total {
 		offset = total
