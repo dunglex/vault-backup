@@ -94,7 +94,7 @@ func TestOperatorCreationGeneratesOneTimeTemporaryPassword(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode create response: %v", err)
 	}
-	if len(body.InitialPassword) < 40 || !body.MustChangePassword {
+	if len(body.InitialPassword) < 12 || len(body.InitialPassword) > 20 || !body.MustChangePassword {
 		t.Fatalf("generated password response has invalid state: length=%d must_change=%v", len(body.InitialPassword), body.MustChangePassword)
 	}
 	var passwordHash string
@@ -110,6 +110,78 @@ func TestOperatorCreationGeneratesOneTimeTemporaryPassword(t *testing.T) {
 	}
 	if mustChangePassword != 1 {
 		t.Fatalf("new operator must_change_password = %d, want 1", mustChangePassword)
+	}
+}
+
+func TestAdminResetsOperatorPasswordAndRevokesSessions(t *testing.T) {
+	s := newOperatorTestServer(t)
+	oldPassword := "old-operator-password"
+	oldHash, err := bcrypt.GenerateFromPassword([]byte(oldPassword), bcrypt.DefaultCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(
+		"INSERT INTO accounts(username, password_hash, role) VALUES ('reset-target', ?, 'operator')",
+		string(oldHash),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.storeSession("reset-target-session", sessionInfo{
+		username:  "reset-target",
+		role:      "operator",
+		expiresAt: time.Now().Add(time.Hour),
+		ttl:       time.Hour,
+	}); err != nil {
+		t.Fatalf("store operator test session: %v", err)
+	}
+
+	response := httptest.NewRecorder()
+	s.resetOperatorPassword(response, operatorRequestWithSession(
+		http.MethodPost,
+		"/v1/operators/password",
+		`{"username":"reset-target"}`,
+		"admin-session",
+		true,
+	))
+	if response.Code != http.StatusOK {
+		t.Fatalf("reset operator password status = %d, body %s", response.Code, response.Body.String())
+	}
+	var body struct {
+		TemporaryPassword  string `json:"temporary_password"`
+		MustChangePassword bool   `json:"must_change_password"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode reset response: %v", err)
+	}
+	if len(body.TemporaryPassword) < 12 || len(body.TemporaryPassword) > 20 || !body.MustChangePassword {
+		t.Fatalf("reset response has invalid state: length=%d must_change=%v", len(body.TemporaryPassword), body.MustChangePassword)
+	}
+	if _, ok := s.sessionForToken("reset-target-session"); ok {
+		t.Fatal("operator session remains authorized after password reset")
+	}
+
+	var passwordHash string
+	var mustChangePassword int
+	if err := s.db.QueryRow(
+		"SELECT password_hash, must_change_password FROM accounts WHERE username = 'reset-target'",
+	).Scan(&passwordHash, &mustChangePassword); err != nil {
+		t.Fatal(err)
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(body.TemporaryPassword)); err != nil {
+		t.Fatal("temporary password does not match stored password hash")
+	}
+	if mustChangePassword != 1 {
+		t.Fatalf("must_change_password = %d, want 1", mustChangePassword)
+	}
+
+	login := httptest.NewRecorder()
+	s.login(login, httptest.NewRequest(
+		http.MethodPost,
+		"/v1/auth/login",
+		strings.NewReader(`{"username":"reset-target","password":"`+body.TemporaryPassword+`"}`),
+	))
+	if login.Code != http.StatusOK || !strings.Contains(login.Body.String(), `"must_change_password":true`) {
+		t.Fatalf("login with temporary password = %d, body %s", login.Code, login.Body.String())
 	}
 }
 
@@ -248,6 +320,8 @@ func TestOperatorManagementIsAdminOnlyAndRevokesDeletedSessions(t *testing.T) {
 		!strings.Contains(adminOperators.Body.String(), `id="openCreateOperator"`) ||
 		!strings.Contains(adminOperators.Body.String(), "/v1/operators/lock") ||
 		!strings.Contains(adminOperators.Body.String(), "/v1/operators/totp") ||
+		!strings.Contains(adminOperators.Body.String(), "Reset password") ||
+		!strings.Contains(adminOperators.Body.String(), "/v1/operators/password") ||
 		strings.Contains(adminOperators.Body.String(), "Remove operator") {
 		t.Fatalf("admin Operators page status = %d, missing expected controls or includes operator removal", adminOperators.Code)
 	}

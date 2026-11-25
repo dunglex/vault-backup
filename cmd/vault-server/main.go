@@ -373,6 +373,7 @@ func main() {
 	mux.HandleFunc("GET /v1/operators/details", s.listOperatorDetails)
 	mux.HandleFunc("POST /v1/operators", s.createOperator)
 	mux.HandleFunc("DELETE /v1/operators", s.deleteOperator)
+	mux.HandleFunc("POST /v1/operators/password", s.resetOperatorPassword)
 	mux.HandleFunc("PATCH /v1/operators/lock", s.setOperatorLock)
 	mux.HandleFunc("DELETE /v1/operators/totp", s.removeOperatorTOTP)
 	mux.HandleFunc("GET /v1/account/totp", s.getAccountTOTP)

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"io"
 	"log"
+	"math/big"
 	"net/http"
 	"strings"
 
@@ -303,11 +304,116 @@ func (s *server) createOperator(w http.ResponseWriter, r *http.Request) {
 }
 
 func generateOperatorTemporaryPassword() (string, error) {
-	randomBytes := make([]byte, 32)
+	length, err := rand.Int(rand.Reader, big.NewInt(9))
+	if err != nil {
+		return "", err
+	}
+	randomBytes := make([]byte, 15)
 	if _, err := io.ReadFull(rand.Reader, randomBytes); err != nil {
 		return "", err
 	}
-	return base64.RawURLEncoding.EncodeToString(randomBytes), nil
+	password := base64.RawURLEncoding.EncodeToString(randomBytes)
+	return password[:12+length.Int64()], nil
+}
+
+func (s *server) resetOperatorPassword(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	actor := s.auditRequestActor(r, "web")
+	if r.TLS == nil {
+		s.recordAuditEvent(r, "reset_operator_password", "failure", actor, "web", "", "https_required")
+		writeJSON(w, http.StatusUpgradeRequired, map[string]string{"error": "HTTPS is required to manage operator accounts"})
+		return
+	}
+	var request struct {
+		Username string `json:"username"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		s.recordAuditEvent(r, "reset_operator_password", "failure", actor, "web", "", "invalid_request")
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
+		return
+	}
+	request.Username = strings.TrimSpace(request.Username)
+	if request.Username == "" || len(request.Username) > 128 {
+		s.recordAuditEvent(r, "reset_operator_password", "failure", actor, "web", "", "invalid_username")
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "valid username is required"})
+		return
+	}
+	resource := "operator:" + request.Username
+	temporaryPassword, err := generateOperatorTemporaryPassword()
+	if err != nil {
+		s.recordAuditEvent(r, "reset_operator_password", "failure", actor, "web", resource, "password_generation_error")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not reset operator password"})
+		return
+	}
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte(temporaryPassword), bcrypt.DefaultCost)
+	if err != nil {
+		s.recordAuditEvent(r, "reset_operator_password", "failure", actor, "web", resource, "password_hash_error")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not reset operator password"})
+		return
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		s.recordAuditEvent(r, "reset_operator_password", "failure", actor, "web", resource, "storage_error")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not reset operator password"})
+		return
+	}
+	defer tx.Rollback()
+	var exists int
+	if err := tx.QueryRow(
+		"SELECT 1 FROM accounts WHERE username = ? AND role = 'operator'",
+		request.Username,
+	).Scan(&exists); err != nil {
+		if err == sql.ErrNoRows {
+			s.recordAuditEvent(r, "reset_operator_password", "failure", actor, "web", resource, "operator_not_found")
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "operator not found"})
+			return
+		}
+		s.recordAuditEvent(r, "reset_operator_password", "failure", actor, "web", resource, "storage_error")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read operator"})
+		return
+	}
+	result, err := tx.Exec(
+		"UPDATE accounts SET password_hash = ?, must_change_password = 1 WHERE username = ? AND role = 'operator'",
+		string(passwordHash),
+		request.Username,
+	)
+	if err != nil {
+		s.recordAuditEvent(r, "reset_operator_password", "failure", actor, "web", resource, "storage_error")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not reset operator password"})
+		return
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		s.recordAuditEvent(r, "reset_operator_password", "failure", actor, "web", resource, "storage_error")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not reset operator password"})
+		return
+	}
+	if updated != 1 {
+		s.recordAuditEvent(r, "reset_operator_password", "failure", actor, "web", resource, "operator_not_found")
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "operator not found"})
+		return
+	}
+	if _, err := tx.Exec("DELETE FROM web_sessions WHERE username = ?", request.Username); err != nil {
+		log.Printf("ERROR: could not revoke sessions after operator password reset: %v", err)
+		s.recordAuditEvent(r, "reset_operator_password", "failure", actor, "web", resource, "session_revocation_error")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not revoke operator sessions"})
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		s.recordAuditEvent(r, "reset_operator_password", "failure", actor, "web", resource, "storage_error")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not reset operator password"})
+		return
+	}
+	s.removeOperatorSessionsFromCache(request.Username)
+	s.recordAuditEvent(r, "reset_operator_password", "success", actor, "web", resource, "")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"username":             request.Username,
+		"temporary_password":   temporaryPassword,
+		"must_change_password": true,
+	})
 }
 
 func (s *server) deleteOperator(w http.ResponseWriter, r *http.Request) {

@@ -40,7 +40,6 @@ USER vault
 
 WORKDIR /app
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD curl --fail --silent --show-error --insecure "$VAULT_SERVER_HEALTHCHECK_URL" >/dev/null || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD curl --fail --silent --show-error --insecure "$VAULT_SERVER_HEALTHCHECK_URL" >/dev/null || exit 1
 
 ENTRYPOINT ["/usr/local/bin/vault-server"]

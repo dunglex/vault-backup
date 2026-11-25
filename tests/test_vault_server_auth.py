@@ -124,6 +124,7 @@ def main() -> None:
             and b'id="operatorForm"' in operators_page
             and b'id="operatorPassword"' not in operators_page
             and b'id="acknowledgeOperatorPassword"' in operators_page
+            and b"Reset password" in operators_page
             and b'id="logout"' not in operators_page,
             "popup operator creation form",
         )
@@ -135,7 +136,7 @@ def main() -> None:
         assert_status(201, status, "create operator as admin")
         temporary_password = create_result.get("initial_password")
         require(
-            isinstance(temporary_password, str) and len(temporary_password) >= 40
+            isinstance(temporary_password, str) and 12 <= len(temporary_password) <= 20
             and create_result.get("must_change_password") is True,
             "return a one-time generated operator password",
         )
@@ -180,6 +181,38 @@ def main() -> None:
         status, operator_session = operator_client.json("GET", f"{server.https_url}/v1/session")
         assert_status(200, status, "read operator session after password change")
         require(operator_session["must_change_password"] is False, "clear first-login password requirement")
+        status, reset_result = server.client.json(
+            "POST",
+            f"{server.https_url}/v1/operators/password",
+            data={"username": "night-shift"},
+        )
+        assert_status(200, status, "reset operator password as admin")
+        reset_password = reset_result.get("temporary_password")
+        require(
+            isinstance(reset_password, str) and 12 <= len(reset_password) <= 20
+            and reset_result.get("must_change_password") is True,
+            "return a one-time reset password",
+        )
+        status, _ = operator_client.request("GET", f"{server.https_url}/v1/session")
+        assert_status(401, status, "revoke operator sessions after password reset")
+        status, reset_login = operator_client.json(
+            "POST",
+            f"{server.https_url}/v1/auth/login",
+            data={"username": "night-shift", "password": reset_password},
+        )
+        assert_status(200, status, "login with reset password")
+        require(reset_login.get("must_change_password") is True, "require password change after admin reset")
+        status, _ = operator_client.json(
+            "POST",
+            f"{server.https_url}/v1/account/password",
+            data={
+                "current_password": reset_password,
+                "new_password": "operator-reset-password",
+                "repeat_new_password": "operator-reset-password",
+            },
+        )
+        assert_status(200, status, "change admin-reset temporary password")
+        print("PASS: force a password change after an admin reset")
         status, _ = operator_client.request("GET", f"{server.https_url}/v1/settings")
         assert_status(403, status, "deny operator settings API access")
         status, _ = operator_client.json(
@@ -548,7 +581,7 @@ def main() -> None:
         assert_status(401, status, "reject revoked web session")
 
         attempts = [
-            ("POST", server.https_url + "/v1/auth/login", {"username": "admin", "password": "wrong-password"}, 401),
+            ("POST", server.https_url + "/v1/auth/login", {"username": "admin", "password": "wrong-password"}, 429),
             ("PUT", server.https_url + "/api/v1/auth/ldap/login/admin", {"password": "wrong-password"}, 429),
             ("POST", server.http_url + "/v1/auth/login", {"username": "admin", "password": "wrong-password"}, 429),
             ("PUT", server.https_url + "/api/v1/auth/ldap/login/admin", {"password": "wrong-password"}, 429),

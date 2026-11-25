@@ -38,12 +38,16 @@ recovery codes and revokes active sessions; when MFA enforcement is enabled,
 the Operator must enroll again before continuing. Operators can manage secrets,
 API tokens, and audit events, but cannot access `/security.html`,
 `/v1/settings`, `/operators.html`, or operator-management endpoints.
-Creating an Operator generates a random temporary password shown only once in
-the admin dialog. Copy or record it before closing the dialog, then provide it
-to the Operator through a secure channel. The Operator must change this
-password after their first web login; access to other application features is
-blocked until the change is complete. LDAP-compatible login is unavailable
-until the temporary password has been changed through the web interface.
+Creating an Operator generates a random 12-20 character temporary password
+shown only once in the admin dialog. Copy or record it before closing the
+dialog, then provide it to the Operator through a secure channel. The Operator
+must change this password after their first web login; access to other
+application features is blocked until the change is complete. LDAP-compatible
+login is unavailable until the temporary password has been changed through
+the web interface.
+Admins can reset an existing Operator's password from `/operators.html`.
+Resetting revokes active sessions, shows a new 12-20 character temporary
+password once, and requires the Operator to change it at their next web login.
 
 Two-factor authentication with TOTP is optional and disabled by default for
 each account. Users can change their password, enroll TOTP, and disable it from
@@ -207,6 +211,7 @@ GET    /v1/operators
 GET    /v1/operators/details
 POST   /v1/operators
 DELETE /v1/operators
+POST   /v1/operators/password
 PATCH  /v1/operators/lock
 DELETE /v1/operators/totp
 GET    /v1/account/totp

@@ -56,11 +56,27 @@
       </section>
     </form>
   </dialog>
+  <dialog id="resetOperatorPasswordDialog" class="admin-dialog" aria-labelledby="resetOperatorPasswordTitle">
+    <div class="admin-dialog-heading">
+      <h2 id="resetOperatorPasswordTitle">Temporary operator password</h2>
+      <button id="closeResetOperatorPassword" class="button button-outline" type="button" aria-label="Close dialog" disabled>Close</button>
+    </div>
+    <p>This password is shown only once. Copy or record it and deliver it securely. The operator must change it at their next login; their active sessions have been revoked.</p>
+    <label for="resetOperatorPasswordValue">Temporary password</label>
+    <input id="resetOperatorPasswordValue" type="text" readonly autocomplete="off">
+    <div class="row-actions admin-dialog-actions">
+      <button id="copyResetOperatorPassword" type="button">Copy password</button>
+    </div>
+    <p id="resetOperatorPasswordCopyStatus" role="status" class="muted">Copy the password or select it to copy manually.</p>
+    <label><input id="acknowledgeResetOperatorPassword" type="checkbox"> I have copied or recorded this password.</label>
+  </dialog>
 </main>
 <script>
 const errorBox = document.getElementById('error');
 const createDialog = document.getElementById('createOperatorDialog');
+const resetPasswordDialog = document.getElementById('resetOperatorPasswordDialog');
 let passwordAcknowledgementRequired = false;
+let resetPasswordAcknowledgementRequired = false;
 async function api(url, options = {}) {
   options.credentials = 'same-origin';
   const response = await fetch(url, options);
@@ -110,7 +126,12 @@ function renderOperators(operators) {
     removeMFA.textContent = 'Remove 2FA';
     removeMFA.disabled = !operator.mfa_configured;
     removeMFA.addEventListener('click', () => removeOperatorMFA(operator.username));
-    actions.append(lock, removeMFA);
+    const resetPassword = document.createElement('button');
+    resetPassword.type = 'button';
+    resetPassword.className = 'button button-outline';
+    resetPassword.textContent = 'Reset password';
+    resetPassword.addEventListener('click', () => resetOperatorPassword(operator, resetPassword));
+    actions.append(lock, removeMFA, resetPassword);
     item.append(identity, actions);
     list.append(item);
   }
@@ -151,6 +172,32 @@ async function removeOperatorMFA(username) {
     await loadOperators();
   } catch (error) {
     errorBox.textContent = error.message;
+  }
+}
+async function resetOperatorPassword(operator, button) {
+  if (!window.confirm(`Reset the password for "${operator.username}"? This revokes their active sessions.`)) return;
+  errorBox.textContent = '';
+  button.disabled = true;
+  try {
+    const result = await api('/v1/operators/password', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({username:operator.username})
+    });
+    document.getElementById('resetOperatorPasswordTitle').textContent =
+      `Temporary password for ${operator.username}`;
+    document.getElementById('resetOperatorPasswordValue').value = result.temporary_password;
+    document.getElementById('acknowledgeResetOperatorPassword').checked = false;
+    document.getElementById('closeResetOperatorPassword').disabled = true;
+    document.getElementById('resetOperatorPasswordCopyStatus').textContent =
+      'Copy the password or select it to copy manually.';
+    resetPasswordAcknowledgementRequired = true;
+    resetPasswordDialog.showModal();
+    await loadOperators();
+  } catch (error) {
+    errorBox.textContent = error.message;
+  } finally {
+    button.disabled = false;
   }
 }
 document.getElementById('operatorForm').addEventListener('submit', async event => {
@@ -222,6 +269,41 @@ createDialog.addEventListener('close', () => {
   passwordAcknowledgementRequired = false;
   document.getElementById('operatorDialogError').textContent = '';
   document.getElementById('operatorPasswordCopyStatus').textContent = 'Copy the password or select it to copy manually.';
+});
+document.getElementById('copyResetOperatorPassword').addEventListener('click', async () => {
+  const passwordInput = document.getElementById('resetOperatorPasswordValue');
+  const status = document.getElementById('resetOperatorPasswordCopyStatus');
+  passwordInput.focus();
+  passwordInput.select();
+  try {
+    await navigator.clipboard.writeText(passwordInput.value);
+    status.textContent = 'Password copied. Confirm below before closing.';
+  } catch {
+    status.textContent = 'Clipboard access failed. The password is selected; copy it manually, then confirm below.';
+  }
+});
+document.getElementById('acknowledgeResetOperatorPassword').addEventListener('change', event => {
+  document.getElementById('closeResetOperatorPassword').disabled = !event.target.checked;
+});
+document.getElementById('closeResetOperatorPassword').addEventListener('click', () => {
+  if (document.getElementById('acknowledgeResetOperatorPassword').checked) {
+    resetPasswordDialog.close();
+  }
+});
+resetPasswordDialog.addEventListener('cancel', event => {
+  if (resetPasswordAcknowledgementRequired &&
+      !document.getElementById('acknowledgeResetOperatorPassword').checked) {
+    event.preventDefault();
+  }
+});
+resetPasswordDialog.addEventListener('close', () => {
+  document.getElementById('resetOperatorPasswordValue').value = '';
+  document.getElementById('acknowledgeResetOperatorPassword').checked = false;
+  document.getElementById('closeResetOperatorPassword').disabled = true;
+  document.getElementById('resetOperatorPasswordTitle').textContent = 'Temporary operator password';
+  document.getElementById('resetOperatorPasswordCopyStatus').textContent =
+    'Copy the password or select it to copy manually.';
+  resetPasswordAcknowledgementRequired = false;
 });
 loadOperators();
 </script>
