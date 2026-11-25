@@ -38,7 +38,7 @@ def main() -> None:
             process = subprocess.Popen(
                 [
                     str(server.server_binary),
-                    "--addr",
+                    "--https-addr",
                     "127.0.0.1:0",
                     "--db",
                     str(server.path / "vault.db"),

@@ -18,12 +18,17 @@ spec:
       securityContext:
         fsGroup: 1000
         fsGroupChangePolicy: OnRootMismatch
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: vault-server
           image: registry.vn.eit.zone/hr-digi/vault-server:latest
           imagePullPolicy: Always
           args:
-            - --addr=0.0.0.0:8200
+            - --https-addr=0.0.0.0:8200
             - --db=/data/vault.db
             - --audit-db=/data/audit.db
             - --tls-cert=/var/run/vault/tls/tls.crt
@@ -70,13 +75,20 @@ spec:
               memory: 512Mi
           securityContext:
             allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
             capabilities:
               drop:
                 - ALL
           volumeMounts:
             - name: data
               mountPath: /data
+            - name: backups
+              mountPath: /backups
             - name: tls
               mountPath: /var/run/vault/tls
               readOnly: true
@@ -84,6 +96,9 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: vault-server-data
+        - name: backups
+          persistentVolumeClaim:
+            claimName: vault-server-backups
         - name: tls
           secret:
             secretName: vault-server-tls

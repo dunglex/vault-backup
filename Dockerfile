@@ -16,7 +16,7 @@ RUN bash scripts/build.sh
 
 FROM alpine:3.19
 
-RUN apk add --no-cache ca-certificates curl && addgroup -S vault && adduser -S -G vault vault
+RUN apk add --no-cache ca-certificates curl && addgroup -S -g 1000 vault && adduser -S -u 1000 -G vault vault
 
 # Copy the built binaries from the builder stage to the final image
 RUN mkdir -p /app/bin && chown -R vault:vault /app/bin

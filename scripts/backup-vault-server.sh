@@ -131,6 +131,16 @@ copy_file "${DB_PATH}.key" "database" "vault.db.key"
 copy_file "$AUDIT_DB_PATH" "database" "audit.db"
 copy_file "${AUDIT_DB_PATH}-wal" "database" "audit.db-wal"
 copy_file "${AUDIT_DB_PATH}-shm" "database" "audit.db-shm"
+AUDIT_EXTENSION="${AUDIT_DB_PATH##*.}"
+AUDIT_STEM="${AUDIT_DB_PATH%.*}"
+AUDIT_BASENAME=$(basename "$AUDIT_STEM")
+for annual_db in "${AUDIT_STEM}"-????."${AUDIT_EXTENSION}"; do
+  [[ -f "$annual_db" ]] || continue
+  annual_name=$(basename "$annual_db")
+  copy_file "$annual_db" "database" "$annual_name"
+  copy_file "${annual_db}-wal" "database" "${annual_name}-wal"
+  copy_file "${annual_db}-shm" "database" "${annual_name}-shm"
+done
 copy_file "$TLS_CERT" "tls" "server.crt"
 copy_file "$TLS_KEY" "tls" "server.key"
 copy_file "$MTLS_CA_CERT" "tls" "client-ca.crt"
@@ -140,8 +150,8 @@ if [[ ! -f "$ARCHIVE_DIR/database/vault.db.key" ]]; then
   echo "Protected database key not found: ${DB_PATH}.key" >&2
   exit 1
 fi
-if [[ ! -f "$ARCHIVE_DIR/database/audit.db" ]]; then
-  echo "Audit database not found: $AUDIT_DB_PATH" >&2
+if [[ ! -f "$ARCHIVE_DIR/database/audit.db" ]] && ! compgen -G "$ARCHIVE_DIR/database/${AUDIT_BASENAME}-????.${AUDIT_EXTENSION}" >/dev/null; then
+  echo "Audit database not found: $AUDIT_DB_PATH or its annual databases" >&2
   exit 1
 fi
 

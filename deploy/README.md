@@ -19,6 +19,27 @@ and reference an image pull secret in the pod spec.
 For a private cluster registry, replace `registry.vn.eit.zone/hr-digi/vault-server:latest`
 with an immutable image tag or digest and use `imagePullPolicy: IfNotPresent`.
 
+The deployment uses two persistent volumes:
+
+- `vault-server-data` stores the live database, key, yearly audit databases,
+  and server state.
+- `vault-server-backups` is mounted at `/backups` and can store backup archives.
+
+Generate a backup inside the running pod with:
+
+```bash
+kubectl -n vault-backup exec deploy/vault-server -- \
+  /app/scripts/backup-vault-server.sh \
+  --db /data/vault.db \
+  --audit-db /data/audit.db \
+  --output /backups/vault-server-backup.tar.gz
+```
+
+Stop or quiesce the pod before creating a consistent SQLite backup. The
+separate backup volume protects archives from changes to the live data volume,
+but it is not an off-cluster copy; replicate or snapshot it according to the
+cluster's disaster-recovery policy.
+
 Apply the application:
 
 ```bash

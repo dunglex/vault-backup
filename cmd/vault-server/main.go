@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/aes"
@@ -17,13 +16,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"html/template"
 	"io"
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -41,6 +40,8 @@ const (
 	apiTokenLifetime    = 30 * 24 * time.Hour
 	maxAPITokenLifetime = 365 * 24 * time.Hour
 	setupLifetime       = 20 * time.Minute
+	defaultSessionTTL   = 30 * time.Minute
+	totpSessionTTL      = 8 * time.Hour
 	loginAttemptLimit   = 5
 	loginAttemptWindow  = 10 * time.Minute
 	shutdownTimeout     = 15 * time.Second
@@ -48,13 +49,15 @@ const (
 
 type server struct {
 	db            *sql.DB
-	auditDB       *sql.DB
+	auditStore    *auditStore
 	setupKey      string
 	setupKeyPath  string
 	setupDeadline time.Time
 	adminName     string
 	aead          cipher.AEAD
 	clientCA      *managedClientCA
+	serverCerts   *serverCertificateManager
+	acmeAvailable bool
 
 	mu             sync.Mutex
 	sessions       map[string]sessionInfo
@@ -66,14 +69,31 @@ type sessionInfo struct {
 	username  string
 	role      string
 	expiresAt time.Time
+	ttl       time.Duration
 }
 
 type accountRequest struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+	TOTPCode string `json:"totp_code"`
+}
+
+type setupKeyRequest struct {
+	SetupKey string `json:"setup_key"`
+}
+
+type setupDomainsRequest struct {
+	SetupKey        string   `json:"setup_key"`
+	MainDomain      string   `json:"main_domain"`
+	AliasDomains    []string `json:"alias_domains"`
+	CertificateMode string   `json:"certificate_mode"`
+}
+
+type setupAdminRequest struct {
 	SetupKey             string `json:"setup_key"`
 	Username             string `json:"username"`
 	Password             string `json:"password"`
 	PasswordConfirmation string `json:"password_confirmation"`
-	TOTPCode             string `json:"totp_code"`
 }
 
 type secretRequest struct {
@@ -98,57 +118,18 @@ var embeddedFiles embed.FS
 var pageTemplate = template.Must(template.ParseFS(embeddedFiles, "*.gohtml"))
 
 func main() {
-	envFile := envFileFromArgs()
-	if envFile != "" {
-		if err := loadDotEnv(envFile); err != nil {
-			log.Fatal(err)
-		}
+	config, err := loadServerConfigFromProcess()
+	if errors.Is(err, errHelpRequested) {
+		return
 	}
-	var (
-		addr             = flag.String("addr", envDefault("VAULT_SERVER_ADDR", "127.0.0.1:8200"), "HTTPS server address")
-		httpAddr         = flag.String("http-addr", envDefault("VAULT_SERVER_HTTP_ADDR", ""), "HTTP server address (disabled by default)")
-		dbPath           = flag.String("db", envDefault("VAULT_SERVER_DB", "vault.db"), "path to database file")
-		auditDBPath      = flag.String("audit-db", envDefault("VAULT_SERVER_AUDIT_DB", ""), "path to plaintext audit database file (default: alongside main database)")
-		tlsCert          = flag.String("tls-cert", envDefault("VAULT_SERVER_TLS_CERT", ""), "path to TLS certificate PEM")
-		tlsKey           = flag.String("tls-key", envDefault("VAULT_SERVER_TLS_KEY", ""), "path to TLS private key PEM")
-		dbPassword       = flag.String("db-password", envDefault("VAULT_SERVER_DB_PASSWORD", ""), "password used to decrypt the database key file")
-		allowPlaintextDB = flag.Bool("allow-plaintext-db", envBool("VAULT_SERVER_ALLOW_PLAINTEXT_DB", false), "allow an existing plaintext SQLite database (insecure)")
-		envFileFlag      = flag.String("env-file", envDefault("VAULT_SERVER_ENV_FILE", ".env"), "path to .env configuration file")
-		mtlsCACert       = flag.String("mtls-ca-cert", envDefault("VAULT_SERVER_MTLS_CA_CERT", ""), "CA certificate PEM used to verify HTTPS client certificates")
-		trustedProxies   = flag.String("trusted-proxies", envDefault("VAULT_SERVER_TRUSTED_PROXIES", ""), "comma-separated proxy IP/CIDR ranges allowed to set forwarding headers")
-	)
-	flag.Parse()
-	_ = envFileFlag
-	if strings.TrimSpace(*tlsCert) == "" || strings.TrimSpace(*tlsKey) == "" {
-		log.Fatal("HTTPS startup requires --tls-cert and --tls-key (or VAULT_SERVER_TLS_CERT and VAULT_SERVER_TLS_KEY)")
-	}
-	if *dbPassword == "" {
-		log.Fatal("database key password is required: set --db-password or VAULT_SERVER_DB_PASSWORD")
-	}
-	*httpAddr = strings.TrimSpace(*httpAddr)
-	if *httpAddr != "" {
-		log.Printf("WARNING: insecure HTTP listener enabled on %s; traffic is not encrypted", *httpAddr)
-	}
-
-	resolvedDB, err := filepath.Abs(*dbPath)
 	if err != nil {
 		log.Fatal(err)
 	}
-	*dbPath = filepath.Clean(resolvedDB)
-	*auditDBPath = strings.TrimSpace(*auditDBPath)
-	if *auditDBPath == "" {
-		*auditDBPath = filepath.Join(filepath.Dir(*dbPath), "audit.db")
-	}
-	resolvedAuditDB, err := filepath.Abs(*auditDBPath)
-	if err != nil {
-		log.Fatal(err)
-	}
-	*auditDBPath = filepath.Clean(resolvedAuditDB)
-	if *auditDBPath == *dbPath {
-		log.Fatal("audit database path must differ from the encrypted main database path")
+	if config.HTTPAddr != "" {
+		log.Printf("WARNING: insecure HTTP listener enabled on %s; traffic is not encrypted", config.HTTPAddr)
 	}
 
-	databaseDirs := []string{filepath.Dir(*dbPath), filepath.Dir(*auditDBPath)}
+	databaseDirs := []string{filepath.Dir(config.DBPath), filepath.Dir(config.AuditDBPath)}
 	for _, dir := range databaseDirs {
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			log.Fatal(err)
@@ -158,12 +139,12 @@ func main() {
 		}
 	}
 
-	masterKey, err := loadOrCreateKey(*dbPath+".key", *dbPassword)
+	masterKey, err := loadOrCreateKey(config.DBPath+".key", config.DBPassword)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	db, _, err := openDatabaseWithOptions(*dbPath, masterKey, *allowPlaintextDB)
+	db, _, err := openDatabaseWithOptions(config.DBPath, masterKey, config.AllowPlaintextDB)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -172,27 +153,35 @@ func main() {
 			log.Printf("Could not close database cleanly: %v", err)
 		}
 	}()
-	auditDB, err := openAuditDatabase(*auditDBPath)
+	auditStore, err := openAnnualAuditStore(config.AuditDBPath)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer func() {
-		if err := auditDB.Close(); err != nil {
-			log.Printf("Could not close audit database cleanly: %v", err)
+		if err := auditStore.Close(); err != nil {
+			log.Printf("Could not close audit store cleanly: %v", err)
 		}
 	}()
-	if err := os.Chmod(*auditDBPath, 0600); err != nil {
-		log.Fatal(err)
-	}
 
-	if err := os.Chmod(*dbPath, 0600); err != nil && !os.IsNotExist(err) {
+	if err := os.Chmod(config.DBPath, 0600); err != nil && !os.IsNotExist(err) {
 		log.Fatal(err)
 	}
 
 	if err := initializeDatabase(db); err != nil {
 		log.Fatal(err)
 	}
-	if err := os.Chmod(*dbPath, 0600); err != nil {
+	serverCerts, err := newServerCertificateManager(
+		db,
+		config.TLSCertPath,
+		config.TLSKeyPath,
+		filepath.Join(filepath.Dir(config.DBPath), "acme-cache"),
+		config.Addr,
+		config.HTTPAddr != "",
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := os.Chmod(config.DBPath, 0600); err != nil {
 		log.Fatal(err)
 	}
 
@@ -201,10 +190,10 @@ func main() {
 		log.Fatal(err)
 	}
 
-	setupKeyPath := *dbPath + ".setup-key"
+	setupKeyPath := config.DBPath + ".setup-key"
 	setupKey := ""
 	if adminName == "" {
-		setupKey = os.Getenv("VAULT_SERVER_SETUP_KEY")
+		setupKey = config.SetupKey
 		if setupKey == "" {
 			var err error
 			setupKey, err = loadOrCreateSetupKey(setupKeyPath)
@@ -233,20 +222,35 @@ func main() {
 		log.Fatal(err)
 	}
 
-	trustedProxyRanges, err := parseTrustedProxies(*trustedProxies)
-	if err != nil {
-		log.Fatal(err)
+	// Web server initialization.
+	s := &server{
+		db:             db,
+		auditStore:     auditStore,
+		setupKey:       setupKey,
+		setupKeyPath:   setupKeyPath,
+		setupDeadline:  setupDeadline,
+		adminName:      adminName,
+		aead:           aead,
+		serverCerts:    serverCerts,
+		acmeAvailable:  config.HTTPAddr != "",
+		sessions:       map[string]sessionInfo{},
+		attempts:       map[string][]time.Time{},
+		trustedProxies: config.TrustedProxyRanges,
 	}
-	s := &server{db: db, auditDB: auditDB, setupKey: setupKey, setupKeyPath: setupKeyPath, setupDeadline: setupDeadline, adminName: adminName, aead: aead, sessions: map[string]sessionInfo{}, attempts: map[string][]time.Time{}, trustedProxies: trustedProxyRanges}
+	// Load or create the managed client CA for mTLS.
 	if err := s.loadOrCreateManagedClientCA(); err != nil {
 		log.Fatal(err)
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.health)
+
+	// Serve static assets from embedded files.
 	mux.HandleFunc("GET /normalize.css", serveEmbeddedAsset("normalize.css", "text/css; charset=utf-8"))
 	mux.HandleFunc("GET /miligram.css", serveEmbeddedAsset("miligram.css", "text/css; charset=utf-8"))
 	mux.HandleFunc("GET /admin.css", serveEmbeddedAsset("admin.css", "text/css; charset=utf-8"))
 	mux.HandleFunc("GET /qrcode.js", serveEmbeddedAsset("qrcode.js", "text/javascript; charset=utf-8"))
+
+	// Serve HTML pages.
 	for _, path := range []string{"/setup", "/setup.html"} {
 		mux.HandleFunc("GET "+path, s.serveSetup)
 	}
@@ -297,6 +301,8 @@ func main() {
 	}
 
 	// Web endpoints: use same-origin cookie sessions.
+	mux.HandleFunc("POST /v1/setup/validate-key", s.validateSetupKey)
+	mux.HandleFunc("POST /v1/setup/domains", s.saveSetupDomains)
 	mux.HandleFunc("POST /v1/setup", s.setup)
 	mux.HandleFunc("POST /v1/auth/login", s.login)
 	mux.HandleFunc("POST /v1/auth/logout", s.logout)
@@ -320,6 +326,7 @@ func main() {
 	mux.HandleFunc("POST /v1/account/totp/enable", s.enableAccountTOTP)
 	mux.HandleFunc("POST /v1/account/totp/recovery-codes", s.regenerateAccountTOTPRecoveryCodes)
 	mux.HandleFunc("DELETE /v1/account/totp", s.disableAccountTOTP)
+	mux.HandleFunc("GET /v1/audit/years", s.listAuditYears)
 	mux.HandleFunc("GET /v1/audit", s.listAuditEvents)
 
 	// API endpoints: require bearer/X-Vault-Token authentication.
@@ -333,19 +340,17 @@ func main() {
 
 	mux.HandleFunc("/", s.serveHome)
 
-	handler := s.securityHeaders(s.apiClientCertificateGuard(s.setupLockAPIs(http.MaxBytesHandler(mux, 1<<20))))
+	handler := s.middleware(mux)
 	tlsConfig := &tls.Config{
 		MinVersion: tls.VersionTLS12,
 		ClientAuth: tls.VerifyClientCertIfGiven,
 	}
+	serverCerts.configureTLS(tlsConfig)
 	clientCAs := x509.NewCertPool()
-	if strings.TrimSpace(*mtlsCACert) != "" {
-		clientCAs, err = loadClientCAPool(*mtlsCACert)
-		if err != nil {
-			log.Fatal(err)
-		}
+	if strings.TrimSpace(config.MTLSCACertPath) != "" {
+		clientCAs = config.MTLSCAPool
 		tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
-		log.Printf("Vault server HTTPS mutual TLS enabled using client CA %s", *mtlsCACert)
+		log.Printf("Vault server HTTPS mutual TLS enabled using client CA %s", config.MTLSCACertPath)
 	}
 	clientCAs.AddCert(s.clientCA.certificate)
 	tlsConfig.ClientCAs = clientCAs
@@ -354,26 +359,26 @@ func main() {
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      10 * time.Second,
+		WriteTimeout:      serverWriteTimeout,
 		IdleTimeout:       60 * time.Second,
 		TLSConfig:         tlsConfig,
 		ErrorLog:          httpErrorLog,
 	}
 	httpServer := &http.Server{
-		Handler:           handler,
+		Handler:           serverCerts.HTTPHandler(handler),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      10 * time.Second,
+		WriteTimeout:      serverWriteTimeout,
 		IdleTimeout:       60 * time.Second,
 		ErrorLog:          httpErrorLog,
 	}
-	httpsListener, err := net.Listen("tcp", *addr)
+	httpsListener, err := net.Listen("tcp", config.Addr)
 	if err != nil {
 		log.Fatal(err)
 	}
 	var httpListener net.Listener
-	if *httpAddr != "" {
-		httpListener, err = net.Listen("tcp", *httpAddr)
+	if config.HTTPAddr != "" {
+		httpListener, err = net.Listen("tcp", config.HTTPAddr)
 		if err != nil {
 			_ = httpsListener.Close()
 			log.Fatal(err)
@@ -383,17 +388,17 @@ func main() {
 	if setupKey != "" {
 		fmt.Printf("Vault setup key: %s\n", setupKey)
 	}
-	log.Printf("Vault server listening on %s (SQLite: %s; audit: %s)", *addr, *dbPath, *auditDBPath)
-	log.Printf("Vault server serving HTTPS on %s", *addr)
+	log.Printf("Vault server listening on %s (SQLite: %s; audit: %s)", config.Addr, config.DBPath, config.AuditDBPath)
+	log.Printf("Vault server serving HTTPS on %s", config.Addr)
 	if httpListener != nil {
-		log.Printf("Vault server serving HTTP on %s", *httpAddr)
+		log.Printf("Vault server serving HTTP on %s", config.HTTPAddr)
 	}
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(signals)
 
 	errs := make(chan error, 2)
-	go func() { errs <- httpsServer.ServeTLS(httpsListener, *tlsCert, *tlsKey) }()
+	go func() { errs <- httpsServer.ServeTLS(httpsListener, "", "") }()
 	if httpListener != nil {
 		go func() { errs <- httpServer.Serve(httpListener) }()
 	}
@@ -456,98 +461,6 @@ func shutdownServers(ctx context.Context, servers []*http.Server) error {
 	return errors.Join(failures...)
 }
 
-func envDefault(name, fallback string) string {
-	if value := os.Getenv(name); value != "" {
-		return value
-	}
-	return fallback
-}
-
-func envBool(name string, fallback bool) bool {
-	value := strings.TrimSpace(os.Getenv(name))
-	if value == "" {
-		return fallback
-	}
-	parsed, err := strconv.ParseBool(value)
-	if err != nil {
-		log.Printf("WARNING: invalid boolean value for %s=%q; using %t", name, value, fallback)
-		return fallback
-	}
-	return parsed
-}
-
-func loadClientCAPool(path string) (*x509.CertPool, error) {
-	pemBytes, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("could not read mTLS client CA certificate %s: %w", path, err)
-	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(pemBytes) {
-		return nil, fmt.Errorf("mTLS client CA file %s contains no valid PEM certificates", path)
-	}
-	return pool, nil
-}
-
-func envFileFromArgs() string {
-	path := envDefault("VAULT_SERVER_ENV_FILE", ".env")
-	for i, arg := range os.Args[1:] {
-		if arg == "--env-file" && i+2 < len(os.Args) {
-			path = os.Args[i+2]
-			break
-		}
-		if strings.HasPrefix(arg, "--env-file=") {
-			path = strings.TrimPrefix(arg, "--env-file=")
-			break
-		}
-	}
-	return strings.TrimSpace(path)
-}
-
-func loadDotEnv(path string) error {
-	if path == "" {
-		return nil
-	}
-	file, err := os.Open(path)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("could not open env file %s: %w", path, err)
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
-		key, value, ok := strings.Cut(line, "=")
-		if !ok {
-			continue
-		}
-		key = strings.TrimSpace(key)
-		value = strings.TrimSpace(value)
-		if len(value) >= 2 {
-			if (value[0] == '"' && value[len(value)-1] == '"') || (value[0] == '\'' && value[len(value)-1] == '\'') {
-				value = value[1 : len(value)-1]
-			}
-		}
-		if key != "" {
-			if _, exists := os.LookupEnv(key); !exists {
-				if err := os.Setenv(key, value); err != nil {
-					return fmt.Errorf("could not load %s from env file %s: %w", key, path, err)
-				}
-			}
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("could not read env file %s: %w", path, err)
-	}
-	return nil
-}
-
 func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -575,19 +488,6 @@ func (s *server) decrypt(encoded string) ([]byte, error) {
 	return s.aead.Open(nil, nonce, ciphertext, nil)
 }
 
-func (s *server) securityHeaders(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Security-Policy", "default-src 'none'; connect-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' https://fonts.googleapis.com 'unsafe-inline'; font-src https://fonts.gstatic.com; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'")
-		w.Header().Set("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("X-Frame-Options", "DENY")
-		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()")
-		w.Header().Set("Cache-Control", "no-store")
-		next.ServeHTTP(w, r)
-	})
-}
-
 func serveEmbeddedAsset(name, contentType string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		data, err := embeddedFiles.ReadFile(name)
@@ -601,17 +501,6 @@ func serveEmbeddedAsset(name, contentType string) http.HandlerFunc {
 	}
 }
 
-func (s *server) setupLockAPIs(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		isAPI := strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/v1/")
-		if isAPI && s.adminName == "" && s.setupLocked() {
-			writeJSON(w, http.StatusLocked, map[string]string{"error": "setup window expired"})
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
 func (s *server) health(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
@@ -621,29 +510,135 @@ func (s *server) health(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result = 0
-	if s.auditDB == nil || s.auditDB.QueryRowContext(ctx, "SELECT 1").Scan(&result) != nil || result != 1 {
+	if s.auditStore == nil || s.auditStore.withYear(time.Now().UTC().Year(), func(db *sql.DB) error {
+		return db.QueryRowContext(ctx, "SELECT 1").Scan(&result)
+	}) != nil || result != 1 {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]bool{"ok": false})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
-func (s *server) setup(w http.ResponseWriter, r *http.Request) {
+func (s *server) setupAvailable(w http.ResponseWriter) bool {
 	if s.adminName != "" {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "account already configured"})
-		return
+		return false
 	}
 	if s.setupLocked() {
 		writeJSON(w, http.StatusLocked, map[string]string{"error": "setup window expired"})
+		return false
+	}
+	return true
+}
+
+func (s *server) setupKeyValid(w http.ResponseWriter, key string) bool {
+	if subtle.ConstantTimeCompare([]byte(key), []byte(s.setupKey)) != 1 {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid setup key"})
+		return false
+	}
+	return true
+}
+
+func (s *server) validateSetupKey(w http.ResponseWriter, r *http.Request) {
+	if !s.setupAvailable(w) {
 		return
 	}
-	var req accountRequest
+	var req setupKeyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
 		return
 	}
-	if subtle.ConstantTimeCompare([]byte(req.SetupKey), []byte(s.setupKey)) != 1 {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid setup key"})
+	if !s.setupKeyValid(w, req.SetupKey) {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"valid": true})
+}
+
+func (s *server) saveSetupDomains(w http.ResponseWriter, r *http.Request) {
+	if !s.setupAvailable(w) {
+		return
+	}
+	var req setupDomainsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
+		return
+	}
+	if !s.setupKeyValid(w, req.SetupKey) {
+		return
+	}
+	mainDomain, aliasDomains, domains, err := normalizeServerDomains(req.MainDomain, req.AliasDomains)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	certificateMode := strings.TrimSpace(req.CertificateMode)
+	if certificateMode == "" {
+		certificateMode = serverCertificateModeSelfSigned
+	}
+	if certificateMode != serverCertificateModeSelfSigned && certificateMode != serverCertificateModeACME {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unsupported server certificate mode"})
+		return
+	}
+	if certificateMode == serverCertificateModeACME {
+		if !s.acmeAvailable || s.serverCerts == nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ACME certificates require the HTTP listener"})
+			return
+		}
+		if err := s.serverCerts.prepareACME(domains); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			return
+		}
+	} else if s.serverCerts != nil {
+		if err := s.serverCerts.prepareSelfSigned(domains); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not generate server certificate"})
+			return
+		}
+	}
+	aliasesJSON, err := json.Marshal(aliasDomains)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not save server domains"})
+		return
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not save server domains"})
+		return
+	}
+	defer tx.Rollback()
+	settings := map[string]string{
+		serverSettingMainDomain:      mainDomain,
+		serverSettingAliasDomains:    string(aliasesJSON),
+		serverSettingCertificateMode: certificateMode,
+	}
+	for key, value := range settings {
+		if _, err := tx.Exec(
+			"INSERT INTO server_settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+			key, value,
+		); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not save server domains"})
+			return
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not save server domains"})
+		return
+	}
+	if s.serverCerts != nil {
+		s.serverCerts.configure(certificateMode, domains)
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"saved": true})
+}
+
+func (s *server) setup(w http.ResponseWriter, r *http.Request) {
+	if !s.setupAvailable(w) {
+		return
+	}
+	var req setupAdminRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
+		return
+	}
+	if !s.setupKeyValid(w, req.SetupKey) {
 		return
 	}
 	if subtle.ConstantTimeCompare([]byte(req.Password), []byte(req.PasswordConfirmation)) != 1 {
@@ -655,13 +650,27 @@ func (s *server) setup(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "username required and password must be at least 12 characters"})
 		return
 	}
-
+	loginURL, err := s.setupLoginURL(r)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not prepare login redirect"})
+		return
+	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not create account"})
 		return
 	}
-	if _, err := s.db.Exec("INSERT INTO accounts(username, password_hash, role) VALUES (?, ?, 'admin')", req.Username, string(hash)); err != nil {
+	tx, err := s.db.Begin()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not create account"})
+		return
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec("INSERT INTO accounts(username, password_hash, role) VALUES (?, ?, 'admin')", req.Username, string(hash)); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not create account"})
+		return
+	}
+	if err := tx.Commit(); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not create account"})
 		return
 	}
@@ -670,7 +679,65 @@ func (s *server) setup(w http.ResponseWriter, r *http.Request) {
 	if err := os.Remove(s.setupKeyPath); err != nil && !os.IsNotExist(err) {
 		log.Printf("WARNING: could not remove setup key file %s: %v", s.setupKeyPath, err)
 	}
-	writeJSON(w, http.StatusCreated, map[string]string{"username": req.Username})
+	writeJSON(w, http.StatusCreated, map[string]string{
+		"username":     req.Username,
+		"redirect_url": loginURL,
+	})
+}
+
+func (s *server) setupLoginURL(r *http.Request) (string, error) {
+	mainDomain, err := readServerSetting(s.db, serverSettingMainDomain)
+	if err != nil {
+		return "", err
+	}
+	if mainDomain == "" {
+		return "/login.html", nil
+	}
+
+	mode, err := readServerSetting(s.db, serverSettingCertificateMode)
+	if err != nil {
+		return "", err
+	}
+	scheme := "http"
+	switch mode {
+	case serverCertificateModeSelfSigned, serverCertificateModeACME:
+		scheme = "https"
+	case "":
+		if s.requestIsHTTPS(r) {
+			scheme = "https"
+		}
+	default:
+		return "", fmt.Errorf("unsupported server certificate mode %q", mode)
+	}
+
+	mainDomain, _, _, err = normalizeServerDomains(mainDomain, nil)
+	if err != nil {
+		return "", fmt.Errorf("invalid configured main domain: %w", err)
+	}
+
+	host := mainDomain
+	if ip := net.ParseIP(mainDomain); ip != nil && strings.Contains(mainDomain, ":") {
+		host = "[" + mainDomain + "]"
+	}
+	return (&url.URL{Scheme: scheme, Host: host, Path: "/login.html"}).String(), nil
+}
+
+func (s *server) requestIsHTTPS(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	peerIP := net.ParseIP(r.RemoteAddr)
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		peerIP = net.ParseIP(host)
+	}
+	if peerIP == nil || !ipInRanges(peerIP, s.trustedProxies) {
+		return false
+	}
+	forwardedProto := strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")
+	if len(forwardedProto) == 0 {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(forwardedProto[len(forwardedProto)-1]), "https")
 }
 
 func (s *server) login(w http.ResponseWriter, r *http.Request) {
@@ -731,11 +798,20 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
+	sessionTTL := defaultSessionTTL
+	if totpEnabled == 1 {
+		sessionTTL = totpSessionTTL
+	}
 	s.mu.Lock()
 	if s.sessions == nil {
 		s.sessions = make(map[string]sessionInfo)
 	}
-	s.sessions[token] = sessionInfo{username: req.Username, role: role, expiresAt: time.Now().Add(30 * time.Minute)}
+	s.sessions[token] = sessionInfo{
+		username:  req.Username,
+		role:      role,
+		expiresAt: time.Now().Add(sessionTTL),
+		ttl:       sessionTTL,
+	}
 	s.mu.Unlock()
 	http.SetCookie(w, &http.Cookie{
 		Name:     "vault_session",
@@ -744,7 +820,7 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		HttpOnly: true,
 		Secure:   r.TLS != nil,
 		SameSite: http.SameSiteStrictMode,
-		MaxAge:   int((30 * time.Minute).Seconds()),
+		MaxAge:   int(sessionTTL.Seconds()),
 	})
 	s.recordAuditEvent(r, "login", "success", req.Username, "web", "", "")
 	writeJSON(w, http.StatusOK, map[string]string{"token": token})
@@ -810,14 +886,19 @@ func (s *server) loginLDAP(w http.ResponseWriter, r *http.Request) {
 	if s.sessions == nil {
 		s.sessions = make(map[string]sessionInfo)
 	}
-	s.sessions[token] = sessionInfo{username: username, role: role, expiresAt: time.Now().Add(30 * time.Minute)}
+	s.sessions[token] = sessionInfo{
+		username:  username,
+		role:      role,
+		expiresAt: time.Now().Add(defaultSessionTTL),
+		ttl:       defaultSessionTTL,
+	}
 	s.mu.Unlock()
 	s.recordAuditEvent(r, "login", "success", username, "api", "", "")
 	writeJSON(w, http.StatusOK, map[string]any{"auth": map[string]any{"client_token": token}})
 }
 
 func (s *server) recordAuditEvent(r *http.Request, action, outcome, actor, source, resource, detail string) {
-	if s.auditDB == nil {
+	if s.auditStore == nil {
 		return
 	}
 	actor = strings.TrimSpace(actor)
@@ -833,11 +914,7 @@ func (s *server) recordAuditEvent(r *http.Request, action, outcome, actor, sourc
 	if len(detail) > 1024 {
 		detail = detail[:1024]
 	}
-	_, err := s.auditDB.Exec(`
-		INSERT INTO audit_events(created_at, action, outcome, actor, client_ip, source, resource, detail)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		time.Now().Unix(), action, outcome, actor, s.clientIP(r), source, resource, detail,
-	)
+	err := s.auditStore.Record(time.Now().UTC().Unix(), action, outcome, actor, s.clientIP(r), source, resource, detail)
 	if err != nil {
 		log.Printf("WARNING: could not write audit event %s/%s: %v", action, outcome, err)
 	}
@@ -859,33 +936,6 @@ func (s *server) auditRequestActor(r *http.Request, source string) string {
 	}
 	sum := sha256.Sum256([]byte(token))
 	return "api-token:" + hex.EncodeToString(sum[:6])
-}
-
-func parseTrustedProxies(value string) ([]*net.IPNet, error) {
-	var ranges []*net.IPNet
-	for _, part := range strings.Split(value, ",") {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		if !strings.Contains(part, "/") {
-			ip := net.ParseIP(part)
-			if ip == nil {
-				return nil, fmt.Errorf("invalid trusted proxy address %q", part)
-			}
-			bits := 128
-			if ip.To4() != nil {
-				bits = 32
-			}
-			part += fmt.Sprintf("/%d", bits)
-		}
-		_, network, err := net.ParseCIDR(part)
-		if err != nil {
-			return nil, fmt.Errorf("invalid trusted proxy CIDR %q: %w", part, err)
-		}
-		ranges = append(ranges, network)
-	}
-	return ranges, nil
 }
 
 func (s *server) allowLoginAttempt(r *http.Request, username string) bool {
@@ -983,7 +1033,10 @@ func (s *server) sessionForToken(token string) (sessionInfo, bool) {
 		delete(s.sessions, token)
 		return sessionInfo{}, false
 	}
-	session.expiresAt = time.Now().Add(30 * time.Minute)
+	if session.ttl <= 0 {
+		session.ttl = defaultSessionTTL
+	}
+	session.expiresAt = time.Now().Add(session.ttl)
 	s.sessions[token] = session
 	return session, true
 }
@@ -1627,6 +1680,32 @@ func (s *server) listAuditEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	year := time.Now().UTC().Year()
+	if rawYear := strings.TrimSpace(r.URL.Query().Get("year")); rawYear != "" {
+		parsedYear, err := strconv.Atoi(rawYear)
+		if err != nil || parsedYear < 1970 || parsedYear > 9999 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid year"})
+			return
+		}
+		year = parsedYear
+	}
+	years, err := s.auditStore.AvailableYears()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not list audit years"})
+		return
+	}
+	yearExists := false
+	for _, availableYear := range years {
+		if availableYear == year {
+			yearExists = true
+			break
+		}
+	}
+	if !yearExists {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no audit database for selected year"})
+		return
+	}
+
 	limit, err := strconv.Atoi(r.URL.Query().Get("limit"))
 	if err != nil || limit <= 0 {
 		limit = 100
@@ -1660,6 +1739,10 @@ func (s *server) listAuditEvents(w http.ResponseWriter, r *http.Request) {
 		args = append(args, pattern, pattern, pattern)
 	}
 	if from, ok := parseAuditDate(r.URL.Query().Get("from")); ok {
+		if from.UTC().Year() != year {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "from date must be in selected year"})
+			return
+		}
 		conditions = append(conditions, "created_at >= ?")
 		args = append(args, from.Unix())
 	} else if strings.TrimSpace(r.URL.Query().Get("from")) != "" {
@@ -1667,6 +1750,10 @@ func (s *server) listAuditEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if to, ok := parseAuditDate(r.URL.Query().Get("to")); ok {
+		if to.UTC().Year() != year {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "to date must be in selected year"})
+			return
+		}
 		conditions = append(conditions, "created_at < ?")
 		args = append(args, to.Add(24*time.Hour).Unix())
 	} else if strings.TrimSpace(r.URL.Query().Get("to")) != "" {
@@ -1675,22 +1762,33 @@ func (s *server) listAuditEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	where := strings.Join(conditions, " AND ")
-	var total int
-	if err := s.auditDB.QueryRow("SELECT COUNT(*) FROM audit_events WHERE "+where, args...).Scan(&total); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not count audit events"})
+	var result map[string]any
+	err = s.auditStore.withYear(year, func(db *sql.DB) error {
+		var queryErr error
+		result, queryErr = queryAuditEvents(db, year, where, args, limit, offset)
+		return queryErr
+	})
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not query selected audit year"})
 		return
 	}
+	writeJSON(w, http.StatusOK, result)
+}
 
+func queryAuditEvents(db *sql.DB, year int, where string, args []any, limit, offset int) (map[string]any, error) {
+	var total int
+	if err := db.QueryRow("SELECT COUNT(*) FROM audit_events WHERE "+where, args...).Scan(&total); err != nil {
+		return nil, fmt.Errorf("count audit events: %w", err)
+	}
 	queryArgs := append(append([]any{}, args...), limit, offset)
-	rows, err := s.auditDB.Query(`
+	rows, err := db.Query(`
 		SELECT id, created_at, action, outcome, actor, client_ip, source, resource, detail
 		FROM audit_events
 		WHERE `+where+`
 		ORDER BY created_at DESC, id DESC
 		LIMIT ? OFFSET ?`, queryArgs...)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not list audit events"})
-		return
+		return nil, fmt.Errorf("list audit events: %w", err)
 	}
 	defer rows.Close()
 
@@ -1699,8 +1797,7 @@ func (s *server) listAuditEvents(w http.ResponseWriter, r *http.Request) {
 		var id, createdAt int64
 		var action, outcome, actor, clientIP, source, resource, detail string
 		if err := rows.Scan(&id, &createdAt, &action, &outcome, &actor, &clientIP, &source, &resource, &detail); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read audit events"})
-			return
+			return nil, fmt.Errorf("read audit event: %w", err)
 		}
 		events = append(events, map[string]any{
 			"id":         id,
@@ -1715,15 +1812,28 @@ func (s *server) listAuditEvents(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	if err := rows.Err(); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read audit events"})
-		return
+		return nil, fmt.Errorf("read audit events: %w", err)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	return map[string]any{
+		"year":   year,
 		"events": events,
 		"total":  total,
 		"limit":  limit,
 		"offset": offset,
-	})
+	}, nil
+}
+
+func (s *server) listAuditYears(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizedWeb(r) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	years, err := s.auditStore.AvailableYears()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not list audit years"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"years": years})
 }
 
 func parseAuditDate(value string) (time.Time, bool) {
@@ -1765,7 +1875,7 @@ func (s *server) serveSetup(w http.ResponseWriter, r *http.Request) {
 		s.serveLocked(w, r)
 		return
 	}
-	s.renderPage(w, "setup.gohtml", http.StatusOK, nil)
+	s.renderPage(w, "setup.gohtml", http.StatusOK, map[string]bool{"ACMEAvailable": s.acmeAvailable})
 }
 
 func (s *server) serveLogin(w http.ResponseWriter, r *http.Request) {

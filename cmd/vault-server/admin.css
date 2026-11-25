@@ -111,6 +111,10 @@ textarea {
   font-weight: 700;
 }
 
+.setup-page .setup-title {
+  font-size: 3.6rem;
+}
+
 .app-nav {
   align-items: center;
   display: flex;

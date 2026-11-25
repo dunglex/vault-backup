@@ -146,7 +146,7 @@ class ServerTest:
     def start(self) -> None:
         self.log_file = open(self.path / "server.log", "wb")
         env = os.environ | {
-            "VAULT_SERVER_ADDR": f"127.0.0.1:{self.port}",
+            "VAULT_SERVER_HTTPS_ADDR": f"127.0.0.1:{self.port}",
             "VAULT_SERVER_HTTP_ADDR": f"127.0.0.1:{self.http_port}",
             "VAULT_SERVER_DB": str(self.path / "vault.db"),
             "VAULT_SERVER_DB_PASSWORD": self.password,
@@ -180,6 +180,27 @@ class ServerTest:
     def setup(self) -> None:
         status, body = self.client.json(
             "POST",
+            f"{self.management_url}/v1/setup/validate-key",
+            data={"setup_key": self.setup_key},
+        )
+        assert_status(200, status, "validate setup key")
+        require(body == {"valid": True}, "setup-key validation response")
+
+        status, body = self.client.json(
+            "POST",
+            f"{self.management_url}/v1/setup/domains",
+            data={
+                "setup_key": self.setup_key,
+                "main_domain": "127.0.0.1",
+                "alias_domains": ["localhost"],
+                "certificate_mode": "self_signed",
+            },
+        )
+        assert_status(200, status, "configure server domains")
+        require(body == {"saved": True}, "domain setup response")
+
+        status, body = self.client.json(
+            "POST",
             f"{self.management_url}/v1/setup",
             data={
                 "setup_key": self.setup_key,
@@ -189,7 +210,13 @@ class ServerTest:
             },
         )
         assert_status(201, status, "set up vault server")
-        require(body == {"username": self.user}, "setup response")
+        require(
+            body == {
+                "username": self.user,
+                "redirect_url": "https://127.0.0.1/login.html",
+            },
+            "setup response",
+        )
 
     def login(self):
         status, body = self.client.json(

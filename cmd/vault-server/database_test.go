@@ -16,6 +16,21 @@ import (
 	"time"
 )
 
+func TestWithRequestTimeout(t *testing.T) {
+	handler := withRequestTimeout(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}), 10*time.Millisecond)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("timeout status = %d, want %d", response.Code, http.StatusServiceUnavailable)
+	}
+	if response.Body.String() != `{"error":"request timed out"}` {
+		t.Fatalf("timeout response = %q", response.Body.String())
+	}
+}
+
 func TestHTTPErrorLogWriterFiltersUnknownCertificateHandshakeErrors(t *testing.T) {
 	var output bytes.Buffer
 	writer := httpErrorLogWriter{output: &output}
@@ -188,7 +203,7 @@ func TestPageTemplatesRenderStandalonePages(t *testing.T) {
 		markers []string
 	}{
 		{"index.gohtml", []string{"http-equiv=\"refresh\"", "/secrets.html"}},
-		{"setup.gohtml", []string{`id="setupForm"`, `name="password_confirmation"`, "/v1/setup"}},
+		{"setup.gohtml", []string{"<title>Initial setup - Vault Server</title>", `<h1 class="brand setup-title">Enter setup key</h1>`, `id="phase1"`, `id="phase2"`, `id="phase3"`, `id="phase4"`, `id="setupKeyForm"`, `id="skipDomains"`, `id="loginLink"`, `name="password_confirmation"`, `name="main_domain"`, `name="alias_domains"`, `name="certificate_mode"`, `value="acme"`, "/v1/setup/validate-key", "/v1/setup/domains", "/v1/setup", "location.assign(result.redirect_url)"}},
 		{"login.gohtml", []string{`id="loginForm"`, `id="totpChallenge"`, "/v1/auth/login"}},
 		{"secret.gohtml", []string{`id="paths"`, `id="secretPath"`, `id="convert-format"`, `id="convert-case"`, "parseDotenv", "validateEditorData", "Duplicate dotenv key", ".slice(0, 5)", "location.assign('/secrets.html?group='"}},
 		{"secrets.gohtml", []string{`id="secret-groups"`, `id="secret-list"`, "/v1/secrets-browser", `get('group')`}},
@@ -207,6 +222,8 @@ func TestPageTemplatesRenderStandalonePages(t *testing.T) {
 			data := any(nil)
 			if test.name == "index.gohtml" {
 				data = map[string]string{"Destination": "/secrets.html"}
+			} else if test.name == "setup.gohtml" {
+				data = map[string]bool{"ACMEAvailable": true}
 			} else if test.name == "secret.gohtml" || test.name == "secrets.gohtml" || test.name == "token.gohtml" || test.name == "audit.gohtml" || test.name == "operators.gohtml" || test.name == "account.gohtml" {
 				data = map[string]bool{"IsAdmin": true}
 			}
@@ -218,6 +235,10 @@ func TestPageTemplatesRenderStandalonePages(t *testing.T) {
 				if !strings.Contains(output.String(), marker) {
 					t.Errorf("rendered %s does not contain %q", test.name, marker)
 				}
+			}
+			if test.name == "setup.gohtml" &&
+				(strings.Contains(output.String(), " of 4:") || strings.Contains(output.String(), `id="setupProgress"`)) {
+				t.Error("setup page exposes a public setup-step list")
 			}
 			if test.name == "index.gohtml" && strings.Contains(output.String(), `location.replace("\"`) {
 				t.Error("navigator includes quotes in the redirect URL")
@@ -331,12 +352,12 @@ func TestHealthChecksDatabaseConnection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	auditDB, err := openAuditDatabase(filepath.Join(t.TempDir(), "audit.db"))
+	auditStore, err := openAnnualAuditStore(filepath.Join(t.TempDir(), "audit.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer auditDB.Close()
-	s := &server{db: db, auditDB: auditDB}
+	defer auditStore.Close()
+	s := &server{db: db, auditStore: auditStore}
 
 	healthy := httptest.NewRecorder()
 	s.health(healthy, httptest.NewRequest(http.MethodGet, "/health", nil))
@@ -597,7 +618,7 @@ func TestLegacy32ByteKeyIsRejected(t *testing.T) {
 
 func TestLoadDotEnvPreservesExistingEnvironment(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "server.env")
-	contents := "VAULT_SERVER_DB_PASSWORD=from-file\nVAULT_SERVER_ADDR=127.0.0.1:8200\n"
+	contents := "VAULT_SERVER_DB_PASSWORD=from-file\nVAULT_SERVER_HTTPS_ADDR=127.0.0.1:8200\n"
 	if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -609,7 +630,7 @@ func TestLoadDotEnvPreservesExistingEnvironment(t *testing.T) {
 	if got := os.Getenv("VAULT_SERVER_DB_PASSWORD"); got != "from-process" {
 		t.Fatalf("existing environment was overwritten: got %q", got)
 	}
-	if got := os.Getenv("VAULT_SERVER_ADDR"); got != "127.0.0.1:8200" {
+	if got := os.Getenv("VAULT_SERVER_HTTPS_ADDR"); got != "127.0.0.1:8200" {
 		t.Fatalf("env file value was not loaded: got %q", got)
 	}
 }

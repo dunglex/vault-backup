@@ -25,6 +25,7 @@
   <div id="error" class="notice" role="alert"></div>
   <section class="panel">
     <div class="filters">
+      <label>Year<select id="year"></select></label>
       <label>Search<input id="q" placeholder="Actor, resource, or detail"></label>
       <label>Actor<input id="actor" placeholder="Exact actor"></label>
       <label>Action<select id="action"><option value="">All</option><option>login</option><option>start_mfa_setup</option><option>enable_mfa</option><option>disable_mfa</option><option>regenerate_mfa_recovery_codes</option><option>list</option><option>read</option><option>create</option><option>update</option><option>delete</option><option>create_token</option><option>revoke_token</option><option>issue_certificate</option><option>rotate_certificate</option><option>update_settings</option></select></label>
@@ -47,6 +48,7 @@
 const errorBox = document.getElementById('error');
 let offset = 0;
 const limit = 100;
+const yearSelect = document.getElementById('year');
 
 async function api(url, options = {}) {
   options.credentials = 'same-origin';
@@ -67,7 +69,7 @@ function textCell(row, value, className = '') {
 
 async function refresh() {
   try {
-    const params = new URLSearchParams({limit, offset});
+    const params = new URLSearchParams({year: yearSelect.value, limit, offset});
     for (const id of ['q','actor','action','outcome','source','from','to']) {
       const value = document.getElementById(id).value.trim();
       if (value) params.set(id, value);
@@ -94,13 +96,46 @@ async function refresh() {
   }
 }
 
+function updateDateBounds() {
+  const year = yearSelect.value;
+  document.getElementById('from').min = `${year}-01-01`;
+  document.getElementById('from').max = `${year}-12-31`;
+  document.getElementById('to').min = `${year}-01-01`;
+  document.getElementById('to').max = `${year}-12-31`;
+  for (const id of ['from', 'to']) {
+    const input = document.getElementById(id);
+    if (input.value && input.value.slice(0, 4) !== year) input.value = '';
+  }
+}
+
+async function loadYears() {
+  try {
+    const result = await api('/v1/audit/years');
+    const currentYear = String(new Date().getUTCFullYear());
+    for (const year of result.years) {
+      const option = document.createElement('option');
+      option.value = String(year);
+      option.textContent = String(year);
+      yearSelect.append(option);
+    }
+    yearSelect.value = result.years.includes(Number(currentYear))
+      ? currentYear
+      : String(result.years[result.years.length - 1]);
+    updateDateBounds();
+    await refresh();
+  } catch (error) {
+    errorBox.textContent = error.message;
+  }
+}
+
 document.getElementById('filter').onclick = () => { offset = 0; refresh(); };
 document.getElementById('previous').onclick = () => { offset = Math.max(0, offset - limit); refresh(); };
 document.getElementById('next').onclick = () => { offset += limit; refresh(); };
+yearSelect.onchange = () => { offset = 0; updateDateBounds(); refresh(); };
 document.addEventListener('keydown', event => {
   if (event.key === 'Enter') { offset = 0; refresh(); }
 });
-refresh();
+loadYears();
 </script>
 </body>
 </html>

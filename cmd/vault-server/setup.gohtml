@@ -3,57 +3,124 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Setup - Vault Server</title>
+  <title>Initial setup - Vault Server</title>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300italic,700,700italic">
   <link rel="stylesheet" href="/normalize.css">
   <link rel="stylesheet" href="/miligram.css">
   <link rel="stylesheet" href="/admin.css">
 </head>
-<body class="auth-page">
+<body class="auth-page setup-page">
 <main class="panel auth-card">
-    <h1 class="brand">Initial setup</h1>
-    <p class="muted">Create the Vault Server administrator account.</p>
-    <div id="error" class="notice" role="alert"></div>
-    <form id="setupForm">
-      <label>Setup key<input name="setup_key" required></label>
+  <h1 class="brand setup-title">Enter setup key</h1>
+  <div id="setupError" class="notice" role="alert" aria-live="assertive"></div>
+
+  <section id="phase1">
+    <form id="setupKeyForm">
+      <label>Setup key<input id="setupKey" name="setup_key" autocomplete="off" required></label>
+      <button type="submit">Validate key</button>
+    </form>
+  </section>
+
+  <section id="phase2" hidden>
+    <h2>Server domains and certificate</h2>
+    <form id="domainsForm">
+      <label>Main domain<input name="main_domain" placeholder="vault.example.com" required></label>
+      <label>Alias domains<textarea name="alias_domains" rows="3" placeholder="vault-alias.example.com"></textarea></label>
+      <label>Server certificate
+        <select name="certificate_mode">
+          <option value="self_signed">Self-signed certificate</option>
+          {{if .ACMEAvailable}}<option value="acme">ACME / Let's Encrypt</option>{{end}}
+        </select>
+      </label>
+      <button type="submit">Save and continue</button>
+      <button id="skipDomains" type="button" class="button button-outline">Skip for now</button>
+    </form>
+  </section>
+
+  <section id="phase3" hidden>
+    <h2>Create administrator account</h2>
+    <form id="adminForm">
       <label>Admin username<input name="username" autocomplete="username" required></label>
       <label>Password<input name="password" type="password" autocomplete="new-password" minlength="12" required></label>
       <label>Confirm password<input name="password_confirmation" type="password" autocomplete="new-password" minlength="12" required></label>
-      <button type="submit">Create account</button>
+      <button type="submit">Create admin account</button>
     </form>
+  </section>
+
+  <section id="phase4" role="status" hidden>
+    <h2>Setup complete</h2>
+    <p>Redirecting to login…</p>
+    <p><a id="loginLink" href="/login.html">Continue to login</a></p>
+  </section>
 </main>
 <script>
-const form = document.getElementById('setupForm');
-const errorBox = document.getElementById('error');
+const setupKey = document.getElementById('setupKey');
+const errorBox = document.getElementById('setupError');
+const phases = [1, 2, 3, 4].map(number => document.getElementById(`phase${number}`));
 
-form.addEventListener('submit', async event => {
+function showPhase(number) {
+  phases.forEach((phase, index) => {
+    phase.hidden = index + 1 !== number;
+  });
+  errorBox.textContent = '';
+}
+
+async function postJSON(path, values) {
+  const response = await fetch(path, {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    credentials: 'same-origin',
+    body: JSON.stringify(values)
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.error || 'Setup failed');
+  return body;
+}
+
+document.getElementById('setupKeyForm').addEventListener('submit', async event => {
   event.preventDefault();
   errorBox.textContent = '';
-  const values = Object.fromEntries(new FormData(form));
+  try {
+    await postJSON('/v1/setup/validate-key', {setup_key: setupKey.value});
+    showPhase(2);
+  } catch (error) {
+    errorBox.textContent = error.message;
+  }
+});
+
+document.getElementById('domainsForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  errorBox.textContent = '';
+  const values = Object.fromEntries(new FormData(event.currentTarget));
+  values.setup_key = setupKey.value;
+  values.alias_domains = values.alias_domains.split(/\r?\n/).map(domain => domain.trim()).filter(Boolean);
+  try {
+    await postJSON('/v1/setup/domains', values);
+    showPhase(3);
+  } catch (error) {
+    errorBox.textContent = error.message;
+  }
+});
+
+document.getElementById('skipDomains').addEventListener('click', () => showPhase(3));
+
+document.getElementById('adminForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  errorBox.textContent = '';
+  const values = Object.fromEntries(new FormData(event.currentTarget));
   if (values.password !== values.password_confirmation) {
     errorBox.textContent = 'Passwords do not match';
     return;
   }
+  values.setup_key = setupKey.value;
   try {
-    let response = await fetch('/v1/setup', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      credentials:'same-origin',
-      body:JSON.stringify(values)
-    });
-    let body = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(body.error || 'Setup failed');
-
-    response = await fetch('/v1/auth/login', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      credentials:'same-origin',
-      body:JSON.stringify({username:values.username, password:values.password})
-    });
-    body = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(body.error || 'Login failed');
-    location.assign('/secrets.html');
-  } catch (error) { errorBox.textContent = error.message; }
+    const result = await postJSON('/v1/setup', values);
+    document.getElementById('loginLink').href = result.redirect_url;
+    showPhase(4);
+    window.setTimeout(() => location.assign(result.redirect_url), 1500);
+  } catch (error) {
+    errorBox.textContent = error.message;
+  }
 });
 </script>
 </body>

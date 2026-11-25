@@ -143,6 +143,18 @@ fi
 if [[ -f "$RESTORE_ROOT/database/audit.db-shm" ]]; then
   install -m 600 "$RESTORE_ROOT/database/audit.db-shm" "$DATA_DIR/audit.db-shm"
 fi
+for annual_db in "$RESTORE_ROOT"/database/*-????.*; do
+  [[ -f "$annual_db" ]] || continue
+  [[ "$annual_db" != *-wal && "$annual_db" != *-shm ]] || continue
+  annual_name=$(basename "$annual_db")
+  install -m 600 "$annual_db" "$DATA_DIR/$annual_name"
+  if [[ -f "${annual_db}-wal" ]]; then
+    install -m 600 "${annual_db}-wal" "$DATA_DIR/${annual_name}-wal"
+  fi
+  if [[ -f "${annual_db}-shm" ]]; then
+    install -m 600 "${annual_db}-shm" "$DATA_DIR/${annual_name}-shm"
+  fi
+done
 
 mkdir -p "$DATA_DIR/tls"
 chmod 700 "$DATA_DIR/tls"

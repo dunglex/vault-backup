@@ -8,6 +8,23 @@ def main() -> None:
     with ServerTest(18222, 18223) as server:
         status, _ = server.client.json(
             "POST",
+            f"{server.https_url}/v1/setup/validate-key",
+            data={"setup_key": "wrong"},
+        )
+        assert_status(401, status, "reject invalid setup key during key validation")
+        status, _ = server.client.json(
+            "POST",
+            f"{server.https_url}/v1/setup/domains",
+            data={
+                "setup_key": "wrong",
+                "main_domain": "vault.example.com",
+                "alias_domains": [],
+                "certificate_mode": "self_signed",
+            },
+        )
+        assert_status(401, status, "reject invalid setup key during domain setup")
+        status, _ = server.client.json(
+            "POST",
             f"{server.https_url}/v1/setup",
             data={"setup_key": "wrong", "username": "admin", "password": server.password, "password_confirmation": server.password},
         )

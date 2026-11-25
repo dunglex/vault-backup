@@ -148,6 +148,36 @@ func TestAccountTOTPEnrollmentLoginRecoveryAndDisable(t *testing.T) {
 	}
 }
 
+func TestWebSessionCookieLifetimeDependsOnTOTP(t *testing.T) {
+	s := newTOTPTestServer(t)
+
+	passwordLogin := httptest.NewRecorder()
+	s.login(passwordLogin, totpLoginRequest(`{"username":"admin","password":"`+totpTestPassword+`"}`))
+	passwordCookies := passwordLogin.Result().Cookies()
+	if passwordLogin.Code != http.StatusOK || len(passwordCookies) != 1 {
+		t.Fatalf("password-only login status = %d, cookies = %d", passwordLogin.Code, len(passwordCookies))
+	}
+	if passwordCookies[0].MaxAge != int(defaultSessionTTL.Seconds()) {
+		t.Fatalf("password-only cookie MaxAge = %d, want %d", passwordCookies[0].MaxAge, int(defaultSessionTTL.Seconds()))
+	}
+
+	secret, _ := setupAndEnableTOTP(t, s)
+	totpLogin := httptest.NewRecorder()
+	s.login(totpLogin, totpLoginRequest(
+		`{"username":"admin","password":"`+totpTestPassword+`","totp_code":"`+currentTOTPCode(t, secret)+`"}`,
+	))
+	totpCookies := totpLogin.Result().Cookies()
+	if totpLogin.Code != http.StatusOK || len(totpCookies) != 1 {
+		t.Fatalf("TOTP login status = %d, cookies = %d", totpLogin.Code, len(totpCookies))
+	}
+	if totpCookies[0].MaxAge != int(totpSessionTTL.Seconds()) {
+		t.Fatalf("TOTP cookie MaxAge = %d, want %d", totpCookies[0].MaxAge, int(totpSessionTTL.Seconds()))
+	}
+	if session := s.sessions[totpCookies[0].Value]; session.ttl != totpSessionTTL {
+		t.Fatalf("TOTP session TTL = %s, want %s", session.ttl, totpSessionTTL)
+	}
+}
+
 func TestLDAPLoginRequiresTOTPAndDoesNotConsumeRecoveryForWrongPassword(t *testing.T) {
 	s := newTOTPTestServer(t)
 	_, recoveryCodes := setupAndEnableTOTP(t, s)

@@ -24,6 +24,11 @@ The startup script uses `tests/data/vault.db`, `tests/data/vault.db.key`, and ge
 
 An unconfigured server allows initial administrator setup for 20 minutes. The setup window is stored in the database, so restarting the server does not reset it. After expiry, the setup page returns `423 Locked` until an administrator resets the unconfigured server's database state.
 
+First-run setup has four phases: validate the setup key, optionally configure
+domains and the server certificate, create the Admin account, and continue to
+the login page. Skipping domain configuration keeps the current domain and
+certificate settings.
+
 The initial account has the **Admin** role. Existing accounts are migrated to
 Admin when the server starts with the role update. Admins can create and remove
 Operator accounts from `/operators.html`. Operators can manage secrets, API
@@ -39,13 +44,18 @@ code or an unused recovery code. TOTP secrets and recovery-code hashes are
 stored in the encrypted main database; recovery codes are shown only when
 generated.
 
+Web session cookies last 30 minutes for accounts without TOTP and 8 hours
+after a successful TOTP or recovery-code login. The session duration is chosen
+at login, so an account that just enabled TOTP receives the longer duration on
+its next sign-in.
+
 ## Configuration from .env
 
 By default, the server loads `.env` from the current working directory. Existing process environment variables take precedence over values in the file:
 
 ```dotenv
 VAULT_SERVER_DB_PASSWORD=use-a-long-random-password
-VAULT_SERVER_ADDR=127.0.0.1:8200
+VAULT_SERVER_HTTPS_ADDR=127.0.0.1:8200
 VAULT_SERVER_HTTP_ADDR=
 VAULT_SERVER_DB=/var/lib/vault/vault.db
 VAULT_SERVER_AUDIT_DB=/var/lib/vault/audit.db
@@ -68,9 +78,18 @@ Use another file with `--env-file` or `VAULT_SERVER_ENV_FILE`:
 
 Restrict `.env` permissions to `0600` because it contains the database password.
 
-Security events are stored separately in a plaintext SQLite audit database. It defaults to `audit.db` alongside the main encrypted database and can be overridden with `--audit-db` or `VAULT_SERVER_AUDIT_DB`. The audit database stores event metadata only and never stores secret values or raw tokens.
+Security events are stored separately in plaintext SQLite audit databases. The
+`--audit-db` or `VAULT_SERVER_AUDIT_DB` value is the database base path; for
+`audit.db`, yearly files are named `audit-YYYY.db` alongside the main database.
+The current UTC year's database accepts writes. Previous years are checkpointed
+and made read-only, and the audit page searches one selected year at a time.
+On first startup after upgrading, records in the old single `audit.db` are
+migrated to their UTC-year files and that legacy database is retained read-only.
+Audit databases store event metadata only, never secret values or raw tokens.
 
-Web and LDAP-compatible username/password endpoints share a limit of five attempts per ten minutes, applied to both the client IP and account. By default, forwarding headers are ignored. If the server is behind a reverse proxy, configure `--trusted-proxies` or `VAULT_SERVER_TRUSTED_PROXIES` with the exact proxy IPs or CIDRs; only those peers may supply `X-Forwarded-For`.
+Web and LDAP-compatible username/password endpoints share a limit of five attempts per ten minutes, applied to both the client IP and account. By default, forwarding headers are ignored. If the server is behind a reverse proxy, configure `--trusted-proxies` or `VAULT_SERVER_TRUSTED_PROXIES` with the exact proxy IPs or CIDRs; only those peers may supply `X-Forwarded-For` or `X-Forwarded-Proto`. The proxy should preserve the external `Host`.
+
+After setup, requests are served only when the `Host` and, when present, `Origin` use the configured main or alias domain. Health probes and the setup flow are exempt so probes and initial setup continue to work. These checks are not authentication: non-browser clients can forge these headers, so protected operations still require their normal credentials.
 
 On `SIGINT` or `SIGTERM`, the server stops accepting new connections, drains active requests for up to 15 seconds, closes all listeners, and then closes the encrypted database connection.
 
@@ -89,7 +108,7 @@ Create a sensitive filesystem tarball containing the database, its protected key
 ```
 
 The archive is created with mode `0600` and includes SHA-256 checksums in `vault-server/manifest.txt`. Stop or quiesce the server before backup for the most consistent database snapshot.
-The main database, protected key, and separate audit database are included.
+The main database, protected key, and all yearly audit databases are included.
 
 Restore a backup into a clean `/data` directory:
 
@@ -246,11 +265,15 @@ New database keys are 128 random bytes and are stored in `<db>.key` using Argon2
 
 ## HTTP and HTTPS startup options
 
-The server starts only HTTPS by default. HTTPS requires a certificate and private key. HTTP is opt-in: set `--http-addr` or `VAULT_SERVER_HTTP_ADDR` explicitly; starting HTTP prints an insecure-awareness warning:
+The server starts only HTTPS by default. TLS certificate and key flags are optional, but must be provided together when used. If omitted, the server creates a self-signed bootstrap certificate and stores it as `server.crt` and `server.key` alongside the database. The optional domain-configuration phase of first-run setup collects the main and alias domains and replaces this certificate with one covering those names. An existing supplied certificate pair is never overwritten.
+
+The setup page offers self-signed certificates or ACME/Let's Encrypt. ACME is available when the HTTP listener is enabled and requires public DNS for each name plus public HTTP access on port 80. ACME issues a certificate for the main domain during setup and for each alias on its first HTTPS connection; the certificates are automatically renewed and stored in an `acme-cache` directory alongside the database. The server persists the domain list and selected certificate mode in the encrypted database.
+
+HTTP is opt-in: set `--http-addr` or `VAULT_SERVER_HTTP_ADDR` explicitly; starting HTTP prints an insecure-awareness warning:
 
 ```bash
 ./bin/vault-server \
-  --addr 127.0.0.1:8200 \
+  --https-addr 127.0.0.1:8200 \
   --http-addr 127.0.0.1:8201 \
   --db /secure/location/vault.db \
   --tls-cert /secure/location/localhost.pem \
@@ -260,7 +283,7 @@ The server starts only HTTPS by default. HTTPS requires a certificate and privat
 Environment variables are also supported:
 
 ```bash
-export VAULT_SERVER_ADDR=127.0.0.1:8200
+export VAULT_SERVER_HTTPS_ADDR=127.0.0.1:8200
 export VAULT_SERVER_HTTP_ADDR=127.0.0.1:8201
 export VAULT_SERVER_DB=/secure/location/vault.db
 export VAULT_SERVER_TLS_CERT=/secure/location/server.crt
@@ -279,11 +302,11 @@ The plaintext opt-in can also be set with `VAULT_SERVER_ALLOW_PLAINTEXT_DB=true`
 
 ## Production deployment
 
-Use certificates issued by a trusted certificate authority. Configure the ingress to connect to the HTTP listener, and have in-namespace pods connect to the HTTPS listener using a certificate trusted by those pods.
+For production, choose ACME during first-run setup or provide a certificate pair issued by a trusted certificate authority. Configure the ingress to connect to the HTTP listener, and have in-namespace pods connect to the HTTPS listener using a certificate trusted by those pods.
 
 ```bash
 ./bin/vault-server \
-  --addr 0.0.0.0:8200 \
+  --https-addr 0.0.0.0:8200 \
   --http-addr 0.0.0.0:8201 \
   --db /var/lib/vault/vault.db \
   --tls-cert /etc/vault/tls/server.crt \

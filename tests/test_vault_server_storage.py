@@ -21,8 +21,9 @@ def main() -> None:
         print("PASS: database file is encrypted")
         require(mode(server.path / "vault.db.key") == 0o600, "key permissions")
         print("PASS: encryption key file permissions")
-        require(mode(server.path / "audit.db") == 0o600, "audit database permissions")
-        require((server.path / "audit.db").read_bytes().startswith(b"SQLite format 3\0"), "audit database is not plaintext")
+        audit_path = server.path / f"audit-{time.gmtime().tm_year}.db"
+        require(mode(audit_path) == 0o600, "audit database permissions")
+        require(audit_path.read_bytes().startswith(b"SQLite format 3\0"), "audit database is not plaintext")
         print("PASS: separate plaintext audit database")
 
         archive = server.path / "vault-server.tar.gz"
@@ -36,20 +37,43 @@ def main() -> None:
             archive,
         )
         with tarfile.open(archive, "r:gz") as tar:
+            names = tar.getnames()
             require(
-                "vault-server/database/audit.db" in tar.getnames(),
-                "server backup omitted audit database",
+                any(
+                    name.startswith("vault-server/database/audit-")
+                    and name.endswith(".db")
+                    for name in names
+                ),
+                "server backup omitted annual audit database",
             )
-        print("PASS: server backup includes audit database")
+        print("PASS: server backup includes annual audit database")
 
         server.setup()
         server.login()
+        status, years = server.client.json(
+            "GET", f"{server.https_url}/v1/audit/years"
+        )
+        assert_status(200, status, "list audit years")
+        require(
+            time.gmtime().tm_year in years["years"],
+            "current UTC year missing from audit year list",
+        )
         status, _ = server.client.json(
             "PUT",
             f"{server.https_url}/v1/secrets/restore-test/database",
             data={"data": {"username": "restore-admin", "password": "restore-secret"}},
         )
         assert_status(200, status, "create secret for database restore")
+        status, _ = server.client.json(
+            "GET",
+            f"{server.https_url}/v1/audit?year={time.gmtime().tm_year - 1}",
+        )
+        assert_status(400, status, "reject unavailable audit year")
+        status, _ = server.client.json(
+            "GET",
+            f"{server.https_url}/v1/audit?year={time.gmtime().tm_year}&from={time.gmtime().tm_year - 1}-12-31",
+        )
+        assert_status(400, status, "reject date filter outside selected audit year")
         server.stop()
 
         run(
@@ -79,7 +103,7 @@ def main() -> None:
         restored_port = 18230
         restored_url = f"https://127.0.0.1:{restored_port}"
         restored_env = os.environ | {
-            "VAULT_SERVER_ADDR": f"127.0.0.1:{restored_port}",
+            "VAULT_SERVER_HTTPS_ADDR": f"127.0.0.1:{restored_port}",
             "VAULT_SERVER_HTTP_ADDR": "",
             "VAULT_SERVER_DB": str(restore_dir / "vault.db"),
             "VAULT_SERVER_AUDIT_DB": str(restore_dir / "audit.db"),
@@ -134,7 +158,7 @@ def main() -> None:
             )
             _, audit = restored_client.json(
                 "GET",
-                f"{restored_url}/v1/audit?action=create&q=restore-test",
+                f"{restored_url}/v1/audit?year={time.gmtime().tm_year}&action=create&q=restore-test",
             )
             require(
                 any(
