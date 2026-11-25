@@ -72,14 +72,16 @@ func (s *server) sessionForToken(token string) (sessionInfo, bool) {
 	now := time.Now()
 	var session sessionInfo
 	var expiresAt, ttlSeconds int64
+	var mustChangePassword int
 	err := s.db.QueryRow(`
-		SELECT accounts.username, accounts.role, web_sessions.expires_at, web_sessions.ttl_seconds
+		SELECT accounts.username, accounts.role, web_sessions.expires_at, web_sessions.ttl_seconds,
+			accounts.must_change_password
 		FROM web_sessions
 		JOIN accounts ON accounts.username = web_sessions.username
-		WHERE web_sessions.token_hash = ? AND web_sessions.expires_at > ?`,
+		WHERE web_sessions.token_hash = ? AND web_sessions.expires_at > ? AND accounts.locked = 0`,
 		sessionTokenHash(token),
 		now.Unix(),
-	).Scan(&session.username, &session.role, &expiresAt, &ttlSeconds)
+	).Scan(&session.username, &session.role, &expiresAt, &ttlSeconds, &mustChangePassword)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			if _, cleanupErr := s.db.Exec(
@@ -101,6 +103,7 @@ func (s *server) sessionForToken(token string) (sessionInfo, bool) {
 	}
 	session.ttl = time.Duration(ttlSeconds) * time.Second
 	session.expiresAt = now.Add(session.ttl)
+	session.mustChangePassword = mustChangePassword == 1
 	result, err := s.db.Exec(
 		"UPDATE web_sessions SET expires_at = ? WHERE token_hash = ? AND expires_at > ?",
 		session.expiresAt.Unix(),

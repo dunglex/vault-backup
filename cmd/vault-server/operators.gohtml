@@ -27,7 +27,7 @@
       <h2 class="section-label">Operator accounts</h2>
       <button id="openCreateOperator" type="button">Add operator</button>
     </div>
-    <p>Operators can manage secrets, API tokens, and audit events. They cannot access Security or manage accounts.</p>
+    <p>Operators can manage secrets, API tokens, and audit events. They cannot access Security or manage accounts. Locking an operator revokes active sessions. Removing their 2FA also revokes sessions; if MFA enforcement is enabled, they must enroll again before continuing.</p>
     <h3 class="section-label">Current operators</h3>
     <ul id="operators" aria-live="polite"></ul>
   </section>
@@ -40,19 +40,27 @@
       <div id="operatorDialogError" class="notice" role="alert"></div>
       <label for="operatorUsername">Username</label>
       <input id="operatorUsername" name="username" maxlength="128" required>
-      <label for="operatorPassword">Password</label>
-      <input id="operatorPassword" name="password" type="password" minlength="12" autocomplete="new-password" required>
-      <label for="operatorPasswordConfirmation">Confirm password</label>
-      <input id="operatorPasswordConfirmation" name="password_confirmation" type="password" minlength="12" autocomplete="new-password" required>
       <div class="row-actions admin-dialog-actions">
         <button id="createOperator" type="submit">Create operator</button>
       </div>
+      <section id="generatedPasswordPanel" class="credential-panel" hidden>
+        <h3>Copy the temporary password</h3>
+        <p>This password is shown only once. The operator must change it when they first sign in.</p>
+        <label for="generatedOperatorPassword">Temporary password</label>
+        <input id="generatedOperatorPassword" type="text" readonly autocomplete="off">
+        <div class="row-actions admin-dialog-actions">
+          <button id="copyOperatorPassword" type="button">Copy password</button>
+        </div>
+        <p id="operatorPasswordCopyStatus" role="status" class="muted">Copy the password or select it to copy manually.</p>
+        <label><input id="acknowledgeOperatorPassword" type="checkbox"> I have copied or recorded this password.</label>
+      </section>
     </form>
   </dialog>
 </main>
 <script>
 const errorBox = document.getElementById('error');
 const createDialog = document.getElementById('createOperatorDialog');
+let passwordAcknowledgementRequired = false;
 async function api(url, options = {}) {
   options.credentials = 'same-origin';
   const response = await fetch(url, options);
@@ -63,41 +71,68 @@ async function api(url, options = {}) {
   }
   return body;
 }
-function renderOperators(names) {
+function renderOperators(operators) {
   const list = document.getElementById('operators');
   list.replaceChildren();
-  if (names.length === 0) {
+  if (operators.length === 0) {
     const empty = document.createElement('li');
     empty.textContent = 'No operators have been added.';
     list.append(empty);
     return;
   }
-  for (const username of names) {
+  for (const operator of operators) {
     const item = document.createElement('li');
     const label = document.createElement('span');
-    label.textContent = username;
-    const remove = document.createElement('button');
-    remove.type = 'button';
-    remove.className = 'button button-outline';
-    remove.textContent = 'Remove';
-    remove.addEventListener('click', () => removeOperator(username));
-    item.append(label, ' ', remove);
+    label.textContent = operator.username;
+    const status = document.createElement('span');
+    status.textContent = operator.locked ? 'Locked' : 'Active';
+    const mfaStatus = document.createElement('span');
+    mfaStatus.textContent = operator.mfa_enabled ? '2FA enabled' :
+      operator.mfa_configured ? '2FA setup pending' : '2FA disabled';
+    const lock = document.createElement('button');
+    lock.type = 'button';
+    lock.className = 'button button-outline';
+    lock.textContent = operator.locked ? 'Unlock' : 'Lock';
+    lock.addEventListener('click', () => setOperatorLock(operator));
+    const removeMFA = document.createElement('button');
+    removeMFA.type = 'button';
+    removeMFA.className = 'button button-outline';
+    removeMFA.textContent = 'Remove 2FA';
+    removeMFA.disabled = !operator.mfa_configured;
+    removeMFA.addEventListener('click', () => removeOperatorMFA(operator.username));
+    item.append(label, ' — ', status, ' — ', mfaStatus, ' ', lock, ' ', removeMFA);
     list.append(item);
   }
 }
 async function loadOperators() {
   try {
-    const result = await api('/v1/operators');
+    const result = await api('/v1/operators/details');
     renderOperators(result.operators);
   } catch (error) {
     errorBox.textContent = error.message;
   }
 }
-async function removeOperator(username) {
-  if (!window.confirm(`Remove operator "${username}"? Their active web sessions will be revoked.`)) return;
+async function setOperatorLock(operator) {
+  const locked = !operator.locked;
+  const action = locked ? 'lock' : 'unlock';
+  if (!window.confirm(`${action[0].toUpperCase()}${action.slice(1)} operator "${operator.username}"?${locked ? ' Their active sessions will be revoked.' : ''}`)) return;
   errorBox.textContent = '';
   try {
-    await api('/v1/operators', {
+    await api('/v1/operators/lock', {
+      method:'PATCH',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({username:operator.username, locked})
+    });
+    await loadOperators();
+  } catch (error) {
+    errorBox.textContent = error.message;
+  }
+}
+async function removeOperatorMFA(username) {
+  if (!window.confirm(`Remove 2FA for "${username}"? This revokes active sessions. If MFA enforcement is enabled, they must enroll again to use the account.`)) return;
+  errorBox.textContent = '';
+  try {
+    await api('/v1/operators/totp', {
       method:'DELETE',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({username})
@@ -113,20 +148,25 @@ document.getElementById('operatorForm').addEventListener('submit', async event =
   dialogError.textContent = '';
   const button = document.getElementById('createOperator');
   button.disabled = true;
+  document.getElementById('closeCreateOperator').disabled = true;
+  passwordAcknowledgementRequired = true;
   try {
-    await api('/v1/operators', {
+    const result = await api('/v1/operators', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({
-        username:document.getElementById('operatorUsername').value,
-        password:document.getElementById('operatorPassword').value,
-        password_confirmation:document.getElementById('operatorPasswordConfirmation').value
+        username:document.getElementById('operatorUsername').value
       })
     });
-    createDialog.close();
+    document.getElementById('operatorUsername').disabled = true;
+    button.hidden = true;
+    document.getElementById('generatedOperatorPassword').value = result.initial_password;
+    document.getElementById('generatedPasswordPanel').hidden = false;
     await loadOperators();
   } catch (error) {
     dialogError.textContent = error.message;
+    document.getElementById('closeCreateOperator').disabled = false;
+    passwordAcknowledgementRequired = false;
   } finally {
     button.disabled = false;
   }
@@ -136,10 +176,41 @@ document.getElementById('openCreateOperator').addEventListener('click', () => {
   createDialog.showModal();
   document.getElementById('operatorUsername').focus();
 });
-document.getElementById('closeCreateOperator').addEventListener('click', () => createDialog.close());
+document.getElementById('copyOperatorPassword').addEventListener('click', async () => {
+  const passwordInput = document.getElementById('generatedOperatorPassword');
+  const status = document.getElementById('operatorPasswordCopyStatus');
+  passwordInput.focus();
+  passwordInput.select();
+  try {
+    await navigator.clipboard.writeText(passwordInput.value);
+    status.textContent = 'Password copied. Confirm below before closing.';
+  } catch {
+    status.textContent = 'Clipboard access failed. The password is selected; copy it manually, then confirm below.';
+  }
+});
+document.getElementById('acknowledgeOperatorPassword').addEventListener('change', event => {
+  document.getElementById('closeCreateOperator').disabled = !event.target.checked;
+});
+document.getElementById('closeCreateOperator').addEventListener('click', () => {
+  if (!passwordAcknowledgementRequired || document.getElementById('acknowledgeOperatorPassword').checked) {
+    createDialog.close();
+  }
+});
+createDialog.addEventListener('cancel', event => {
+  if (passwordAcknowledgementRequired && !document.getElementById('acknowledgeOperatorPassword').checked) {
+    event.preventDefault();
+  }
+});
 createDialog.addEventListener('close', () => {
   document.getElementById('operatorForm').reset();
+  document.getElementById('operatorUsername').disabled = false;
+  document.getElementById('createOperator').hidden = false;
+  document.getElementById('generatedPasswordPanel').hidden = true;
+  document.getElementById('generatedOperatorPassword').value = '';
+  document.getElementById('closeCreateOperator').disabled = false;
+  passwordAcknowledgementRequired = false;
   document.getElementById('operatorDialogError').textContent = '';
+  document.getElementById('operatorPasswordCopyStatus').textContent = 'Copy the password or select it to copy manually.';
 });
 loadOperators();
 </script>

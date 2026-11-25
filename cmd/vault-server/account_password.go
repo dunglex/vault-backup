@@ -54,7 +54,7 @@ func (s *server) changeAccountPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := s.db.Exec(
-		"UPDATE accounts SET password_hash = ? WHERE username = ? AND password_hash = ?",
+		"UPDATE accounts SET password_hash = ?, must_change_password = 0 WHERE username = ? AND password_hash = ?",
 		string(newHash),
 		session.username,
 		currentHash,
@@ -76,5 +76,8 @@ func (s *server) changeAccountPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.recordAuditEvent(r, "change_password", "success", session.username, "web", "account:"+session.username, "")
-	writeJSON(w, http.StatusOK, map[string]bool{"changed": true})
+	writeJSON(w, http.StatusOK, map[string]bool{
+		"changed":              true,
+		"must_change_password": false,
+	})
 }

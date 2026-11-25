@@ -11,6 +11,9 @@ import (
 
 func TestChangeAccountPassword(t *testing.T) {
 	s := newTOTPTestServer(t)
+	if _, err := s.db.Exec("UPDATE accounts SET must_change_password = 1 WHERE username = 'admin'"); err != nil {
+		t.Fatal(err)
+	}
 
 	change := func(currentPassword, newPassword, repeatNewPassword string) *httptest.ResponseRecorder {
 		t.Helper()
@@ -45,8 +48,12 @@ func TestChangeAccountPassword(t *testing.T) {
 	}
 
 	var passwordHash string
-	if err := s.db.QueryRow("SELECT password_hash FROM accounts WHERE username = 'admin'").Scan(&passwordHash); err != nil {
+	var mustChangePassword int
+	if err := s.db.QueryRow("SELECT password_hash, must_change_password FROM accounts WHERE username = 'admin'").Scan(&passwordHash, &mustChangePassword); err != nil {
 		t.Fatal(err)
+	}
+	if mustChangePassword != 0 {
+		t.Fatalf("must_change_password = %d, want 0 after password change", mustChangePassword)
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte("new-account-password")); err != nil {
 		t.Fatal("new password was not stored")

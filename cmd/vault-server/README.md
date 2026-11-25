@@ -30,11 +30,20 @@ the login page. Skipping domain configuration keeps the current domain and
 certificate settings.
 
 The initial account has the **Admin** role. Existing accounts are migrated to
-Admin when the server starts with the role update. Admins can create and remove
-Operator accounts from `/operators.html`. Operators can manage secrets, API
-tokens, and audit events, but cannot access `/security.html`, `/v1/settings`,
-`/operators.html`, or operator-management endpoints. Removing an Operator also
-revokes their active web sessions.
+Admin when the server starts with the role update. Admins can create, lock,
+unlock, reset two-factor authentication for, and remove Operator accounts from
+`/operators.html`. Locking an Operator blocks login and revokes their active
+web sessions. Resetting two-factor authentication clears their TOTP setup and
+recovery codes and revokes active sessions; when MFA enforcement is enabled,
+the Operator must enroll again before continuing. Operators can manage secrets,
+API tokens, and audit events, but cannot access `/security.html`,
+`/v1/settings`, `/operators.html`, or operator-management endpoints.
+Creating an Operator generates a random temporary password shown only once in
+the admin dialog. Copy or record it before closing the dialog, then provide it
+to the Operator through a secure channel. The Operator must change this
+password after their first web login; access to other application features is
+blocked until the change is complete. LDAP-compatible login is unavailable
+until the temporary password has been changed through the web interface.
 
 Two-factor authentication with TOTP is optional and disabled by default for
 each account. Users can change their password, enroll TOTP, and disable it from
@@ -193,8 +202,11 @@ PUT    /v1/settings
 GET    /v1/settings/blocked-login-ips
 DELETE /v1/settings/blocked-login-ips/{ip}
 GET    /v1/operators
+GET    /v1/operators/details
 POST   /v1/operators
 DELETE /v1/operators
+PATCH  /v1/operators/lock
+DELETE /v1/operators/totp
 GET    /v1/account/totp
 POST   /v1/account/totp/setup
 POST   /v1/account/totp/enable

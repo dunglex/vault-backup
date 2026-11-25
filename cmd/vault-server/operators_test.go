@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 func newOperatorTestServer(t *testing.T) *server {
@@ -55,6 +57,7 @@ func newOperatorTestServer(t *testing.T) *server {
 		sessions: map[string]sessionInfo{
 			"admin-session": {username: "admin", role: "admin", expiresAt: time.Now().Add(time.Hour), ttl: time.Hour},
 		},
+		attempts: make(map[string][]time.Time),
 	}
 	if err := s.storeSession("admin-session", s.sessions["admin-session"]); err != nil {
 		t.Fatalf("store admin test session: %v", err)
@@ -69,6 +72,73 @@ func operatorRequestWithSession(method, path, body, session string, https bool) 
 		request.TLS = &tls.ConnectionState{}
 	}
 	return request
+}
+
+func TestOperatorCreationGeneratesOneTimeTemporaryPassword(t *testing.T) {
+	s := newOperatorTestServer(t)
+	response := httptest.NewRecorder()
+	s.createOperator(response, operatorRequestWithSession(
+		http.MethodPost,
+		"/v1/operators",
+		`{"username":"generated-operator"}`,
+		"admin-session",
+		true,
+	))
+	if response.Code != http.StatusCreated {
+		t.Fatalf("create operator status = %d, body %s", response.Code, response.Body.String())
+	}
+	var body struct {
+		InitialPassword    string `json:"initial_password"`
+		MustChangePassword bool   `json:"must_change_password"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	if len(body.InitialPassword) < 40 || !body.MustChangePassword {
+		t.Fatalf("generated password response has invalid state: length=%d must_change=%v", len(body.InitialPassword), body.MustChangePassword)
+	}
+	var passwordHash string
+	var mustChangePassword int
+	if err := s.db.QueryRow(
+		"SELECT password_hash, must_change_password FROM accounts WHERE username = ?",
+		"generated-operator",
+	).Scan(&passwordHash, &mustChangePassword); err != nil {
+		t.Fatal(err)
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(body.InitialPassword)); err != nil {
+		t.Fatal("generated password does not match stored password hash")
+	}
+	if mustChangePassword != 1 {
+		t.Fatalf("new operator must_change_password = %d, want 1", mustChangePassword)
+	}
+}
+
+func TestTemporaryPasswordSessionRestrictsAccess(t *testing.T) {
+	s := newOperatorTestServer(t)
+	if _, err := s.db.Exec("UPDATE accounts SET must_change_password = 1 WHERE username = 'admin'"); err != nil {
+		t.Fatal(err)
+	}
+	guard := s.mustChangePasswordGuard(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	request := func(method, path string) *httptest.ResponseRecorder {
+		response := httptest.NewRecorder()
+		guard.ServeHTTP(response, operatorRequestWithSession(method, path, "", "admin-session", true))
+		return response
+	}
+	if response := request(http.MethodGet, "/account.html"); response.Code != http.StatusNoContent {
+		t.Fatalf("account page status = %d, want %d", response.Code, http.StatusNoContent)
+	}
+	if response := request(http.MethodPost, "/v1/account/password"); response.Code != http.StatusNoContent {
+		t.Fatalf("password change status = %d, want %d", response.Code, http.StatusNoContent)
+	}
+	if response := request(http.MethodGet, "/secrets.html"); response.Code != http.StatusSeeOther ||
+		response.Header().Get("Location") != "/account.html?password=required" {
+		t.Fatalf("secrets redirect = %d to %q", response.Code, response.Header().Get("Location"))
+	}
+	if response := request(http.MethodGet, "/v1/tokens"); response.Code != http.StatusForbidden {
+		t.Fatalf("tokens API status = %d, want %d", response.Code, http.StatusForbidden)
+	}
 }
 
 func TestLegacySettingsRedirectsToSecurity(t *testing.T) {
@@ -104,6 +174,13 @@ func TestOperatorManagementIsAdminOnlyAndRevokesDeletedSessions(t *testing.T) {
 	if role != "operator" {
 		t.Fatalf("new account role = %q, want operator", role)
 	}
+	var mustChangePassword int
+	if err := s.db.QueryRow("SELECT must_change_password FROM accounts WHERE username = ?", "night-shift").Scan(&mustChangePassword); err != nil {
+		t.Fatal(err)
+	}
+	if mustChangePassword != 1 {
+		t.Fatalf("new operator must_change_password = %d, want 1", mustChangePassword)
+	}
 	if err := s.storeSession("operator-session", sessionInfo{
 		username:  "night-shift",
 		role:      "operator",
@@ -124,6 +201,9 @@ func TestOperatorManagementIsAdminOnlyAndRevokesDeletedSessions(t *testing.T) {
 		{"blocked login IP list API", s.listBlockedLoginIPs},
 		{"unblock login IP API", s.unblockLoginIP},
 		{"operator list API", s.listOperators},
+		{"operator details API", s.listOperatorDetails},
+		{"operator lock API", s.setOperatorLock},
+		{"operator TOTP reset API", s.removeOperatorTOTP},
 		{"security page", s.serveSecurity},
 		{"operators page", s.serveOperators},
 	} {
@@ -154,6 +234,9 @@ func TestOperatorManagementIsAdminOnlyAndRevokesDeletedSessions(t *testing.T) {
 		!strings.Contains(adminSecurity.Body.String(), `id="autoBlockLoginBruteforceIP"`) {
 		t.Fatalf("admin Security page status = %d, missing mTLS form", adminSecurity.Code)
 	}
+	if !strings.Contains(adminSecurity.Body.String(), `id="fileLogging"`) {
+		t.Fatal("admin Security page is missing file logging setting")
+	}
 	if strings.Contains(adminSecurity.Body.String(), `id="operatorForm"`) {
 		t.Fatal("Security page contains operator management")
 	}
@@ -162,14 +245,24 @@ func TestOperatorManagementIsAdminOnlyAndRevokesDeletedSessions(t *testing.T) {
 	s.serveOperators(adminOperators, operatorRequestWithSession(http.MethodGet, "/operators.html", "", "admin-session", true))
 	if adminOperators.Code != http.StatusOK ||
 		!strings.Contains(adminOperators.Body.String(), `<dialog id="createOperatorDialog"`) ||
-		!strings.Contains(adminOperators.Body.String(), `id="openCreateOperator"`) {
-		t.Fatalf("admin Operators page status = %d, missing operator manager", adminOperators.Code)
+		!strings.Contains(adminOperators.Body.String(), `id="openCreateOperator"`) ||
+		!strings.Contains(adminOperators.Body.String(), "/v1/operators/lock") ||
+		!strings.Contains(adminOperators.Body.String(), "/v1/operators/totp") ||
+		strings.Contains(adminOperators.Body.String(), "Remove operator") {
+		t.Fatalf("admin Operators page status = %d, missing expected controls or includes operator removal", adminOperators.Code)
 	}
 
 	adminList := httptest.NewRecorder()
 	s.listOperators(adminList, operatorRequestWithSession(http.MethodGet, "/v1/operators", "", "admin-session", true))
 	if adminList.Code != http.StatusOK || !strings.Contains(adminList.Body.String(), `"night-shift"`) {
 		t.Fatalf("admin operator list status = %d, body %s", adminList.Code, adminList.Body.String())
+	}
+	adminDetails := httptest.NewRecorder()
+	s.listOperatorDetails(adminDetails, operatorRequestWithSession(http.MethodGet, "/v1/operators/details", "", "admin-session", true))
+	if adminDetails.Code != http.StatusOK ||
+		!strings.Contains(adminDetails.Body.String(), `"locked":false`) ||
+		!strings.Contains(adminDetails.Body.String(), `"mfa_enabled":false`) {
+		t.Fatalf("admin operator details status = %d, body %s", adminDetails.Code, adminDetails.Body.String())
 	}
 
 	adminDelete := httptest.NewRecorder()
@@ -197,6 +290,137 @@ func TestOperatorManagementIsAdminOnlyAndRevokesDeletedSessions(t *testing.T) {
 	))
 	if adminDeleteSelf.Code != http.StatusNotFound {
 		t.Fatalf("delete admin status = %d, want %d", adminDeleteSelf.Code, http.StatusNotFound)
+	}
+}
+
+func TestAdminCanLockUnlockOperatorAndLockedLoginIsRejected(t *testing.T) {
+	s := newOperatorTestServer(t)
+	created := httptest.NewRecorder()
+	s.createOperator(created, operatorRequestWithSession(
+		http.MethodPost,
+		"/v1/operators",
+		`{"username":"night-shift","password":"operator-test-password","password_confirmation":"operator-test-password"}`,
+		"admin-session",
+		true,
+	))
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create operator status = %d, body %s", created.Code, created.Body.String())
+	}
+	if err := s.storeSession("operator-session", sessionInfo{
+		username:  "night-shift",
+		role:      "operator",
+		expiresAt: time.Now().Add(time.Hour),
+		ttl:       time.Hour,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	lock := httptest.NewRecorder()
+	s.setOperatorLock(lock, operatorRequestWithSession(
+		http.MethodPatch,
+		"/v1/operators/lock",
+		`{"username":"night-shift","locked":true}`,
+		"admin-session",
+		true,
+	))
+	if lock.Code != http.StatusOK || !strings.Contains(lock.Body.String(), `"locked":true`) {
+		t.Fatalf("lock operator = %d, body %s", lock.Code, lock.Body.String())
+	}
+	if _, ok := s.sessionForToken("operator-session"); ok {
+		t.Fatal("locked operator session remained valid")
+	}
+	var locked int
+	if err := s.db.QueryRow("SELECT locked FROM accounts WHERE username = 'night-shift'").Scan(&locked); err != nil {
+		t.Fatal(err)
+	}
+	if locked != 1 {
+		t.Fatalf("stored locked state = %d, want 1", locked)
+	}
+
+	login := httptest.NewRecorder()
+	s.login(login, httptest.NewRequest(
+		http.MethodPost,
+		"/v1/auth/login",
+		strings.NewReader(`{"username":"night-shift","password":"operator-test-password"}`),
+	))
+	if login.Code != http.StatusForbidden || !strings.Contains(login.Body.String(), "account is locked") {
+		t.Fatalf("locked operator login = %d, body %s", login.Code, login.Body.String())
+	}
+
+	unlock := httptest.NewRecorder()
+	s.setOperatorLock(unlock, operatorRequestWithSession(
+		http.MethodPatch,
+		"/v1/operators/lock",
+		`{"username":"night-shift","locked":false}`,
+		"admin-session",
+		true,
+	))
+	if unlock.Code != http.StatusOK || !strings.Contains(unlock.Body.String(), `"locked":false`) {
+		t.Fatalf("unlock operator = %d, body %s", unlock.Code, unlock.Body.String())
+	}
+	login = httptest.NewRecorder()
+	s.login(login, httptest.NewRequest(
+		http.MethodPost,
+		"/v1/auth/login",
+		strings.NewReader(`{"username":"night-shift","password":"operator-test-password"}`),
+	))
+	if login.Code != http.StatusOK {
+		t.Fatalf("unlocked operator login = %d, body %s", login.Code, login.Body.String())
+	}
+}
+
+func TestAdminCanRemoveOperatorTOTPAndRevokeSessions(t *testing.T) {
+	s := newOperatorTestServer(t)
+	created := httptest.NewRecorder()
+	s.createOperator(created, operatorRequestWithSession(
+		http.MethodPost,
+		"/v1/operators",
+		`{"username":"night-shift","password":"operator-test-password","password_confirmation":"operator-test-password"}`,
+		"admin-session",
+		true,
+	))
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create operator status = %d, body %s", created.Code, created.Body.String())
+	}
+	if _, err := s.db.Exec(
+		"UPDATE accounts SET totp_secret = 'test-secret', totp_enabled = 1, totp_recovery_codes = '[\"test-hash\"]' WHERE username = 'night-shift'",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.storeSession("operator-session", sessionInfo{
+		username:  "night-shift",
+		role:      "operator",
+		expiresAt: time.Now().Add(time.Hour),
+		ttl:       time.Hour,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	response := httptest.NewRecorder()
+	s.removeOperatorTOTP(response, operatorRequestWithSession(
+		http.MethodDelete,
+		"/v1/operators/totp",
+		`{"username":"night-shift"}`,
+		"admin-session",
+		true,
+	))
+	if response.Code != http.StatusOK ||
+		!strings.Contains(response.Body.String(), `"mfa_configured":false`) {
+		t.Fatalf("remove operator TOTP = %d, body %s", response.Code, response.Body.String())
+	}
+	var secret sql.NullString
+	var enabled int
+	var recoveryCodes string
+	if err := s.db.QueryRow(
+		"SELECT totp_secret, totp_enabled, totp_recovery_codes FROM accounts WHERE username = 'night-shift'",
+	).Scan(&secret, &enabled, &recoveryCodes); err != nil {
+		t.Fatal(err)
+	}
+	if secret.Valid || enabled != 0 || recoveryCodes != "[]" {
+		t.Fatalf("operator TOTP state = secret:%v enabled:%d recovery:%q", secret, enabled, recoveryCodes)
+	}
+	if _, ok := s.sessionForToken("operator-session"); ok {
+		t.Fatal("operator session remained valid after TOTP removal")
 	}
 }
 

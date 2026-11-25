@@ -131,6 +131,13 @@ func TestInitializeDatabaseMigratesExistingAccountsToAdmin(t *testing.T) {
 	if role != "admin" {
 		t.Fatalf("migrated account role = %q, want admin", role)
 	}
+	var locked int
+	if err := db.QueryRow("SELECT locked FROM accounts WHERE username = 'existing-admin'").Scan(&locked); err != nil {
+		t.Fatal(err)
+	}
+	if locked != 0 {
+		t.Fatalf("migrated account locked state = %d, want unlocked", locked)
+	}
 	var totpEnabled int
 	var totpSecret sql.NullString
 	var recoveryCodes string
@@ -286,7 +293,7 @@ func TestPageTemplatesRenderStandalonePages(t *testing.T) {
 		{"secrets.gohtml", []string{`id="secret-groups"`, `id="secret-list"`, "/v1/secrets-browser", `get('group')`}},
 		{"token.gohtml", []string{`id="tokens"`, `id="openCreateToken"`, `id="createTokenDialog"`, `id="createToken"`, `id="closeCreateToken"`, `id="finishCreateToken"`, `<select id="tokenLifetimeDays" name="expires_in_days" required>`, `<option value="30" selected>30 days</option>`, `<option value="60">60 days</option>`, `<option value="90">90 days</option>`, `<option value="180">180 days</option>`, `<option value="365">365 days</option>`, `id="tokenCopyPanel"`, `id="copyToken"`, "downloadClientCert", "downloadClientKey", "token-actions", "Sample vault-backup command", `id="sampleCommand"`, "window.confirm", "addEventListener('beforeunload'", "async function refreshTokens()"}},
 		{"security.gohtml", []string{`id="settingsForm"`, `id="enforceMTLS"`, `id="autoBlockLoginBruteforceIP"`, `id="fileLogging"`, `id="viewBlockedIPs"`, `id="blockedIPsDialog"`}},
-		{"operators.gohtml", []string{`id="openCreateOperator"`, `<dialog id="createOperatorDialog"`, `id="closeCreateOperator"`, `id="operatorForm"`, `id="operatorUsername"`, "showModal()", "/v1/operators"}},
+		{"operators.gohtml", []string{`id="openCreateOperator"`, `<dialog id="createOperatorDialog"`, `id="closeCreateOperator"`, `id="operatorForm"`, `id="operatorUsername"`, "setOperatorLock", "removeOperatorMFA", "/v1/operators"}},
 		{"account.gohtml", []string{`id="totpSetupPanel"`, `id="openTOTPSetup"`, `>Setup 2FA</button>`, `<dialog id="totpSetupDialog"`, `id="closeTOTPSetup"`, `id="setupTOTP"`, `id="totpQRCode"`, `id="enableForm"`, `id="recoveryCodesPanel"`, `id="passwordForm"`, `id="currentPassword"`, `id="newPassword"`, `id="repeatNewPassword"`, "/v1/account/password", "/qrcode.js", "/v1/account/totp"}},
 		{"audit.gohtml", []string{`id="events"`, `href="/audits.html"`, "/v1/audit", "create_token", "revoke_token", "issue_certificate", "rotate_certificate", "update_settings", "block_login_ip", "unblock_login_ip", "async function refresh()"}},
 		{"401.gohtml", []string{"401", "Go to login"}},

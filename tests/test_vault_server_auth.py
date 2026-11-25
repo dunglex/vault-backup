@@ -122,19 +122,23 @@ def main() -> None:
             b'<dialog id="createOperatorDialog"' in operators_page
             and b'id="openCreateOperator"' in operators_page
             and b'id="operatorForm"' in operators_page
+            and b'id="operatorPassword"' not in operators_page
+            and b'id="acknowledgeOperatorPassword"' in operators_page
             and b'id="logout"' not in operators_page,
             "popup operator creation form",
         )
-        status, _ = server.client.json(
+        status, create_result = server.client.json(
             "POST",
             f"{server.https_url}/v1/operators",
-            data={
-                "username": "night-shift",
-                "password": "operator-test-password",
-                "password_confirmation": "operator-test-password",
-            },
+            data={"username": "night-shift"},
         )
         assert_status(201, status, "create operator as admin")
+        temporary_password = create_result.get("initial_password")
+        require(
+            isinstance(temporary_password, str) and len(temporary_password) >= 40
+            and create_result.get("must_change_password") is True,
+            "return a one-time generated operator password",
+        )
         status, operators = server.client.json("GET", f"{server.https_url}/v1/operators")
         assert_status(200, status, "list operators as admin")
         require(operators == {"operators": ["night-shift"]}, "operator listing")
@@ -143,12 +147,35 @@ def main() -> None:
         status, _ = operator_client.json(
             "POST",
             f"{server.https_url}/v1/auth/login",
-            data={"username": "night-shift", "password": "operator-test-password"},
+            data={"username": "night-shift", "password": temporary_password},
         )
         assert_status(200, status, "login as operator")
         status, operator_session = operator_client.json("GET", f"{server.https_url}/v1/session")
         assert_status(200, status, "read operator session")
-        require(operator_session == {"authenticated": True, "role": "operator"}, "operator session role")
+        require(
+            operator_session == {
+                "authenticated": True,
+                "role": "operator",
+                "must_change_password": True,
+            },
+            "operator session requires a password change",
+        )
+        status, forced_password_page = operator_client.request("GET", f"{server.https_url}/secrets.html")
+        assert_status(200, status, "redirect temporary-password session to account page")
+        require(b'id="passwordChangeRequiredNotice"' in forced_password_page, "show required password-change notice")
+        status, _ = operator_client.json(
+            "POST",
+            f"{server.https_url}/v1/account/password",
+            data={
+                "current_password": temporary_password,
+                "new_password": "operator-new-password",
+                "repeat_new_password": "operator-new-password",
+            },
+        )
+        assert_status(200, status, "change temporary operator password")
+        status, operator_session = operator_client.json("GET", f"{server.https_url}/v1/session")
+        assert_status(200, status, "read operator session after password change")
+        require(operator_session["must_change_password"] is False, "clear first-login password requirement")
         status, _ = operator_client.request("GET", f"{server.https_url}/v1/settings")
         assert_status(403, status, "deny operator settings API access")
         status, _ = operator_client.json(
@@ -173,6 +200,36 @@ def main() -> None:
         assert_status(200, status, "allow operator token management")
         status, _ = operator_client.request("GET", f"{server.https_url}/v1/audit")
         assert_status(200, status, "allow operator audit access")
+        status, operator_details = server.client.json(
+            "GET",
+            f"{server.https_url}/v1/operators/details",
+        )
+        assert_status(200, status, "read operator lock and MFA status")
+        require(
+            operator_details["operators"] == [{
+                "username": "night-shift",
+                "locked": False,
+                "mfa_enabled": False,
+                "mfa_configured": False,
+            }],
+            "operator status",
+        )
+        status, lock_result = server.client.json(
+            "PATCH",
+            f"{server.https_url}/v1/operators/lock",
+            data={"username": "night-shift", "locked": True},
+        )
+        assert_status(200, status, "lock operator as admin")
+        require(lock_result["locked"] is True, "operator lock status")
+        status, _ = operator_client.request("GET", f"{server.https_url}/v1/session")
+        assert_status(401, status, "revoke locked operator session")
+        status, unlock_result = server.client.json(
+            "PATCH",
+            f"{server.https_url}/v1/operators/lock",
+            data={"username": "night-shift", "locked": False},
+        )
+        assert_status(200, status, "unlock operator as admin")
+        require(unlock_result["locked"] is False, "operator unlock status")
         status, _ = server.client.json(
             "DELETE",
             f"{server.https_url}/v1/operators",
@@ -312,6 +369,7 @@ def main() -> None:
                 "enforce_mtls": False,
                 "auto_block_login_bruteforce_ip": False,
                 "enforce_mfa": False,
+                "file_logging": False,
             },
             "default security settings",
         )

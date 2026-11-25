@@ -69,10 +69,11 @@ type server struct {
 }
 
 type sessionInfo struct {
-	username  string
-	role      string
-	expiresAt time.Time
-	ttl       time.Duration
+	username           string
+	role               string
+	expiresAt          time.Time
+	ttl                time.Duration
+	mustChangePassword bool
 }
 
 type accountRequest struct {
@@ -369,8 +370,11 @@ func main() {
 	mux.HandleFunc("GET /v1/settings/blocked-login-ips", s.listBlockedLoginIPs)
 	mux.HandleFunc("DELETE /v1/settings/blocked-login-ips/{ip}", s.unblockLoginIP)
 	mux.HandleFunc("GET /v1/operators", s.listOperators)
+	mux.HandleFunc("GET /v1/operators/details", s.listOperatorDetails)
 	mux.HandleFunc("POST /v1/operators", s.createOperator)
 	mux.HandleFunc("DELETE /v1/operators", s.deleteOperator)
+	mux.HandleFunc("PATCH /v1/operators/lock", s.setOperatorLock)
+	mux.HandleFunc("DELETE /v1/operators/totp", s.removeOperatorTOTP)
 	mux.HandleFunc("GET /v1/account/totp", s.getAccountTOTP)
 	mux.HandleFunc("POST /v1/account/totp/setup", s.setupAccountTOTP)
 	mux.HandleFunc("POST /v1/account/totp/enable", s.enableAccountTOTP)
@@ -863,11 +867,11 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 
 	var hash, role string
 	var totpSecret sql.NullString
-	var totpEnabled int
+	var totpEnabled, locked, mustChangePassword int
 	if err := s.db.QueryRow(
-		"SELECT password_hash, role, totp_secret, totp_enabled FROM accounts WHERE username = ?",
+		"SELECT password_hash, role, totp_secret, totp_enabled, locked, must_change_password FROM accounts WHERE username = ?",
 		req.Username,
-	).Scan(&hash, &role, &totpSecret, &totpEnabled); err != nil {
+	).Scan(&hash, &role, &totpSecret, &totpEnabled, &locked, &mustChangePassword); err != nil {
 		s.recordLoginFailure(r, "web")
 		s.recordAuditEvent(r, "login", "failure", req.Username, "web", "", "invalid_credentials")
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid username or password"})
@@ -877,6 +881,11 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		s.recordLoginFailure(r, "web")
 		s.recordAuditEvent(r, "login", "failure", req.Username, "web", "", "invalid_credentials")
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid username or password"})
+		return
+	}
+	if locked == 1 {
+		s.recordAuditEvent(r, "login", "failure", req.Username, "web", "", "account_locked")
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "account is locked"})
 		return
 	}
 	enforceMFA, err := s.mfaEnforcementEnabled()
@@ -919,10 +928,11 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		sessionTTL = totpSessionTTL
 	}
 	session := sessionInfo{
-		username:  req.Username,
-		role:      role,
-		expiresAt: time.Now().Add(sessionTTL),
-		ttl:       sessionTTL,
+		username:           req.Username,
+		role:               role,
+		expiresAt:          time.Now().Add(sessionTTL),
+		ttl:                sessionTTL,
+		mustChangePassword: mustChangePassword == 1,
 	}
 	if err := s.storeSession(token, session); err != nil {
 		s.recordAuditEvent(r, "login", "failure", req.Username, "web", "", "session_storage_error")
@@ -944,7 +954,19 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 	})
 	if mfaSetupRequired {
 		s.recordAuditEvent(r, "login", "challenge", req.Username, "web", "", "mfa_setup_required")
-		writeJSON(w, http.StatusOK, map[string]any{"token": token, "requires_mfa_setup": true})
+		writeJSON(w, http.StatusOK, map[string]any{
+			"token":                token,
+			"requires_mfa_setup":   true,
+			"must_change_password": mustChangePassword == 1,
+		})
+		return
+	}
+	if mustChangePassword == 1 {
+		s.recordAuditEvent(r, "login", "challenge", req.Username, "web", "", "password_change_required")
+		writeJSON(w, http.StatusOK, map[string]any{
+			"token":                token,
+			"must_change_password": true,
+		})
 		return
 	}
 	s.recordAuditEvent(r, "login", "success", req.Username, "web", "", "")
@@ -973,11 +995,11 @@ func (s *server) loginLDAP(w http.ResponseWriter, r *http.Request) {
 	}
 	var hash, role string
 	var totpSecret sql.NullString
-	var totpEnabled int
+	var totpEnabled, locked, mustChangePassword int
 	if err := s.db.QueryRow(
-		"SELECT password_hash, role, totp_secret, totp_enabled FROM accounts WHERE username = ?",
+		"SELECT password_hash, role, totp_secret, totp_enabled, locked, must_change_password FROM accounts WHERE username = ?",
 		username,
-	).Scan(&hash, &role, &totpSecret, &totpEnabled); err != nil {
+	).Scan(&hash, &role, &totpSecret, &totpEnabled, &locked, &mustChangePassword); err != nil {
 		s.recordLoginFailure(r, "api")
 		s.recordAuditEvent(r, "login", "failure", username, "api", "", "invalid_credentials")
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid username or password"})
@@ -987,6 +1009,19 @@ func (s *server) loginLDAP(w http.ResponseWriter, r *http.Request) {
 		s.recordLoginFailure(r, "api")
 		s.recordAuditEvent(r, "login", "failure", username, "api", "", "invalid_credentials")
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid username or password"})
+		return
+	}
+	if locked == 1 {
+		s.recordAuditEvent(r, "login", "failure", username, "api", "", "account_locked")
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "account is locked"})
+		return
+	}
+	if mustChangePassword == 1 {
+		s.recordAuditEvent(r, "login", "challenge", username, "api", "", "password_change_required")
+		writeJSON(w, http.StatusForbidden, map[string]any{
+			"error":                "password change is required through web login",
+			"must_change_password": true,
+		})
 		return
 	}
 	enforceMFA, err := s.mfaEnforcementEnabled()
@@ -2183,5 +2218,9 @@ func (s *server) webSession(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "role": session.role})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"authenticated":        true,
+		"role":                 session.role,
+		"must_change_password": session.mustChangePassword,
+	})
 }

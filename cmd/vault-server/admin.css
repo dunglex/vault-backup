@@ -346,17 +346,31 @@ textarea {
 
 .filters {
   align-items: end;
+  background: var(--surface-muted);
+  border: 0.1rem solid var(--border);
+  border-radius: 0.6rem;
   display: grid;
-  gap: 1rem;
-  grid-template-columns: repeat(7, minmax(12rem, 1fr));
+  gap: 1.2rem;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  margin-bottom: 1.6rem;
+  padding: 1.6rem;
 }
 
 .filters label {
   margin: 0;
+  min-width: 0;
+}
+
+.filters input,
+.filters select {
+  margin: 0.4rem 0 0;
+  width: 100%;
 }
 
 .filters button {
+  align-self: end;
   margin-bottom: 0;
+  width: 100%;
 }
 
 .table-wrap {
@@ -532,7 +546,7 @@ pre {
 
 @media (max-width: 80rem) {
   .filters {
-    grid-template-columns: repeat(3, minmax(14rem, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 

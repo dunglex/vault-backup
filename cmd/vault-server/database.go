@@ -101,6 +101,8 @@ func initializeDatabase(db *sql.DB) error {
 			username TEXT PRIMARY KEY,
 			password_hash TEXT NOT NULL,
 			role TEXT NOT NULL DEFAULT 'admin' CHECK (role IN ('admin', 'operator')),
+			locked INTEGER NOT NULL DEFAULT 0 CHECK (locked IN (0, 1)),
+			must_change_password INTEGER NOT NULL DEFAULT 0 CHECK (must_change_password IN (0, 1)),
 			totp_secret TEXT,
 			totp_enabled INTEGER NOT NULL DEFAULT 0 CHECK (totp_enabled IN (0, 1)),
 			totp_recovery_codes TEXT NOT NULL DEFAULT '[]',
@@ -161,6 +163,12 @@ func initializeDatabase(db *sql.DB) error {
 	if err := ensureAccountTOTPColumns(db); err != nil {
 		return err
 	}
+	if err := ensureAccountLockColumn(db); err != nil {
+		return err
+	}
+	if err := ensureMustChangePasswordColumn(db); err != nil {
+		return err
+	}
 	if err := allowDuplicateAPITokenNames(db); err != nil {
 		return err
 	}
@@ -201,6 +209,30 @@ func ensureAccountRoleColumn(db *sql.DB) error {
 		return nil
 	}
 	_, err = db.Exec("ALTER TABLE accounts ADD COLUMN role TEXT NOT NULL DEFAULT 'admin' CHECK (role IN ('admin', 'operator'))")
+	return err
+}
+
+func ensureAccountLockColumn(db *sql.DB) error {
+	columns, err := accountColumns(db)
+	if err != nil {
+		return err
+	}
+	if columns["locked"] {
+		return nil
+	}
+	_, err = db.Exec("ALTER TABLE accounts ADD COLUMN locked INTEGER NOT NULL DEFAULT 0 CHECK (locked IN (0, 1))")
+	return err
+}
+
+func ensureMustChangePasswordColumn(db *sql.DB) error {
+	columns, err := accountColumns(db)
+	if err != nil {
+		return err
+	}
+	if columns["must_change_password"] {
+		return nil
+	}
+	_, err = db.Exec("ALTER TABLE accounts ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0 CHECK (must_change_password IN (0, 1))")
 	return err
 }
 

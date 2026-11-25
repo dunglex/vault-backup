@@ -16,11 +16,47 @@ func (s *server) middleware(handler http.Handler) http.Handler {
 	handler = http.MaxBytesHandler(handler, 1<<20)        // Limit incoming request bodies to 1 MiB.
 	handler = s.setupLockAPIs(handler)                    // Lock setup APIs after the setup window expires.
 	handler = s.apiClientCertificateGuard(handler)        // Enforce client-certificate rules on API requests.
+	handler = s.mustChangePasswordGuard(handler)          // Restrict temporary-password sessions to account recovery.
 	handler = s.mfaEnrollmentGuard(handler)               // Restrict accounts until required MFA is enrolled.
 	handler = s.hostOriginGuard(handler)                  // Allow only configured hosts and origins.
 	handler = withRequestTimeout(handler, requestTimeout) // Stop handlers that exceed the request time limit.
 	handler = s.securityHeaders(handler)                  // Add standard security headers to responses.
 	return handler
+}
+
+func (s *server) mustChangePasswordGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		session, ok := s.sessionFromRequest(r)
+		if !ok || !session.mustChangePassword || allowedPasswordChangeRequest(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/v1/") {
+			writeJSON(w, http.StatusForbidden, map[string]any{
+				"error":                "password change is required",
+				"must_change_password": true,
+				"change_password_url":  "/account.html?password=required",
+			})
+			return
+		}
+		http.Redirect(w, r, "/account.html?password=required", http.StatusSeeOther)
+	})
+}
+
+func allowedPasswordChangeRequest(r *http.Request) bool {
+	if r.Method == http.MethodGet {
+		switch r.URL.Path {
+		case "/account", "/account.html", "/v1/session", "/normalize.css", "/miligram.css", "/admin.css", "/qrcode.js":
+			return true
+		}
+	}
+	if r.Method == http.MethodPost {
+		switch r.URL.Path {
+		case "/v1/account/password", "/v1/auth/logout":
+			return true
+		}
+	}
+	return false
 }
 
 func (s *server) mfaEnrollmentGuard(next http.Handler) http.Handler {
@@ -80,7 +116,7 @@ func allowedMFAEnrollmentRequest(r *http.Request) bool {
 	}
 	if r.Method == http.MethodPost {
 		switch r.URL.Path {
-		case "/v1/auth/logout", "/v1/account/totp/setup", "/v1/account/totp/enable":
+		case "/v1/auth/logout", "/v1/account/password", "/v1/account/totp/setup", "/v1/account/totp/enable":
 			return true
 		}
 	}

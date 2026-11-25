@@ -81,6 +81,10 @@ form.addEventListener('submit', async event => {
       totpCode.focus();
       return;
     }
+    if (body.must_change_password) {
+      location.assign(`/account.html?password=required${body.requires_mfa_setup ? '&mfa=required' : ''}`);
+      return;
+    }
     if (body.requires_mfa_setup) {
       location.assign('/account.html?mfa=required');
       return;
