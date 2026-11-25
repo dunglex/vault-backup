@@ -33,7 +33,7 @@
 <main class="panel auth-card">
     <h1 class="brand">Vault Server</h1>
     <p class="muted">Sign in to manage secrets and API tokens.</p>
-    <p class="notice" role="note">Failed sign-in attempts are recorded with your IP address. Repeated failed attempts may result in this IP being blocked from signing in.</p>
+    {{if .AutoBlockLoginIPEnabled}}<p class="notice" role="note">Failed sign-in attempts are recorded with your IP address. Repeated failed attempts may result in this IP being blocked from signing in.</p>{{end}}
     <div id="error" class="notice" role="alert"></div>
     <form id="loginForm">
       <label>Username<input name="username" autocomplete="username" required></label>

@@ -304,11 +304,14 @@ func TestPageTemplatesRenderStandalonePages(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			data := any(nil)
-			if test.name == "index.gohtml" {
+			switch test.name {
+			case "index.gohtml":
 				data = map[string]string{"Destination": "/secrets.html"}
-			} else if test.name == "setup.gohtml" {
+			case "setup.gohtml":
 				data = map[string]bool{"ACMEAvailable": true}
-			} else if test.name == "secret.gohtml" || test.name == "secrets.gohtml" || test.name == "token.gohtml" || test.name == "audit.gohtml" || test.name == "operators.gohtml" || test.name == "account.gohtml" {
+			case "login.gohtml":
+				data = map[string]bool{"AutoBlockLoginIPEnabled": true}
+			case "secret.gohtml", "secrets.gohtml", "token.gohtml", "audit.gohtml", "operators.gohtml", "account.gohtml":
 				data = map[string]bool{"IsAdmin": true}
 			}
 			var output bytes.Buffer
@@ -397,12 +400,28 @@ func TestIndexNavigatesByServerState(t *testing.T) {
 }
 
 func TestWebPagesUseExpectedStatusAndContent(t *testing.T) {
-	s := &server{adminName: "admin", sessions: map[string]sessionInfo{}}
+	s := newOperatorTestServer(t)
 
 	login := httptest.NewRecorder()
 	s.serveLogin(login, httptest.NewRequest(http.MethodGet, "/login", nil))
 	if login.Code != http.StatusOK || !strings.Contains(login.Body.String(), `id="loginForm"`) {
 		t.Fatalf("login page returned status %d or did not contain its form", login.Code)
+	}
+	warning := "Failed sign-in attempts are recorded with your IP address."
+	if strings.Contains(login.Body.String(), warning) {
+		t.Fatal("login warning is shown while automatic IP blocking is disabled")
+	}
+	if _, err := s.db.Exec(
+		"INSERT INTO server_settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+		autoBlockLoginIPSetting,
+		"true",
+	); err != nil {
+		t.Fatalf("enable automatic IP blocking: %v", err)
+	}
+	login = httptest.NewRecorder()
+	s.serveLogin(login, httptest.NewRequest(http.MethodGet, "/login", nil))
+	if login.Code != http.StatusOK || !strings.Contains(login.Body.String(), warning) {
+		t.Fatal("login warning is missing while automatic IP blocking is enabled")
 	}
 
 	unauthorized := httptest.NewRecorder()

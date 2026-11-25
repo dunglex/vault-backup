@@ -2094,7 +2094,15 @@ func (s *server) serveLogin(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/secrets.html", http.StatusSeeOther)
 		return
 	}
-	s.renderPage(w, "login.gohtml", http.StatusOK, nil)
+	autoBlockLoginIPEnabled, err := s.autoBlockLoginIPEnabled()
+	if err != nil {
+		log.Printf("ERROR: could not read automatic login IP blocking setting: %v", err)
+		http.Error(w, "could not load login page", http.StatusInternalServerError)
+		return
+	}
+	s.renderPage(w, "login.gohtml", http.StatusOK, map[string]bool{
+		"AutoBlockLoginIPEnabled": autoBlockLoginIPEnabled,
+	})
 }
 
 func (s *server) serveSecrets(w http.ResponseWriter, r *http.Request) {
