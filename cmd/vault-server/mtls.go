@@ -417,8 +417,23 @@ func (s *server) issueAPITokenCertificate(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid token id"})
 		return
 	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not issue client certificate"})
+		return
+	}
+	defer tx.Rollback()
+	var mtlsSetting string
+	if err := tx.QueryRow("SELECT value FROM server_settings WHERE key = 'enforce_mtls'").Scan(&mtlsSetting); err != nil && err != sql.ErrNoRows {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read mTLS settings"})
+		return
+	}
+	if mtlsSetting != "true" {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "client certificates are only available when mutual TLS enforcement is enabled"})
+		return
+	}
 	var tokenExpiresAt int64
-	if err := s.db.QueryRow(
+	if err := tx.QueryRow(
 		"SELECT expires_at FROM api_tokens WHERE id = ? AND revoked_at IS NULL AND expires_at > ?",
 		id, time.Now().Unix(),
 	).Scan(&tokenExpiresAt); err != nil {
@@ -435,12 +450,6 @@ func (s *server) issueAPITokenCertificate(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not issue client certificate"})
 		return
 	}
-	tx, err := s.db.Begin()
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not issue client certificate"})
-		return
-	}
-	defer tx.Rollback()
 	now := time.Now().Unix()
 	if _, err := tx.Exec(
 		"UPDATE managed_client_certificates SET revoked_at = ? WHERE token_id = ? AND revoked_at IS NULL",

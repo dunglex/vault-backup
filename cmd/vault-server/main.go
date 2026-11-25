@@ -1271,6 +1271,26 @@ func (s *server) createAPIToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
+
+	// Check if mTLS enforcement is enabled in the server settings
+	var mtlsSetting string
+	if err := tx.QueryRow("SELECT value FROM server_settings WHERE key = 'enforce_mtls'").Scan(&mtlsSetting); err != nil && err != sql.ErrNoRows {
+		s.recordAuditEvent(r, "create_token", "failure", s.auditRequestActor(r, "web"), "web", "api-token", "settings_error")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read mTLS settings"})
+		return
+	}
+	enforceMTLS := mtlsSetting == "true"
+	var nameExists bool
+	if err := tx.QueryRow("SELECT EXISTS(SELECT 1 FROM api_tokens WHERE name = ?)", req.Name).Scan(&nameExists); err != nil {
+		s.recordAuditEvent(r, "create_token", "failure", s.auditRequestActor(r, "web"), "web", "api-token", "storage_error")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not check API token name"})
+		return
+	}
+	if nameExists {
+		s.recordAuditEvent(r, "create_token", "failure", s.auditRequestActor(r, "web"), "web", "api-token", "duplicate_name")
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "an API token with this name already exists"})
+		return
+	}
 	result, err := tx.Exec(
 		"INSERT INTO api_tokens(name, token_hash, created_at, expires_at) VALUES (?, ?, ?, ?)",
 		req.Name,
@@ -1289,16 +1309,19 @@ func (s *server) createAPIToken(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not create API token"})
 		return
 	}
-	issued, err := s.issueClientCertificate(id, expiresAt)
-	if err != nil {
-		s.recordAuditEvent(r, "create_token", "failure", s.auditRequestActor(r, "web"), "web", "api-token", "certificate_error")
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not issue client certificate"})
-		return
-	}
-	if err := s.saveClientCertificate(tx, id, issued); err != nil {
-		s.recordAuditEvent(r, "create_token", "failure", s.auditRequestActor(r, "web"), "web", "api-token", "certificate_storage_error")
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not save client certificate"})
-		return
+	var issued issuedClientCertificate
+	if enforceMTLS {
+		issued, err = s.issueClientCertificate(id, expiresAt)
+		if err != nil {
+			s.recordAuditEvent(r, "create_token", "failure", s.auditRequestActor(r, "web"), "web", "api-token", "certificate_error")
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not issue client certificate"})
+			return
+		}
+		if err := s.saveClientCertificate(tx, id, issued); err != nil {
+			s.recordAuditEvent(r, "create_token", "failure", s.auditRequestActor(r, "web"), "web", "api-token", "certificate_storage_error")
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not save client certificate"})
+			return
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		s.recordAuditEvent(r, "create_token", "failure", s.auditRequestActor(r, "web"), "web", "api-token", "storage_error")
@@ -1306,16 +1329,19 @@ func (s *server) createAPIToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.recordAuditEvent(r, "create_token", "success", s.auditRequestActor(r, "web"), "web", "api-token:"+strconv.FormatInt(id, 10), "")
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"id":                            id,
-		"name":                          req.Name,
-		"token":                         token,
-		"created_at":                    createdAt.UTC().Format(time.RFC3339),
-		"expires_at":                    expiresAt.UTC().Format(time.RFC3339),
-		"client_certificate":            issued.Certificate,
-		"client_private_key":            issued.PrivateKey,
-		"client_certificate_expires_at": issued.ExpiresAt.UTC().Format(time.RFC3339),
-	})
+	response := map[string]any{
+		"id":         id,
+		"name":       req.Name,
+		"token":      token,
+		"created_at": createdAt.UTC().Format(time.RFC3339),
+		"expires_at": expiresAt.UTC().Format(time.RFC3339),
+	}
+	if enforceMTLS {
+		response["client_certificate"] = issued.Certificate
+		response["client_private_key"] = issued.PrivateKey
+		response["client_certificate_expires_at"] = issued.ExpiresAt.UTC().Format(time.RFC3339)
+	}
+	writeJSON(w, http.StatusCreated, response)
 }
 
 func (s *server) listAPITokens(w http.ResponseWriter, r *http.Request) {
@@ -2084,7 +2110,17 @@ func (s *server) serveProtectedPage(w http.ResponseWriter, r *http.Request, name
 		s.renderPage(w, "401.gohtml", http.StatusUnauthorized, nil)
 		return
 	}
-	s.renderPage(w, name, http.StatusOK, map[string]bool{"IsAdmin": session.role == "admin"})
+	data := map[string]bool{"IsAdmin": session.role == "admin"}
+	if name == "token.gohtml" {
+		enforced, err := s.mtlsSettings()
+		if err != nil {
+			log.Printf("ERROR: could not read mTLS settings for token page: %v", err)
+			http.Error(w, "could not read mTLS settings", http.StatusInternalServerError)
+			return
+		}
+		data["EnforceMTLS"] = enforced
+	}
+	s.renderPage(w, name, http.StatusOK, data)
 }
 
 func (s *server) setupLocked() bool {

@@ -65,13 +65,30 @@ def main() -> None:
         )
         status, token_page = server.client.request("GET", f"{server.https_url}/tokens.html")
         assert_status(200, status, "open canonical API tokens page")
+        require(b"const enforceMTLS = false;" in token_page, "token page receives disabled mTLS setting")
         require(b'<dialog id="createTokenDialog"' in token_page, "token creation dialog")
         require(b'id="openCreateToken"' in token_page, "token page add button")
         require(
             b'id="copyToken"' in token_page
-            and b'id="downloadClientCert"' in token_page
-            and b'id="downloadClientKey"' in token_page,
-            "token and certificate controls",
+            and b'id="downloadClientCert"' not in token_page
+            and b'id="downloadClientKey"' not in token_page
+            and b"certificateButton.id = 'downloadClientCert'" in token_page
+            and b"privateKeyButton.id = 'downloadClientKey'" in token_page,
+            "render certificate download buttons only after credentials are issued",
+        )
+        require(
+            b"actions.className = 'row-actions token-actions'" in token_page,
+            "group certificate actions immediately before revoke",
+        )
+        require(
+            b'id="credentialDownloads" class="row-actions" hidden' in token_page,
+            "hide certificate downloads until credentials are issued",
+        )
+        status, admin_css = server.client.request("GET", f"{server.https_url}/admin.css")
+        assert_status(200, status, "load admin styles")
+        require(
+            b"[hidden]" in admin_css and b"display: none !important;" in admin_css,
+            "preserve hidden state when a component has display styling",
         )
         require(
             b"Sample vault-backup command" in token_page and b'id="sampleCommand"' in token_page,
@@ -225,11 +242,18 @@ def main() -> None:
         expires = datetime.fromisoformat(token_data["expires_at"].replace("Z", "+00:00"))
         require(int((expires - created).total_seconds()) == 90 * 86400, "API token lifetime")
         print("PASS: create API token with selected lifetime")
-        cert_expiry = datetime.fromisoformat(token_data["client_certificate_expires_at"].replace("Z", "+00:00"))
-        require(cert_expiry == expires, "client certificate expires with API token")
-        require("BEGIN CERTIFICATE" in token_data["client_certificate"], "client certificate returned on creation")
-        require("BEGIN PRIVATE KEY" in token_data["client_private_key"], "client private key returned on creation")
-        print("PASS: create token-linked client certificate with matching expiry")
+        require(
+            all(
+                field not in token_data
+                for field in ("client_certificate", "client_private_key", "client_certificate_expires_at")
+            ),
+            "token creation omits client credentials when mTLS is disabled",
+        )
+        status, _ = server.client.json(
+            "POST",
+            f"{server.https_url}/v1/tokens/{token_id}/certificate",
+        )
+        assert_status(409, status, "reject certificate issuance while mTLS is disabled")
         _, token_audit = server.client.json(
             "GET",
             f"{server.https_url}/v1/audit?action=create_token&q=api-token%3A{token_id}",
@@ -246,28 +270,29 @@ def main() -> None:
         require(api_token not in str(token_audit), "raw token leaked into creation audit")
         print("PASS: audit API token creation without storing raw token")
 
-        duplicate_token, duplicate_token_id, default_token_data = server.create_api_token("backup-agent")
-        require(duplicate_token_id != token_id, "duplicate-name API token IDs must be distinct")
+        status, duplicate_name = server.client.json(
+            "POST",
+            f"{server.https_url}/v1/tokens",
+            data={"name": "backup-agent"},
+        )
+        assert_status(409, status, "reject duplicate API token name")
+        require("already exists" in duplicate_name["error"], "explain duplicate API token name")
+        duplicate_token, duplicate_token_id, default_token_data = server.create_api_token("backup-agent-secondary")
         default_created = datetime.fromisoformat(default_token_data["created_at"].replace("Z", "+00:00"))
         default_expires = datetime.fromisoformat(default_token_data["expires_at"].replace("Z", "+00:00"))
         require(int((default_expires - default_created).total_seconds()) == 30 * 86400, "default API token lifetime")
+        require("client_certificate" not in default_token_data, "default token has no certificate while mTLS is disabled")
         _, max_token_id, max_token_data = server.create_api_token("max-expiry-token", expires_in_days=365)
         max_created = datetime.fromisoformat(max_token_data["created_at"].replace("Z", "+00:00"))
         max_expires = datetime.fromisoformat(max_token_data["expires_at"].replace("Z", "+00:00"))
         require(int((max_expires - max_created).total_seconds()) == 365 * 86400, "one-year API token maximum")
-        require(max_token_data["client_certificate_expires_at"] == max_token_data["expires_at"], "one-year certificate expiry")
-        status, replacement = server.client.json(
-            "POST",
-            f"{server.https_url}/v1/tokens/{max_token_id}/certificate",
-        )
-        assert_status(201, status, "replace certificate for existing token")
-        require(replacement["client_certificate_expires_at"] == max_token_data["expires_at"], "replacement certificate matches token expiry")
+        require("client_certificate" not in max_token_data, "max-lifetime token has no certificate while mTLS is disabled")
         _, tokens = server.client.json("GET", f"{server.https_url}/v1/tokens")
         require(
-            sum(token["name"] == "backup-agent" for token in tokens) == 2,
-            "multiple API tokens with the same name",
+            sum(token["name"] == "backup-agent" for token in tokens) == 1,
+            "keep one token per name",
         )
-        print("PASS: create multiple API tokens with the same name")
+        print("PASS: reject duplicate API token names")
 
         api_headers = {"X-Vault-Token": api_token}
         status, _ = server.client.json(
@@ -344,6 +369,36 @@ def main() -> None:
             data={"enforce_mtls": True},
         )
         assert_status(200, status, "enable API mTLS")
+        status, enabled_token_page = server.client.request("GET", f"{server.https_url}/tokens.html")
+        assert_status(200, status, "open token page with mTLS enabled")
+        require(b"const enforceMTLS = true;" in enabled_token_page, "token page receives enabled mTLS setting")
+        status, issued = server.client.json(
+            "POST",
+            f"{server.https_url}/v1/tokens/{token_id}/certificate",
+        )
+        assert_status(201, status, "issue certificate for existing token when mTLS is enabled")
+        require(issued["client_certificate_expires_at"] == token_data["expires_at"], "issued certificate matches token expiry")
+        require("BEGIN CERTIFICATE" in issued["client_certificate"], "issued client certificate returned")
+        require("BEGIN PRIVATE KEY" in issued["client_private_key"], "issued private key returned")
+        token_data.update(issued)
+        status, _ = server.client.json(
+            "POST",
+            f"{server.https_url}/v1/tokens/{max_token_id}/certificate",
+        )
+        assert_status(201, status, "issue certificate for max-lifetime token")
+        status, replacement = server.client.json(
+            "POST",
+            f"{server.https_url}/v1/tokens/{max_token_id}/certificate",
+        )
+        assert_status(201, status, "replace certificate for existing token")
+        require(replacement["client_certificate_expires_at"] == max_token_data["expires_at"], "replacement certificate matches token expiry")
+        _, _, enabled_token_data = server.create_api_token("mtls-enabled-token")
+        require(
+            "client_certificate" in enabled_token_data
+            and "client_private_key" in enabled_token_data
+            and enabled_token_data["client_certificate_expires_at"] == enabled_token_data["expires_at"],
+            "token creation issues matching client credentials when mTLS is enabled",
+        )
         cert_client = server.client_with_certificate(
             token_data["client_certificate"], token_data["client_private_key"]
         )

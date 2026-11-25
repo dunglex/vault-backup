@@ -157,19 +157,21 @@ The restore refuses to overwrite a non-empty destination unless `--replace` is s
 After logging in through the web UI at `/tokens.html`, an admin can create
 tokens in the add-token dialog, list, and revoke API tokens. Tokens:
 
-- May share a name; each token has a distinct ID and value
+- Must have a unique name
 - Default to a 30-day lifetime; choose between 1 and 365 days when creating one
 - Never outlive the one-year maximum
 - Are shown only in the creation response
 - Are stored as SHA-256 hashes in the encrypted database
 
-Token creation also issues a token-bound client certificate and private key,
-with exactly the same expiry as the token. The API token is shown only at
-creation; each private key is downloadable only in its issuance response. The
-server stores certificate authorization metadata, not the initial private key.
-Use **Issue certificate** or **Replace certificate** on an active token to
-download a new pair; this immediately revokes its previous certificate and
-does not extend the token's expiry. Protect both downloaded files as secrets.
+Client certificates are issued only while mutual TLS enforcement is enabled.
+When enabled, token creation also returns a token-bound certificate and private
+key with the same expiry as the token. When disabled, creation returns the API
+token only. Each private key is downloadable only in its issuance response.
+The server stores certificate authorization metadata, not the private key. Use
+**Issue certificate** or **Replace certificate** on an active token while
+enforcement is enabled; replacement immediately revokes the previous
+certificate and does not extend the token's expiry. Protect downloaded files as
+secrets.
 
 Management endpoints use a web session. Security settings and
 operator-management endpoints require the Admin role:
@@ -202,8 +204,11 @@ curl --cookie cookies.txt \
   https://vault.example:8200/v1/tokens
 ```
 
-`expires_in_days` is optional (defaults to 30) and must be from 1 to 365.
-The client certificate expires at the same time as its token.
+`expires_in_days` is optional (defaults to 30) and must be from 1 to 365. The
+response includes client credentials only when mTLS enforcement is enabled;
+the certificate expires at the same time as its token.
+Token names are trimmed and must be unique; creating a duplicate name returns
+HTTP 409.
 
 Use managed API tokens through `X-Vault-Token` or the `Authorization: Bearer` header. Username/password login tokens and browser cookies do not authorize `/api/...` endpoints.
 
@@ -225,14 +230,11 @@ send a required protocol marker when enforcement is enabled.
 This rejects older CLI versions, but a custom client can imitate that marker;
 it is a compatibility gate, not proof of executable integrity.
 
-Before enabling enforcement, issue and install a certificate for every client
-that needs API access. Enabling it immediately rejects API calls that lack a
-valid certificate and matching token.
-
-Create a managed API token from `/tokens.html` and download its certificate and
-private key from the creation dialog. For an existing token, use **Issue
-certificate**. The private key is delivered over HTTPS and is not available for
-later download. Then run:
+Enabling enforcement immediately rejects API calls that lack a valid
+certificate and matching token. Once enabled, create a managed API token from
+`/tokens.html` and download its certificate and private key from the creation
+dialog, or use **Issue certificate** for an existing token. The private key is
+delivered over HTTPS and is not available for later download. Then run:
 
 ```bash
 VAULT_TOKEN="$VAULT_API_TOKEN" ./bin/vault-backup \

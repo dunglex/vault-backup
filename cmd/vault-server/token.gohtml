@@ -48,7 +48,7 @@
         <option value="180">180 days</option>
         <option value="365">365 days</option>
       </select>
-      <p class="muted">The client certificate expires at the same time as the token.</p>
+      {{if .EnforceMTLS}}<p class="muted">The client certificate expires at the same time as the token.</p>{{end}}
     </div>
     <p id="dialogError" class="notice" role="alert"></p>
     <p id="credentialNotice" class="muted" hidden></p>
@@ -60,10 +60,7 @@
       </div>
       <span id="copyTokenStatus" class="success" role="status"></span>
     </section>
-    <div id="credentialDownloads" class="row-actions" hidden>
-      <button id="downloadClientCert" class="button button-outline" type="button">Download client certificate</button>
-      <button id="downloadClientKey" class="button button-outline" type="button">Download private key</button>
-    </div>
+    <div id="credentialDownloads" class="row-actions" hidden></div>
     <section id="sampleCommandPanel" class="credential-panel" hidden>
       <h3 id="sampleCommandTitle">Sample vault-backup command</h3>
       <div class="credential-copy-row">
@@ -77,6 +74,7 @@
   </form>
 </dialog>
 <script>
+const enforceMTLS = {{if .EnforceMTLS}}true{{else}}false{{end}};
 const errorBox = document.getElementById('error');
 const createDialog = document.getElementById('createTokenDialog');
 let apiTokens = [];
@@ -121,19 +119,41 @@ function downloadCredential(filename, contents) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 function showCreatedCredentials(certificate, privateKey, token) {
-  newCredentials = {certificate, privateKey};
-  document.getElementById('downloadClientCert').onclick = () => downloadCredential('vault-client-cert.pem', newCredentials.certificate);
-  document.getElementById('downloadClientKey').onclick = () => downloadCredential('vault-client-key.pem', newCredentials.privateKey);
-  document.getElementById('credentialDownloads').hidden = false;
-  document.getElementById('sampleCommand').querySelector('code').textContent = sampleCommand();
-  document.getElementById('sampleCommandPanel').hidden = false;
+  const hasCertificate = enforceMTLS && Boolean(certificate && privateKey);
+  const credentialDownloads = document.getElementById('credentialDownloads');
+  credentialDownloads.replaceChildren();
+  credentialDownloads.hidden = true;
+  newCredentials = {
+    certificate: hasCertificate ? certificate : null,
+    privateKey: hasCertificate ? privateKey : null,
+    hasCertificate,
+    hasToken: Boolean(token)
+  };
+  if (hasCertificate) {
+    const certificateButton = document.createElement('button');
+    certificateButton.id = 'downloadClientCert';
+    certificateButton.className = 'button button-outline';
+    certificateButton.type = 'button';
+    certificateButton.textContent = 'Download client certificate';
+    certificateButton.onclick = () => downloadCredential('vault-client-cert.pem', newCredentials.certificate);
+    const privateKeyButton = document.createElement('button');
+    privateKeyButton.id = 'downloadClientKey';
+    privateKeyButton.className = 'button button-outline';
+    privateKeyButton.type = 'button';
+    privateKeyButton.textContent = 'Download private key';
+    privateKeyButton.onclick = () => downloadCredential('vault-client-key.pem', newCredentials.privateKey);
+    credentialDownloads.append(certificateButton, privateKeyButton);
+    credentialDownloads.hidden = false;
+    document.getElementById('sampleCommand').querySelector('code').textContent = sampleCommand();
+    document.getElementById('sampleCommandPanel').hidden = false;
+  }
   const tokenPanel = document.getElementById('tokenCopyPanel');
   tokenPanel.hidden = !token;
   if (token) {
     document.getElementById('tokenValue').textContent = token;
     document.getElementById('copyTokenStatus').textContent = '';
   }
-  document.getElementById('credentialNotice').hidden = false;
+  document.getElementById('credentialNotice').hidden = !(hasCertificate || token);
 }
 async function api(url, options = {}) {
   options.headers = options.headers || {};
@@ -161,35 +181,40 @@ function renderTokens() {
     const li = document.createElement('li');
     const state = token.revoked ? 'revoked' : token.expired ? 'expired' : 'active';
     const details = document.createElement('span');
-    const certificate = token.has_certificate
+    const certificate = !enforceMTLS ? '' : token.has_certificate
       ? 'client cert expires ' + token.certificate_expires_at
       : 'no client certificate';
-    details.textContent = token.name + ' (' + state + ', token expires ' + token.expires_at + '; ' + certificate + ')';
+    details.textContent = token.name + ' (' + state + ', token expires ' + token.expires_at
+      + (certificate ? '; ' + certificate : '') + ')';
     li.appendChild(details);
     if (!token.revoked && !token.expired) {
-      const certificateButton = document.createElement('button');
-      certificateButton.className = 'button button-outline';
-      certificateButton.textContent = token.has_certificate ? 'Replace certificate' : 'Issue certificate';
-      certificateButton.type = 'button';
-      certificateButton.onclick = async () => {
-        certificateButton.disabled = true;
-        try {
-          const result = await api('/v1/tokens/' + token.id + '/certificate', {method:'POST'});
-          document.getElementById('createTokenTitle').textContent = 'Client certificate issued';
-          document.getElementById('tokenFormFields').hidden = true;
-          document.getElementById('credentialNotice').textContent = 'Download and protect these files now. The private key is not stored for later download.';
-          document.getElementById('createToken').hidden = true;
-          document.getElementById('finishCreateToken').hidden = false;
-          showCreatedCredentials(result.client_certificate, result.client_private_key, null);
-          createDialog.showModal();
-          await refreshTokens();
-        } catch (error) {
-          showError(error.message);
-        } finally {
-          certificateButton.disabled = false;
-        }
-      };
-      li.appendChild(certificateButton);
+      const actions = document.createElement('div');
+      actions.className = 'row-actions token-actions';
+      if (enforceMTLS) {
+        const certificateButton = document.createElement('button');
+        certificateButton.className = 'button button-outline';
+        certificateButton.textContent = token.has_certificate ? 'Replace certificate' : 'Issue certificate';
+        certificateButton.type = 'button';
+        certificateButton.onclick = async () => {
+          certificateButton.disabled = true;
+          try {
+            const result = await api('/v1/tokens/' + token.id + '/certificate', {method:'POST'});
+            document.getElementById('createTokenTitle').textContent = 'Client certificate issued';
+            document.getElementById('tokenFormFields').hidden = true;
+            document.getElementById('credentialNotice').textContent = 'Download and protect these files now. The private key is not stored for later download.';
+            document.getElementById('createToken').hidden = true;
+            document.getElementById('finishCreateToken').hidden = false;
+            showCreatedCredentials(result.client_certificate, result.client_private_key, null);
+            createDialog.showModal();
+            await refreshTokens();
+          } catch (error) {
+            showError(error.message);
+          } finally {
+            certificateButton.disabled = false;
+          }
+        };
+        actions.appendChild(certificateButton);
+      }
       const button = document.createElement('button');
       button.className = 'danger';
       button.textContent = 'Revoke';
@@ -200,7 +225,8 @@ function renderTokens() {
           await refreshTokens();
         } catch (error) { showError(error.message); }
       };
-      li.appendChild(button);
+      actions.appendChild(button);
+      li.appendChild(actions);
     }
     list.appendChild(li);
   });
@@ -212,6 +238,7 @@ document.getElementById('openCreateToken').addEventListener('click', () => {
   document.getElementById('credentialNotice').textContent = '';
   document.getElementById('credentialNotice').hidden = true;
   document.getElementById('tokenCopyPanel').hidden = true;
+  document.getElementById('credentialDownloads').replaceChildren();
   document.getElementById('credentialDownloads').hidden = true;
   document.getElementById('sampleCommandPanel').hidden = true;
   newCredentials = null;
@@ -225,9 +252,11 @@ document.getElementById('openCreateToken').addEventListener('click', () => {
 
 function closeWithConfirmation() {
   if (newCredentials) {
-    const message = document.getElementById('tokenCopyPanel').hidden
-      ? 'Have you downloaded and protected both credential files? Closing clears the private key from this page.'
-      : 'Have you copied the token and downloaded both credential files? The token cannot be shown again after closing.';
+    const message = newCredentials.hasToken && newCredentials.hasCertificate
+      ? 'Have you copied the token and downloaded both credential files? The token cannot be shown again after closing.'
+      : newCredentials.hasToken
+        ? 'Have you copied the token? It cannot be shown again after closing.'
+        : 'Have you downloaded and protected both credential files? Closing clears the private key from this page.';
     if (!window.confirm(message)) return;
   }
   createDialog.close();
@@ -244,6 +273,7 @@ createDialog.addEventListener('close', () => {
   document.getElementById('copyTokenStatus').textContent = '';
   document.getElementById('sampleCommand').querySelector('code').textContent = '';
   document.getElementById('tokenCopyPanel').hidden = true;
+  document.getElementById('credentialDownloads').replaceChildren();
   document.getElementById('credentialDownloads').hidden = true;
   document.getElementById('sampleCommandPanel').hidden = true;
   document.getElementById('tokenFormFields').hidden = false;
@@ -285,7 +315,10 @@ document.getElementById('createTokenForm').addEventListener('submit', async even
     });
     document.getElementById('createTokenTitle').textContent = 'Token created';
     document.getElementById('tokenFormFields').hidden = true;
-    document.getElementById('credentialNotice').textContent = 'Copy the token and download both credential files now. The token will not be shown again.';
+    const hasCertificate = Boolean(result.client_certificate && result.client_private_key);
+    document.getElementById('credentialNotice').textContent = hasCertificate
+      ? 'Copy the token and download both credential files now. The token will not be shown again.'
+      : 'Copy the token now. It will not be shown again after closing.';
     showCreatedCredentials(result.client_certificate, result.client_private_key, result.token);
     createButton.hidden = true;
     document.getElementById('finishCreateToken').hidden = false;
