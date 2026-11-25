@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Settings - Vault Server</title>
+  <link rel="stylesheet" href="/normalize.css">
+  <link rel="stylesheet" href="/miligram.css">
+  <link rel="stylesheet" href="/admin.css">
+</head>
+<body>
+<main class="app-shell">
+  <header class="app-header">
+    <h1 class="brand">Vault Server</h1>
+    <nav class="app-nav" aria-label="Admin navigation">
+      <a class="button button-outline" href="/secrets.html">Secrets</a>
+      <a class="button button-outline" href="/tokens.html">API tokens</a>
+      <a class="button button-outline" href="/audits.html">Audit log</a>
+      <a class="button" aria-current="page" href="/settings.html">Settings</a>
+      <button id="logout" class="button button-outline">Logout</button>
+    </nav>
+  </header>
+  <div id="error" class="notice" role="alert"></div>
+  <section class="panel">
+    <h2 class="section-label">Client certificate settings</h2>
+    <p>These controls apply to Vault API traffic. Admin pages and health checks remain available without a client certificate. Enforced API requests must use HTTPS; a TLS-terminating proxy must use TLS passthrough or HTTPS to the server.</p>
+    <form id="settingsForm">
+      <label class="setting-option">
+        <input id="enforceMTLS" type="checkbox">
+        Enforce mutual TLS for Vault API clients
+      </label>
+      <p class="muted">Before enabling, issue and install a certificate for every client that needs API access. When enabled, requests must use a valid certificate issued for the same managed API token. Older vault-backup clients will be rejected and must be upgraded.</p>
+      <p class="muted">Choose the token lifetime when creating an API token (1-365 days). Its client certificate expires at the same time. To renew credentials, create a replacement token and certificate before expiry.</p>
+      <div class="row-actions">
+        <button id="saveSettings" type="submit">Save settings</button>
+        <span id="saved" class="success" role="status"></span>
+      </div>
+    </form>
+  </section>
+  <section class="panel settings-example">
+    <h2 class="section-label">vault-backup example</h2>
+    <p>Create a managed API token to download its client certificate and private key. Use a trusted CA certificate for your Vault server; do not use <code>--insecure</code> with mTLS.</p>
+    <pre><code>VAULT_TOKEN="YOUR_MANAGED_API_TOKEN" ./bin/vault-backup \
+  --url https://vault.example:8200/api \
+  --token "$VAULT_TOKEN" \
+  --ca_cert /path/to/vault-server-ca.pem \
+  --client_cert ./vault-client-cert.pem \
+  --client_key ./vault-client-key.pem \
+  --secret_name kv \
+  --secret_path app/database \
+  --output_mode file \
+  --output_format env \
+  --output_path ./database.env</code></pre>
+    <p class="muted">The token is shown only when created. Certificate files contain a private key; protect them (for example, run <code>chmod 600 vault-client-cert.pem vault-client-key.pem</code>).</p>
+  </section>
+</main>
+<script>
+const errorBox = document.getElementById('error');
+async function api(url, options = {}) {
+  options.credentials = 'same-origin';
+  const response = await fetch(url, options);
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    if (response.status === 401) location.assign('/401.html');
+    throw new Error(body.error || 'Request failed');
+  }
+  return body;
+}
+async function loadSettings() {
+  try {
+    const settings = await api('/v1/settings');
+    document.getElementById('enforceMTLS').checked = settings.enforce_mtls;
+  } catch (error) {
+    errorBox.textContent = error.message;
+  }
+}
+document.getElementById('settingsForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  const button = document.getElementById('saveSettings');
+  const saved = document.getElementById('saved');
+  button.disabled = true;
+  saved.textContent = '';
+  errorBox.textContent = '';
+  try {
+    await api('/v1/settings', {
+      method:'PUT',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        enforce_mtls:document.getElementById('enforceMTLS').checked
+      })
+    });
+    saved.textContent = 'Settings saved.';
+  } catch (error) {
+    errorBox.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+});
+document.getElementById('logout').addEventListener('click', async () => {
+  try { await api('/v1/auth/logout', {method:'POST'}); } catch (_) {}
+  location.assign('/login.html');
+});
+loadSettings();
+</script>
+</body>
+</html>

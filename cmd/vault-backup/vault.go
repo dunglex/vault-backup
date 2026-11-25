@@ -241,6 +241,7 @@ func connectToVault(arguments Arguments) *vault.Client {
 	if err != nil {
 		panic(fmt.Sprintf("Failed to create Vault client: %v", err))
 	}
+	client.SetHeaders(http.Header{"X-Vault-Backup-Protocol": []string{"client-cert-v1"}})
 	if arguments.Token != "" {
 		client.SetToken(arguments.Token)
 		return client
@@ -257,7 +258,6 @@ func connectToVault(arguments Arguments) *vault.Client {
 	}
 	client.SetToken(secret.Auth.ClientToken)
 	return client
-
 }
 
 func backupSecrets(client *vault.Client, arguments Arguments) error {
@@ -507,7 +507,7 @@ func restoreFromFile(client *vault.Client, arguments Arguments, filePath string)
 
 	_, err = client.Logical().Write(fullPath, vaultData)
 	if err != nil {
-		return fmt.Errorf("failed to write secret to Vault at %s: %s", fullPath, formatVaultError(err))
+		return fmt.Errorf("failed to write secret to Vault at %s: %s", fullPath, formatVaultAPIError(err))
 	}
 
 	fmt.Printf("Successfully restored secret to %s from %s\n", fullPath, filePath)
@@ -519,12 +519,62 @@ func formatVaultError(err error) string {
 		return "unknown error"
 	}
 	var responseErr *vault.ResponseError
-	if errors.As(err, &responseErr) && responseErr.StatusCode == http.StatusLocked {
-		message := strings.TrimSpace(strings.Join(responseErr.Errors, "; "))
-		if message == "" {
-			message = "initial setup window expired"
+	if errors.As(err, &responseErr) {
+		details := strings.TrimSpace(strings.Join(responseErr.Errors, "; "))
+		switch responseErr.StatusCode {
+		case http.StatusLocked:
+			if details == "" {
+				details = "initial setup window expired"
+			}
+			return "Vault setup is locked (423): " + details
+		case http.StatusUnauthorized:
+			return formatVaultResponseMessage("Vault rejected the supplied credentials (401 Unauthorized).", details)
+		case http.StatusForbidden:
+			return formatVaultResponseMessage("Vault denied the request (403 Forbidden).", details)
+		case http.StatusUpgradeRequired:
+			return formatVaultResponseMessage("Vault requires a newer client (426 Upgrade Required).", details)
 		}
-		return "Vault setup is locked (423): " + message
+		status := vaultHTTPStatus(responseErr.StatusCode)
+		if details == "" {
+			return status + " with no error details."
+		}
+		return status + ": " + details
 	}
 	return err.Error()
+}
+
+func formatVaultAPIError(err error) string {
+	var responseErr *vault.ResponseError
+	if !errors.As(err, &responseErr) {
+		return formatVaultError(err)
+	}
+	details := strings.TrimSpace(strings.Join(responseErr.Errors, "; "))
+	switch responseErr.StatusCode {
+	case http.StatusUnauthorized:
+		message := "Vault rejected the API token (401 Unauthorized). Use a current managed API token; it may be invalid, expired, or revoked."
+		return formatVaultResponseMessage(message, details)
+	case http.StatusForbidden:
+		message := "Vault denied this request (403 Forbidden). If mTLS is enforced, check that the client certificate matches the API token and is current; also verify the token has access."
+		return formatVaultResponseMessage(message, details)
+	case http.StatusUpgradeRequired:
+		message := "Vault requires a newer vault-backup client (426 Upgrade Required). Upgrade to a version that supports the server's required API protocol."
+		return formatVaultResponseMessage(message, details)
+	default:
+		return formatVaultError(err)
+	}
+}
+
+func formatVaultResponseMessage(message, details string) string {
+	if details == "" {
+		return message
+	}
+	return message + " Server detail: " + details
+}
+
+func vaultHTTPStatus(statusCode int) string {
+	status := fmt.Sprintf("Vault returned HTTP %d", statusCode)
+	if statusText := http.StatusText(statusCode); statusText != "" {
+		status += " " + statusText
+	}
+	return status
 }

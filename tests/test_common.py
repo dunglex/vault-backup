@@ -42,11 +42,14 @@ def run(*args: str | Path, env: dict[str, str] | None = None, check: bool = True
 
 
 class HttpClient:
-    def __init__(self, insecure: bool = True):
+    def __init__(self, insecure: bool = True, client_cert: Path | None = None, client_key: Path | None = None):
         self.insecure = insecure
         self.cookies = http.cookiejar.CookieJar()
+        context = ssl._create_unverified_context() if insecure else ssl.create_default_context()
+        if client_cert and client_key:
+            context.load_cert_chain(client_cert, client_key)
         self.opener = urllib.request.build_opener(
-            urllib.request.HTTPSHandler(context=ssl._create_unverified_context() if insecure else None),
+            urllib.request.HTTPSHandler(context=context),
             urllib.request.HTTPCookieProcessor(self.cookies),
         )
 
@@ -99,6 +102,7 @@ class ServerTest:
         self.log_file = None
         self.https_url = f"https://127.0.0.1:{port}"
         self.http_url = f"http://127.0.0.1:{http_port}"
+        self.management_url = self.https_url
         self.client = HttpClient()
         self.password = "integration-test-password"
         self.user = "admin"
@@ -176,7 +180,7 @@ class ServerTest:
     def setup(self) -> None:
         status, body = self.client.json(
             "POST",
-            f"{self.http_url}/v1/setup",
+            f"{self.management_url}/v1/setup",
             data={
                 "setup_key": self.setup_key,
                 "username": self.user,
@@ -190,17 +194,22 @@ class ServerTest:
     def login(self):
         status, body = self.client.json(
             "POST",
-            f"{self.https_url}/v1/auth/login",
+            f"{self.management_url}/v1/auth/login",
             data={"username": self.user, "password": self.password},
         )
         assert_status(200, status, "login")
         return body["token"]
 
-    def create_api_token(self, name: str = "test-token") -> tuple[str, int, dict]:
+    def create_api_token(
+        self, name: str = "test-token", expires_in_days: int | None = None
+    ) -> tuple[str, int, dict]:
+        data: dict[str, str | int] = {"name": name}
+        if expires_in_days is not None:
+            data["expires_in_days"] = expires_in_days
         status, body = self.client.json(
             "POST",
-            f"{self.https_url}/v1/tokens",
-            data={"name": name},
+            f"{self.management_url}/v1/tokens",
+            data=data,
         )
         assert_status(201, status, f"create managed API token {name}")
         return body["token"], body["id"], body
@@ -213,6 +222,15 @@ class ServerTest:
         ]
         return {"Cookie": "; ".join(values)} if values else {}
 
+    def client_with_certificate(self, certificate: str, private_key: str) -> HttpClient:
+        cert_path = self.path / "managed-client-cert.pem"
+        key_path = self.path / "managed-client-key.pem"
+        cert_path.write_text(certificate)
+        key_path.write_text(private_key)
+        cert_path.chmod(0o600)
+        key_path.chmod(0o600)
+        return HttpClient(client_cert=cert_path, client_key=key_path)
+
 
 class BackupServerTest(ServerTest):
     def __init__(self, port: int = 18210, http_port: int = 18211):
@@ -220,6 +238,7 @@ class BackupServerTest(ServerTest):
         self.password = "backup-test-password"
         self.http_url = f"http://127.0.0.1:{http_port}"
         self.https_url = f"http://127.0.0.1:{http_port}"
+        self.management_url = f"https://127.0.0.1:{port}"
 
     def __enter__(self):
         self.build(backup=True)

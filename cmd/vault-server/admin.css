@@ -375,18 +375,6 @@ table {
   margin-bottom: 0;
 }
 
-#newToken {
-  background: var(--surface-muted);
-  border-radius: 0.4rem;
-  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
-  overflow-wrap: anywhere;
-  padding: 1.2rem;
-}
-
-#newToken:empty {
-  display: none;
-}
-
 .token-page-header {
   align-items: center;
   display: flex;
@@ -403,6 +391,8 @@ table {
   border-radius: 0.6rem;
   box-shadow: var(--shadow);
   max-width: 52rem;
+  max-height: calc(100vh - 3.2rem);
+  overflow-y: auto;
   padding: 2.4rem;
   width: calc(100% - 3.2rem);
 }
@@ -413,6 +403,22 @@ table {
 
 .token-dialog form {
   margin-bottom: 0;
+}
+
+.token-dialog-heading {
+  align-items: flex-start;
+  display: flex;
+  gap: 1rem;
+  justify-content: space-between;
+}
+
+.token-dialog-heading h2 {
+  margin-bottom: 1.6rem;
+}
+
+.token-dialog-heading button {
+  flex: 0 0 auto;
+  margin-bottom: 1.6rem;
 }
 
 .token-dialog h2 {
@@ -428,8 +434,74 @@ table {
   margin-bottom: 0;
 }
 
-#newToken {
+.credential-panel {
+  margin-top: 1.6rem;
+}
+
+.credential-panel h3 {
+  margin-bottom: 0.8rem;
+}
+
+.credential-label {
+  margin-bottom: 0.6rem;
+}
+
+.credential-copy-row {
+  align-items: flex-start;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.8rem;
+}
+
+.credential-copy-row button {
+  margin-bottom: 0;
+}
+
+.credential-value {
+  background: var(--surface-muted);
+  border-radius: 0.4rem;
+  display: block;
+  flex: 1 1 24rem;
+  max-width: 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  padding: 1.2rem;
   white-space: pre-wrap;
+}
+
+#sampleCommand {
+  flex: 1 1 100%;
+  margin-bottom: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+#sampleCommand code {
+  white-space: inherit;
+}
+
+.setting-option {
+  align-items: center;
+  display: flex;
+  gap: 0.8rem;
+  margin-bottom: 0.4rem;
+}
+
+.setting-option input {
+  margin-bottom: 0;
+}
+
+.settings-example {
+  margin-top: 2.4rem;
+}
+
+pre {
+  background: var(--surface-muted);
+  border-radius: 0.4rem;
+  overflow-x: auto;
+  padding: 1.2rem;
 }
 
 @media (max-width: 80rem) {

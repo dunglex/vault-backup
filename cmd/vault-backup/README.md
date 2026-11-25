@@ -73,6 +73,20 @@ For mutual TLS, configure the server CA and the backup client certificate/key:
 
 Do not combine `--insecure` with custom CA or client-certificate settings.
 
+Managed client certificates expire at the same time as their API token. Token
+lifetimes can be selected from 1 to 365 days when creating the token. Replacing
+a certificate for an existing token does not extend the token's expiry; create
+a replacement token and certificate before expiry.
+
+When server-side mTLS enforcement is enabled, use HTTPS and a current
+`vault-backup` version. Older versions do not send the required client
+certificate protocol marker and are rejected by the server.
+
+For authorization failures, HTTP 401 means Vault rejected the API token; use
+a current managed token from `/tokens.html` and check that it has not expired
+or been revoked. HTTP 403 can indicate a missing or mismatched client
+certificate when mTLS is enforced.
+
 ## Back up a secret
 
 ```bash

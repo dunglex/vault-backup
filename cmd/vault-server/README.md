@@ -92,17 +92,28 @@ After logging in through the web UI at `/tokens.html`, an admin can create
 tokens in the add-token dialog, list, and revoke API tokens. Tokens:
 
 - May share a name; each token has a distinct ID and value
-- Expire exactly 30 days after creation
-- Have no configurable duration
+- Default to a 30-day lifetime; choose between 1 and 365 days when creating one
+- Never outlive the one-year maximum
 - Are shown only in the creation response
 - Are stored as SHA-256 hashes in the encrypted database
+
+Token creation also issues a token-bound client certificate and private key,
+with exactly the same expiry as the token. The API token is shown only at
+creation; each private key is downloadable only in its issuance response. The
+server stores certificate authorization metadata, not the initial private key.
+Use **Issue certificate** or **Replace certificate** on an active token to
+download a new pair; this immediately revokes its previous certificate and
+does not extend the token's expiry. Protect both downloaded files as secrets.
 
 Management endpoints use the admin's web session:
 
 ```bash
 POST   /v1/tokens
 GET    /v1/tokens
+POST   /v1/tokens/{id}/certificate
 DELETE /v1/tokens/{id}
+GET    /v1/settings
+PUT    /v1/settings
 ```
 
 Create a token:
@@ -110,15 +121,73 @@ Create a token:
 ```bash
 curl --cookie cookies.txt \
   -H 'Content-Type: application/json' \
-  -d '{"name":"backup-agent"}' \
+  -d '{"name":"backup-agent","expires_in_days":365}' \
   https://vault.example:8200/v1/tokens
 ```
+
+`expires_in_days` is optional (defaults to 30) and must be from 1 to 365.
+The client certificate expires at the same time as its token.
 
 Use managed API tokens through `X-Vault-Token` or the `Authorization: Bearer` header. Username/password login tokens and browser cookies do not authorize `/api/...` endpoints.
 
 ## Mutual TLS
 
-Enable mTLS on the HTTPS listener with a PEM-encoded CA bundle containing the certificates that may authenticate Vault clients:
+The admin UI at `/settings.html` provides a persistent switch:
+
+- **Enforce mutual TLS for Vault API clients** requires a valid managed
+  certificate on `/api/...` requests. The certificate must be associated with
+  the presented managed API token. Admin pages and `/health` remain accessible
+  without a client certificate. Enforced API requests must use HTTPS; a
+  TLS-terminating proxy must use TLS passthrough or HTTPS to the server. Older
+  `vault-backup` binaries are rejected until upgraded.
+
+The token's client certificate expires at the same time as the token, with a
+maximum lifetime of one year. Replacing a certificate does not extend token
+life; create a replacement token and certificate before expiry. Newer clients
+send a required protocol marker when enforcement is enabled.
+This rejects older CLI versions, but a custom client can imitate that marker;
+it is a compatibility gate, not proof of executable integrity.
+
+Before enabling enforcement, issue and install a certificate for every client
+that needs API access. Enabling it immediately rejects API calls that lack a
+valid certificate and matching token.
+
+Create a managed API token from `/tokens.html` and download its certificate and
+private key from the creation dialog. For an existing token, use **Issue
+certificate**. The private key is delivered over HTTPS and is not available for
+later download. Then run:
+
+```bash
+VAULT_TOKEN="$VAULT_API_TOKEN" ./bin/vault-backup \
+  --url https://vault.example:8200/api \
+  --token "$VAULT_TOKEN" \
+  --ca_cert /path/to/vault-server-ca.pem \
+  --client_cert ./vault-client-cert.pem \
+  --client_key ./vault-client-key.pem \
+  --secret_name kv \
+  --secret_path app/database \
+  --output_mode file \
+  --output_format env \
+  --output_path ./database.env
+```
+
+After downloading the key files, restrict their permissions:
+
+```bash
+chmod 600 ./vault-client-cert.pem ./vault-client-key.pem
+```
+
+`--ca_cert` verifies the Vault **server** certificate. The downloaded client
+certificate authenticates the CLI to the Vault API; do not use `--insecure`.
+The managed client CA and its encrypted signing key are stored in the encrypted
+Vault database and are preserved by the normal server database backup.
+
+The separate `VAULT_SERVER_MTLS_CA_CERT` startup option retains its existing
+behavior: it requires certificates for every HTTPS connection, including web
+pages and health checks.
+
+For static listener-wide mTLS, configure a PEM-encoded CA bundle containing
+the certificates that may authenticate Vault clients:
 
 ```bash
 ./bin/vault-server \

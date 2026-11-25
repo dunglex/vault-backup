@@ -54,6 +54,8 @@ func TestInitializeDatabaseRemovesLegacyUniqueTokenNameConstraint(t *testing.T) 
 			expires_at INTEGER NOT NULL,
 			revoked_at INTEGER
 		);
+		CREATE TABLE server_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+		INSERT INTO server_settings(key, value) VALUES ('auto_rotate_certificates', 'true');
 		INSERT INTO api_tokens(name, token_hash, created_at, expires_at)
 			VALUES ('backup-agent', 'first-hash', 1, 2);
 	`); err != nil {
@@ -75,6 +77,14 @@ func TestInitializeDatabaseRemovesLegacyUniqueTokenNameConstraint(t *testing.T) 
 	if count != 2 {
 		t.Fatalf("API tokens with duplicate name = %d, want 2", count)
 	}
+	if err := db.QueryRow(
+		"SELECT COUNT(*) FROM server_settings WHERE key = 'auto_rotate_certificates'",
+	).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatal("legacy automatic certificate rotation setting was not removed")
+	}
 }
 
 func TestPageTemplatesRenderStandalonePages(t *testing.T) {
@@ -87,8 +97,9 @@ func TestPageTemplatesRenderStandalonePages(t *testing.T) {
 		{"login.gohtml", []string{`id="loginForm"`, "/v1/auth/login"}},
 		{"secret.gohtml", []string{`id="paths"`, `id="secretPath"`, `id="convert-format"`, `id="convert-case"`, "parseDotenv", "validateEditorData", "Duplicate dotenv key", ".slice(0, 5)", "location.assign('/secrets.html?group='"}},
 		{"secrets.gohtml", []string{`id="secret-groups"`, `id="secret-list"`, "/v1/secrets-browser", `get('group')`}},
-		{"token.gohtml", []string{`id="tokens"`, `id="openCreateToken"`, `id="createTokenDialog"`, `id="createToken"`, "async function refreshTokens()"}},
-		{"audit.gohtml", []string{`id="events"`, `href="/audits.html"`, "/v1/audit", "create_token", "revoke_token", "async function refresh()"}},
+		{"token.gohtml", []string{`id="tokens"`, `id="openCreateToken"`, `id="createTokenDialog"`, `id="createToken"`, `id="closeCreateToken"`, `id="finishCreateToken"`, `id="tokenLifetimeDays"`, `id="tokenCopyPanel"`, `id="copyToken"`, `id="downloadClientCert"`, `id="downloadClientKey"`, "Sample vault-backup command", `id="copyCommand"`, "window.confirm", "addEventListener('beforeunload'", "async function refreshTokens()"}},
+		{"settings.gohtml", []string{`id="settingsForm"`, `id="enforceMTLS"`, "client_cert", "client_key"}},
+		{"audit.gohtml", []string{`id="events"`, `href="/audits.html"`, "/v1/audit", "create_token", "revoke_token", "issue_certificate", "rotate_certificate", "update_settings", "async function refresh()"}},
 		{"401.gohtml", []string{"401", "Go to login"}},
 		{"404.gohtml", []string{"404", "Page not found"}},
 		{"lock.gohtml", []string{"423", "Setup locked"}},

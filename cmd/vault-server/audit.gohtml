@@ -17,6 +17,7 @@
       <a class="button button-outline" href="/secrets.html">Secrets</a>
       <a class="button button-outline" href="/tokens.html">API tokens</a>
       <a class="button" aria-current="page" href="/audits.html">Audit log</a>
+      <a class="button button-outline" href="/settings.html">Settings</a>
       <button id="logout" class="button button-outline">Logout</button>
     </nav>
   </header>
@@ -25,7 +26,7 @@
     <div class="filters">
       <label>Search<input id="q" placeholder="Actor, resource, or detail"></label>
       <label>Actor<input id="actor" placeholder="Exact actor"></label>
-      <label>Action<select id="action"><option value="">All</option><option>login</option><option>list</option><option>read</option><option>create</option><option>update</option><option>delete</option><option>create_token</option><option>revoke_token</option></select></label>
+      <label>Action<select id="action"><option value="">All</option><option>login</option><option>list</option><option>read</option><option>create</option><option>update</option><option>delete</option><option>create_token</option><option>revoke_token</option><option>issue_certificate</option><option>rotate_certificate</option><option>update_settings</option></select></label>
       <label>Outcome<select id="outcome"><option value="">All</option><option>success</option><option>failure</option></select></label>
       <label>Source<select id="source"><option value="">All</option><option>web</option><option>api</option></select></label>
       <label>From<input id="from" type="date"></label>

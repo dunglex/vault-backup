@@ -109,7 +109,19 @@ func initializeDatabase(db *sql.DB) error {
 			key TEXT PRIMARY KEY,
 			value TEXT NOT NULL
 		);
+		CREATE TABLE IF NOT EXISTS managed_client_certificates (
+			serial_number TEXT PRIMARY KEY,
+			token_id INTEGER NOT NULL,
+			certificate_pem TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			not_after INTEGER NOT NULL,
+			revoked_at INTEGER,
+			FOREIGN KEY(token_id) REFERENCES api_tokens(id)
+		);
 	`); err != nil {
+		return err
+	}
+	if _, err := db.Exec("DELETE FROM server_settings WHERE key = 'auto_rotate_certificates'"); err != nil {
 		return err
 	}
 	return allowDuplicateAPITokenNames(db)

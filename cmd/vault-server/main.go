@@ -38,11 +38,12 @@ import (
 )
 
 const (
-	apiTokenLifetime   = 30 * 24 * time.Hour
-	setupLifetime      = 20 * time.Minute
-	loginAttemptLimit  = 5
-	loginAttemptWindow = 10 * time.Minute
-	shutdownTimeout    = 15 * time.Second
+	apiTokenLifetime    = 30 * 24 * time.Hour
+	maxAPITokenLifetime = 365 * 24 * time.Hour
+	setupLifetime       = 20 * time.Minute
+	loginAttemptLimit   = 5
+	loginAttemptWindow  = 10 * time.Minute
+	shutdownTimeout     = 15 * time.Second
 )
 
 type server struct {
@@ -53,6 +54,7 @@ type server struct {
 	setupDeadline time.Time
 	adminName     string
 	aead          cipher.AEAD
+	clientCA      *managedClientCA
 
 	mu             sync.Mutex
 	sessions       map[string]time.Time
@@ -229,6 +231,9 @@ func main() {
 		log.Fatal(err)
 	}
 	s := &server{db: db, auditDB: auditDB, setupKey: setupKey, setupKeyPath: setupKeyPath, setupDeadline: setupDeadline, adminName: adminName, aead: aead, sessions: map[string]time.Time{}, attempts: map[string][]time.Time{}, trustedProxies: trustedProxyRanges}
+	if err := s.loadOrCreateManagedClientCA(); err != nil {
+		log.Fatal(err)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.health)
 	mux.HandleFunc("GET /normalize.css", serveEmbeddedAsset("normalize.css", "text/css; charset=utf-8"))
@@ -251,6 +256,9 @@ func main() {
 	}
 	for _, path := range []string{"/tokens", "/tokens.html"} {
 		mux.HandleFunc("GET "+path, s.serveTokens)
+	}
+	for _, path := range []string{"/settings", "/settings.html"} {
+		mux.HandleFunc("GET "+path, s.serveSettings)
 	}
 	for _, path := range []string{"/token", "/token.html"} {
 		mux.HandleFunc("GET "+path, func(w http.ResponseWriter, r *http.Request) {
@@ -285,6 +293,9 @@ func main() {
 	mux.HandleFunc("POST /v1/tokens", s.createAPIToken)
 	mux.HandleFunc("GET /v1/tokens", s.listAPITokens)
 	mux.HandleFunc("DELETE /v1/tokens/{id}", s.revokeAPIToken)
+	mux.HandleFunc("POST /v1/tokens/{id}/certificate", s.issueAPITokenCertificate)
+	mux.HandleFunc("GET /v1/settings", s.getSettings)
+	mux.HandleFunc("PUT /v1/settings", s.updateSettings)
 	mux.HandleFunc("GET /v1/audit", s.listAuditEvents)
 
 	// API endpoints: require bearer/X-Vault-Token authentication.
@@ -298,19 +309,22 @@ func main() {
 
 	mux.HandleFunc("/", s.serveHome)
 
-	handler := s.securityHeaders(s.setupLockAPIs(http.MaxBytesHandler(mux, 1<<20)))
+	handler := s.securityHeaders(s.apiClientCertificateGuard(s.setupLockAPIs(http.MaxBytesHandler(mux, 1<<20))))
 	tlsConfig := &tls.Config{
 		MinVersion: tls.VersionTLS12,
+		ClientAuth: tls.VerifyClientCertIfGiven,
 	}
+	clientCAs := x509.NewCertPool()
 	if strings.TrimSpace(*mtlsCACert) != "" {
-		clientCAs, err := loadClientCAPool(*mtlsCACert)
+		clientCAs, err = loadClientCAPool(*mtlsCACert)
 		if err != nil {
 			log.Fatal(err)
 		}
 		tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
-		tlsConfig.ClientCAs = clientCAs
 		log.Printf("Vault server HTTPS mutual TLS enabled using client CA %s", *mtlsCACert)
 	}
+	clientCAs.AddCert(s.clientCA.certificate)
+	tlsConfig.ClientCAs = clientCAs
 	httpErrorLog := log.New(httpErrorLogWriter{output: os.Stderr}, "", log.LstdFlags)
 	httpsServer := &http.Server{
 		Handler:           handler,
@@ -869,11 +883,20 @@ func (s *server) authorizedWeb(r *http.Request) bool {
 }
 
 func (s *server) authorizedAPI(r *http.Request) bool {
-	token := r.Header.Get("X-Vault-Token")
-	if token == "" {
-		token = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	token := apiTokenFromRequest(r)
+	var tokenID int64
+	if err := s.lookupActiveAPIToken(token, &tokenID); err != nil {
+		return false
 	}
-	return s.authorizedAPIToken(token)
+	enforced, err := s.mtlsSettings()
+	if err != nil {
+		return false
+	}
+	if !enforced {
+		return true
+	}
+	certTokenID, ok := s.certificateTokenID(r)
+	return ok && certTokenID == tokenID
 }
 
 func (s *server) authorizedToken(token string) bool {
@@ -892,20 +915,8 @@ func (s *server) authorizedToken(token string) bool {
 }
 
 func (s *server) authorizedAPIToken(token string) bool {
-	if token == "" {
-		return false
-	}
-	hash := sha256.Sum256([]byte(token))
-	now := time.Now().Unix()
-	var expires int64
-	err := s.db.QueryRow(
-		"SELECT expires_at FROM api_tokens WHERE token_hash = ? AND revoked_at IS NULL",
-		hex.EncodeToString(hash[:]),
-	).Scan(&expires)
-	if err == nil && expires >= now {
-		return true
-	}
-	return false
+	var tokenID int64
+	return s.lookupActiveAPIToken(token, &tokenID) == nil
 }
 
 func (s *server) logout(w http.ResponseWriter, r *http.Request) {
@@ -926,8 +937,13 @@ func (s *server) createAPIToken(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
+	if r.TLS == nil {
+		writeJSON(w, http.StatusUpgradeRequired, map[string]string{"error": "HTTPS is required to create tokens and client credentials"})
+		return
+	}
 	var req struct {
-		Name string `json:"name"`
+		Name          string `json:"name"`
+		ExpiresInDays *int   `json:"expires_in_days"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.recordAuditEvent(r, "create_token", "failure", s.auditRequestActor(r, "web"), "web", "api-token", "invalid_request")
@@ -940,6 +956,18 @@ func (s *server) createAPIToken(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name is required and must be at most 128 characters"})
 		return
 	}
+	lifetime := apiTokenLifetime
+	if req.ExpiresInDays != nil {
+		maxDays := int(maxAPITokenLifetime / (24 * time.Hour))
+		if *req.ExpiresInDays < 1 || *req.ExpiresInDays > maxDays {
+			s.recordAuditEvent(r, "create_token", "failure", s.auditRequestActor(r, "web"), "web", "api-token", "invalid_expiration")
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "expires_in_days must be between 1 and 365",
+			})
+			return
+		}
+		lifetime = time.Duration(*req.ExpiresInDays) * 24 * time.Hour
+	}
 
 	tokenBytes := make([]byte, 32)
 	if _, err := io.ReadFull(rand.Reader, tokenBytes); err != nil {
@@ -949,9 +977,16 @@ func (s *server) createAPIToken(w http.ResponseWriter, r *http.Request) {
 	}
 	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
 	tokenHash := sha256.Sum256([]byte(token))
-	createdAt := time.Now()
-	expiresAt := createdAt.Add(apiTokenLifetime)
-	result, err := s.db.Exec(
+	createdAt := time.Now().UTC().Truncate(time.Second)
+	expiresAt := createdAt.Add(lifetime)
+	tx, err := s.db.Begin()
+	if err != nil {
+		s.recordAuditEvent(r, "create_token", "failure", s.auditRequestActor(r, "web"), "web", "api-token", "storage_error")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not create API token"})
+		return
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(
 		"INSERT INTO api_tokens(name, token_hash, created_at, expires_at) VALUES (?, ?, ?, ?)",
 		req.Name,
 		hex.EncodeToString(tokenHash[:]),
@@ -969,13 +1004,32 @@ func (s *server) createAPIToken(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not create API token"})
 		return
 	}
+	issued, err := s.issueClientCertificate(id, expiresAt)
+	if err != nil {
+		s.recordAuditEvent(r, "create_token", "failure", s.auditRequestActor(r, "web"), "web", "api-token", "certificate_error")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not issue client certificate"})
+		return
+	}
+	if err := s.saveClientCertificate(tx, id, issued); err != nil {
+		s.recordAuditEvent(r, "create_token", "failure", s.auditRequestActor(r, "web"), "web", "api-token", "certificate_storage_error")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not save client certificate"})
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		s.recordAuditEvent(r, "create_token", "failure", s.auditRequestActor(r, "web"), "web", "api-token", "storage_error")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not create API token"})
+		return
+	}
 	s.recordAuditEvent(r, "create_token", "success", s.auditRequestActor(r, "web"), "web", "api-token:"+strconv.FormatInt(id, 10), "")
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"id":         id,
-		"name":       req.Name,
-		"token":      token,
-		"created_at": createdAt.UTC().Format(time.RFC3339),
-		"expires_at": expiresAt.UTC().Format(time.RFC3339),
+		"id":                            id,
+		"name":                          req.Name,
+		"token":                         token,
+		"created_at":                    createdAt.UTC().Format(time.RFC3339),
+		"expires_at":                    expiresAt.UTC().Format(time.RFC3339),
+		"client_certificate":            issued.Certificate,
+		"client_private_key":            issued.PrivateKey,
+		"client_certificate_expires_at": issued.ExpiresAt.UTC().Format(time.RFC3339),
 	})
 }
 
@@ -985,9 +1039,13 @@ func (s *server) listAPITokens(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := s.db.Query(`
-		SELECT id, name, created_at, expires_at, revoked_at
-		FROM api_tokens
-		ORDER BY created_at DESC, id DESC`)
+		SELECT tokens.id, tokens.name, tokens.created_at, tokens.expires_at, tokens.revoked_at,
+		       MAX(certificates.not_after)
+		FROM api_tokens AS tokens
+		LEFT JOIN managed_client_certificates AS certificates
+		  ON certificates.token_id = tokens.id AND certificates.revoked_at IS NULL
+		GROUP BY tokens.id, tokens.name, tokens.created_at, tokens.expires_at, tokens.revoked_at
+		ORDER BY tokens.created_at DESC, tokens.id DESC`)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not list API tokens"})
 		return
@@ -997,19 +1055,23 @@ func (s *server) listAPITokens(w http.ResponseWriter, r *http.Request) {
 	tokens := make([]map[string]any, 0)
 	for rows.Next() {
 		var id, createdAt, expiresAt int64
-		var revokedAt sql.NullInt64
+		var revokedAt, certificateExpiresAt sql.NullInt64
 		var name string
-		if err := rows.Scan(&id, &name, &createdAt, &expiresAt, &revokedAt); err != nil {
+		if err := rows.Scan(&id, &name, &createdAt, &expiresAt, &revokedAt, &certificateExpiresAt); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read API tokens"})
 			return
 		}
 		item := map[string]any{
-			"id":         id,
-			"name":       name,
-			"created_at": time.Unix(createdAt, 0).UTC().Format(time.RFC3339),
-			"expires_at": time.Unix(expiresAt, 0).UTC().Format(time.RFC3339),
-			"expired":    expiresAt < time.Now().Unix(),
-			"revoked":    revokedAt.Valid,
+			"id":              id,
+			"name":            name,
+			"created_at":      time.Unix(createdAt, 0).UTC().Format(time.RFC3339),
+			"expires_at":      time.Unix(expiresAt, 0).UTC().Format(time.RFC3339),
+			"expired":         expiresAt < time.Now().Unix(),
+			"revoked":         revokedAt.Valid,
+			"has_certificate": certificateExpiresAt.Valid && certificateExpiresAt.Int64 > time.Now().Unix(),
+		}
+		if certificateExpiresAt.Valid {
+			item["certificate_expires_at"] = time.Unix(certificateExpiresAt.Int64, 0).UTC().Format(time.RFC3339)
 		}
 		tokens = append(tokens, item)
 	}
@@ -1033,12 +1095,24 @@ func (s *server) revokeAPIToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resource := "api-token:" + strconv.FormatInt(id, 10)
-	result, err := s.db.Exec(
-		"UPDATE api_tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
-		time.Now().Unix(),
-		id,
-	)
+	tx, err := s.db.Begin()
 	if err != nil {
+		s.recordAuditEvent(r, "revoke_token", "failure", s.auditRequestActor(r, "web"), "web", resource, "storage_error")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not revoke API token"})
+		return
+	}
+	defer tx.Rollback()
+	now := time.Now().Unix()
+	result, err := tx.Exec("UPDATE api_tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL", now, id)
+	if err != nil {
+		s.recordAuditEvent(r, "revoke_token", "failure", s.auditRequestActor(r, "web"), "web", resource, "storage_error")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not revoke API token"})
+		return
+	}
+	if _, err := tx.Exec(
+		"UPDATE managed_client_certificates SET revoked_at = ? WHERE token_id = ? AND revoked_at IS NULL",
+		now, id,
+	); err != nil {
 		s.recordAuditEvent(r, "revoke_token", "failure", s.auditRequestActor(r, "web"), "web", resource, "storage_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not revoke API token"})
 		return
@@ -1047,6 +1121,11 @@ func (s *server) revokeAPIToken(w http.ResponseWriter, r *http.Request) {
 	if err != nil || affected != 1 {
 		s.recordAuditEvent(r, "revoke_token", "failure", s.auditRequestActor(r, "web"), "web", resource, "active_token_not_found")
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "active API token not found"})
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		s.recordAuditEvent(r, "revoke_token", "failure", s.auditRequestActor(r, "web"), "web", resource, "storage_error")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not revoke API token"})
 		return
 	}
 	s.recordAuditEvent(r, "revoke_token", "success", s.auditRequestActor(r, "web"), "web", resource, "")
@@ -1610,6 +1689,10 @@ func (s *server) serveTokens(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) serveAudit(w http.ResponseWriter, r *http.Request) {
 	s.serveProtectedPage(w, r, "audit.gohtml")
+}
+
+func (s *server) serveSettings(w http.ResponseWriter, r *http.Request) {
+	s.serveProtectedPage(w, r, "settings.gohtml")
 }
 
 func (s *server) serveProtectedPage(w http.ResponseWriter, r *http.Request, name string) {

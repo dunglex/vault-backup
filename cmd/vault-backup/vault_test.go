@@ -50,6 +50,36 @@ func TestFormatVaultErrorPreservesOtherErrors(t *testing.T) {
 	}
 }
 
+func TestFormatVaultAPIErrorExplainsUnauthorizedToken(t *testing.T) {
+	err := &vault.ResponseError{StatusCode: http.StatusUnauthorized}
+
+	got := formatVaultAPIError(err)
+	for _, expected := range []string{
+		"401 Unauthorized",
+		"managed API token",
+		"expired",
+		"revoked",
+	} {
+		if !strings.Contains(got, expected) {
+			t.Errorf("formatVaultAPIError() = %q, want it to contain %q", got, expected)
+		}
+	}
+	if strings.Contains(got, "Error making API request") || strings.Contains(got, "Errors:") {
+		t.Fatalf("formatVaultAPIError() retained the unhelpful raw response: %q", got)
+	}
+}
+
+func TestFormatVaultAPIErrorSuggestsCertificateChecksForForbidden(t *testing.T) {
+	err := &vault.ResponseError{StatusCode: http.StatusForbidden}
+
+	got := formatVaultAPIError(err)
+	for _, expected := range []string{"403 Forbidden", "mTLS", "client certificate"} {
+		if !strings.Contains(got, expected) {
+			t.Errorf("formatVaultAPIError() = %q, want it to contain %q", got, expected)
+		}
+	}
+}
+
 func TestWriteSecretFileUsesRestrictedPermissions(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "secret.env")
 	if err := os.WriteFile(path, []byte("old secret"), 0644); err != nil {
