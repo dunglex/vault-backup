@@ -2450,9 +2450,17 @@ func (s *server) webSession(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	result := map[string]any{
 		"authenticated":        true,
 		"role":                 session.role,
 		"must_change_password": session.mustChangePassword,
-	})
+	}
+	if session.role == "operator" {
+		access, ok := s.webSecretAccessForRequest(w, r)
+		if !ok {
+			return
+		}
+		result["secret_prefixes"] = access.prefixes
+	}
+	writeJSON(w, http.StatusOK, result)
 }

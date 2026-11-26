@@ -158,6 +158,19 @@ textarea {
   grid-template-columns: minmax(24rem, 30rem) minmax(0, 1fr);
 }
 
+.secret-path-combine {
+  display: grid;
+  gap: 0.8rem;
+  grid-template-columns: minmax(12rem, 1fr) minmax(0, 1.5fr);
+  margin-bottom: 1.2rem;
+}
+
+.secret-path-combine select,
+.secret-path-combine input {
+  margin-bottom: 0;
+  min-width: 0;
+}
+
 .row-actions {
   align-items: center;
   display: flex;
@@ -689,6 +702,10 @@ pre {
   }
 
   .filters {
+    grid-template-columns: 1fr;
+  }
+
+  .secret-path-combine {
     grid-template-columns: 1fr;
   }
 

@@ -168,6 +168,7 @@ def main() -> None:
                 "authenticated": True,
                 "role": "operator",
                 "must_change_password": True,
+                "secret_prefixes": ["team-a"],
             },
             "operator session requires a password change",
         )
@@ -191,6 +192,14 @@ def main() -> None:
         status, operator_session = operator_client.json("GET", f"{server.https_url}/v1/session")
         assert_status(200, status, "read operator session after password change")
         require(operator_session["must_change_password"] is False, "clear first-login password requirement")
+        status, operator_secret_editor = operator_client.request("GET", f"{server.https_url}/secret.html")
+        assert_status(200, status, "open operator secret editor")
+        require(
+            b'id="secretPrefix"' in operator_secret_editor
+            and b'id="secretPathSuffix"' in operator_secret_editor
+            and b'id="adminPathField"' in operator_secret_editor,
+            "show prefix selector and suffix field in operator editor",
+        )
         status, visible_secrets = operator_client.json("GET", f"{server.https_url}/v1/secrets")
         assert_status(200, status, "list secrets within operator prefixes")
         require(visible_secrets == ["team-a/auth-test"], "filter operator secret listing by prefix")
