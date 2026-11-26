@@ -5,7 +5,7 @@ from test_common import HttpClient, ServerTest, assert_status, require
 
 
 def main() -> None:
-    with ServerTest(18222, 18223) as server:
+    with ServerTest(18222, 18223, operator_db=True) as server:
         status, _ = server.client.json(
             "POST",
             f"{server.https_url}/v1/setup/validate-key",

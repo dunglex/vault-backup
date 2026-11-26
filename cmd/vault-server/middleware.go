@@ -152,7 +152,12 @@ func (s *server) mfaEnrollmentGuard(next http.Handler) http.Handler {
 			return
 		}
 		var totpEnabled int
-		if err := s.db.QueryRow(
+		db := s.accountDatabase(session.role)
+		if db == nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		if err := db.QueryRow(
 			"SELECT totp_enabled FROM accounts WHERE username = ?",
 			session.username,
 		).Scan(&totpEnabled); err != nil {

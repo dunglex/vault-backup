@@ -23,6 +23,7 @@ type serverConfig struct {
 	DataDir            string
 	BackupDir          string
 	SecretsDBPath      string
+	OperatorDBPath     string
 	AuditDBPath        string
 	TLSCertPath        string
 	TLSKeyPath         string
@@ -56,6 +57,7 @@ func loadServerConfig(args []string) (serverConfig, error) {
 	flags.StringVar(&config.DataDir, "data-dir", envDefault("VAULT_SERVER_DATA_DIR", ""), "directory containing server state files")
 	flags.StringVar(&config.BackupDir, "backup-dir", envDefault("VAULT_SERVER_BACKUP_DIR", ""), "directory for scheduled server backups")
 	flags.StringVar(&config.SecretsDBPath, "secrets-db", envDefault("VAULT_SERVER_SECRETS_DB", ""), "path to encrypted secrets database")
+	flags.StringVar(&config.OperatorDBPath, "operator-db", envDefault("VAULT_SERVER_OPERATOR_DB", ""), "optional path to encrypted operator database (enables operator accounts)")
 	flags.StringVar(&config.AuditDBPath, "audit-db", envDefault("VAULT_SERVER_AUDIT_DB", ""), "path to plaintext audit database file (default: alongside main database)")
 	flags.StringVar(&config.TLSCertPath, "tls-cert", envDefault("VAULT_SERVER_TLS_CERT", ""), "path to TLS certificate PEM")
 	flags.StringVar(&config.TLSKeyPath, "tls-key", envDefault("VAULT_SERVER_TLS_KEY", ""), "path to TLS private key PEM")
@@ -74,6 +76,7 @@ func loadServerConfig(args []string) (serverConfig, error) {
 	config.EnvFilePath = strings.TrimSpace(config.EnvFilePath)
 	config.HTTPAddr = strings.TrimSpace(config.HTTPAddr)
 	config.SecretsDBPath = strings.TrimSpace(config.SecretsDBPath)
+	config.OperatorDBPath = strings.TrimSpace(config.OperatorDBPath)
 	config.DataDir = strings.TrimSpace(config.DataDir)
 	config.BackupDir = strings.TrimSpace(config.BackupDir)
 	config.TLSCertPath = strings.TrimSpace(config.TLSCertPath)
@@ -110,6 +113,11 @@ func loadServerConfig(args []string) (serverConfig, error) {
 	} else if config.SecretsDBPath, err = absoluteCleanPath(config.SecretsDBPath); err != nil {
 		return serverConfig{}, fmt.Errorf("resolve secrets database path: %w", err)
 	}
+	if config.OperatorDBPath != "" {
+		if config.OperatorDBPath, err = absoluteCleanPath(config.OperatorDBPath); err != nil {
+			return serverConfig{}, fmt.Errorf("resolve operator database path: %w", err)
+		}
+	}
 	if config.TLSCertPath == "" {
 		config.TLSCertPath = filepath.Join(filepath.Dir(config.DBPath), "server.crt")
 		config.TLSKeyPath = filepath.Join(filepath.Dir(config.DBPath), "server.key")
@@ -133,6 +141,12 @@ func loadServerConfig(args []string) (serverConfig, error) {
 	}
 	if config.SecretsDBPath == config.DBPath || config.SecretsDBPath == config.AuditDBPath {
 		return serverConfig{}, fmt.Errorf("secrets database path must differ from the app and audit database paths")
+	}
+	if config.OperatorDBPath != "" &&
+		(config.OperatorDBPath == config.DBPath ||
+			config.OperatorDBPath == config.SecretsDBPath ||
+			config.OperatorDBPath == config.AuditDBPath) {
+		return serverConfig{}, fmt.Errorf("operator database path must differ from the app, secrets, and audit database paths")
 	}
 	config.TrustedProxyRanges, err = parseTrustedProxies(*trustedProxies)
 	if err != nil {

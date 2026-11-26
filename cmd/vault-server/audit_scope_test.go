@@ -15,7 +15,7 @@ func TestOperatorAuditEventsAreFilteredBySecretPrefixes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.Exec(
+	if _, err := s.operatorDB.Exec(
 		"INSERT INTO accounts(username, password_hash, role, secret_prefixes) VALUES ('scoped-operator', 'hash', 'operator', ?)",
 		prefixes,
 	); err != nil {

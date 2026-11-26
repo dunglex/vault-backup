@@ -5,15 +5,15 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
+
+	"vault-backup/internal/operator"
 )
 
-const maxSecretPrefixes = 100
+const maxSecretPrefixes = operator.MaxSecretPrefixes
 
 type secretPrefixAccess struct {
 	unrestricted bool
@@ -22,128 +22,44 @@ type secretPrefixAccess struct {
 }
 
 func normalizeSecretPrefixes(prefixes []string) ([]string, error) {
-	if len(prefixes) == 0 || len(prefixes) > maxSecretPrefixes {
-		return nil, fmt.Errorf("provide between 1 and %d secret path prefixes", maxSecretPrefixes)
-	}
-	normalized := make([]string, 0, len(prefixes))
-	seen := make(map[string]struct{}, len(prefixes))
-	for _, prefix := range prefixes {
-		prefix = strings.TrimSpace(prefix)
-		if !validSecretPath(prefix) {
-			return nil, fmt.Errorf("secret path prefixes must use valid secret paths")
-		}
-		if _, exists := seen[prefix]; exists {
-			continue
-		}
-		seen[prefix] = struct{}{}
-		normalized = append(normalized, prefix)
-	}
-	if len(normalized) == 0 {
-		return nil, fmt.Errorf("provide at least one secret path prefix")
-	}
-	return normalized, nil
+	return operator.NormalizeSecretPrefixes(prefixes, validSecretPath)
 }
 
 func encodeSecretPrefixes(prefixes []string) (string, error) {
-	encoded, err := json.Marshal(prefixes)
-	if err != nil {
-		return "", fmt.Errorf("encode secret path prefixes: %w", err)
-	}
-	return string(encoded), nil
+	return operator.EncodeSecretPrefixes(prefixes)
 }
 
 func decodeSecretPrefixes(encoded string) ([]string, error) {
-	var prefixes []string
-	if err := json.Unmarshal([]byte(encoded), &prefixes); err != nil {
-		return nil, fmt.Errorf("decode secret path prefixes: %w", err)
+	return operator.DecodeSecretPrefixes(encoded, validSecretPath)
+}
+
+func (access secretPrefixAccess) operatorAccess() operator.SecretAccess {
+	return operator.SecretAccess{
+		Unrestricted: access.unrestricted,
+		Prefixes:     access.prefixes,
+		Encoded:      access.encoded,
 	}
-	if prefixes == nil {
-		return nil, fmt.Errorf("secret path prefixes must be an array")
-	}
-	if len(prefixes) > maxSecretPrefixes {
-		return nil, fmt.Errorf("too many secret path prefixes")
-	}
-	normalized := make([]string, 0, len(prefixes))
-	seen := make(map[string]struct{}, len(prefixes))
-	for _, prefix := range prefixes {
-		if !validSecretPath(prefix) {
-			return nil, fmt.Errorf("invalid stored secret path prefix")
-		}
-		if _, exists := seen[prefix]; exists {
-			continue
-		}
-		seen[prefix] = struct{}{}
-		normalized = append(normalized, prefix)
-	}
-	return normalized, nil
 }
 
 func (access secretPrefixAccess) allows(path string) bool {
-	if access.unrestricted {
-		return true
-	}
-	for _, prefix := range access.prefixes {
-		if path == prefix || strings.HasPrefix(path, prefix+"/") {
-			return true
-		}
-	}
-	return false
+	return access.operatorAccess().Allows(path)
 }
 
 func (access secretPrefixAccess) intersects(path string) bool {
-	if access.unrestricted {
-		return true
-	}
-	for _, prefix := range access.prefixes {
-		if path == prefix ||
-			strings.HasPrefix(path, prefix+"/") ||
-			strings.HasPrefix(prefix, path+"/") {
-			return true
-		}
-	}
-	return false
+	return access.operatorAccess().Intersects(path)
 }
 
 func (access secretPrefixAccess) contains(candidate string) bool {
-	if access.unrestricted {
-		return true
-	}
-	for _, prefix := range access.prefixes {
-		if candidate == prefix || strings.HasPrefix(candidate, prefix+"/") {
-			return true
-		}
-	}
-	return false
+	return access.operatorAccess().Contains(candidate)
 }
 
 func (access secretPrefixAccess) intersect(other secretPrefixAccess) secretPrefixAccess {
-	if access.unrestricted {
-		return other
+	result := access.operatorAccess().Intersect(other.operatorAccess())
+	return secretPrefixAccess{
+		unrestricted: result.Unrestricted,
+		prefixes:     result.Prefixes,
+		encoded:      result.Encoded,
 	}
-	if other.unrestricted {
-		return access
-	}
-	intersection := secretPrefixAccess{prefixes: make([]string, 0)}
-	seen := make(map[string]struct{})
-	for _, left := range access.prefixes {
-		for _, right := range other.prefixes {
-			switch {
-			case left == right || strings.HasPrefix(left, right+"/"):
-				if _, exists := seen[left]; !exists {
-					intersection.prefixes = append(intersection.prefixes, left)
-					seen[left] = struct{}{}
-				}
-			case strings.HasPrefix(right, left+"/"):
-				if _, exists := seen[right]; !exists {
-					intersection.prefixes = append(intersection.prefixes, right)
-					seen[right] = struct{}{}
-				}
-			}
-		}
-	}
-	encoded, _ := json.Marshal(intersection.prefixes)
-	intersection.encoded = string(encoded)
-	return intersection
 }
 
 func (access secretPrefixAccess) empty() bool {
@@ -165,8 +81,12 @@ func (s *server) webSecretAccessForRequest(w http.ResponseWriter, r *http.Reques
 	if session.role == "admin" {
 		return secretPrefixAccess{unrestricted: true}, true
 	}
+	if session.role != "operator" || s.operatorDB == nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return secretPrefixAccess{}, false
+	}
 	var encoded string
-	if err := s.db.QueryRow(
+	if err := s.operatorDB.QueryRow(
 		"SELECT secret_prefixes FROM accounts WHERE username = ? AND role = 'operator' AND locked = 0",
 		session.username,
 	).Scan(&encoded); err != nil {
@@ -220,9 +140,15 @@ func (s *server) apiSecretAccessForRequest(w http.ResponseWriter, r *http.Reques
 		var role, accountPrefixes string
 		var locked int
 		err := s.db.QueryRow(
-			"SELECT role, locked, secret_prefixes FROM accounts WHERE username = ?",
+			"SELECT role, locked, secret_prefixes FROM accounts WHERE username = ? AND role = 'admin'",
 			createdBy.String,
 		).Scan(&role, &locked, &accountPrefixes)
+		if err == sql.ErrNoRows && s.operatorDB != nil {
+			err = s.operatorDB.QueryRow(
+				"SELECT role, locked, secret_prefixes FROM accounts WHERE username = ? AND role = 'operator'",
+				createdBy.String,
+			).Scan(&role, &locked, &accountPrefixes)
+		}
 		if err != nil && err != sql.ErrNoRows {
 			log.Printf("ERROR: could not read API token owner access: %v", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not verify secret access"})
@@ -295,68 +221,6 @@ func (s *server) visibleSecretPaths(access secretPrefixAccess) (*sql.Rows, error
 		ORDER BY path`,
 		access.encoded,
 	)
-}
-
-func (s *server) updateOperatorSecretPrefixes(w http.ResponseWriter, r *http.Request) {
-	actor := s.auditRequestActor(r, "web")
-	if !s.requireAdmin(w, r) {
-		s.recordAuditEvent(r, "update_operator_scopes", "failure", actor, "web", "operator", "unauthorized")
-		return
-	}
-	if r.TLS == nil {
-		s.recordAuditEvent(r, "update_operator_scopes", "failure", actor, "web", "operator", "https_required")
-		writeJSON(w, http.StatusUpgradeRequired, map[string]string{"error": "HTTPS is required to manage operator accounts"})
-		return
-	}
-	var request struct {
-		Username string   `json:"username"`
-		Prefixes []string `json:"prefixes"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		s.recordAuditEvent(r, "update_operator_scopes", "failure", actor, "web", "operator", "invalid_request")
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
-		return
-	}
-	request.Username = strings.TrimSpace(request.Username)
-	if request.Username == "" || len(request.Username) > 128 {
-		s.recordAuditEvent(r, "update_operator_scopes", "failure", actor, "web", "operator", "invalid_username")
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "valid username is required"})
-		return
-	}
-	prefixes, err := normalizeSecretPrefixes(request.Prefixes)
-	if err != nil {
-		s.recordAuditEvent(r, "update_operator_scopes", "failure", actor, "web", "operator:"+request.Username, "invalid_secret_prefixes")
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
-	}
-	encoded, err := encodeSecretPrefixes(prefixes)
-	if err != nil {
-		s.recordAuditEvent(r, "update_operator_scopes", "failure", actor, "web", "operator:"+request.Username, "encoding_error")
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not save secret path prefixes"})
-		return
-	}
-	result, err := s.db.Exec(
-		"UPDATE accounts SET secret_prefixes = ? WHERE username = ? AND role = 'operator'",
-		encoded, request.Username,
-	)
-	if err != nil {
-		s.recordAuditEvent(r, "update_operator_scopes", "failure", actor, "web", "operator:"+request.Username, "storage_error")
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not update operator secret access"})
-		return
-	}
-	updated, err := result.RowsAffected()
-	if err != nil {
-		s.recordAuditEvent(r, "update_operator_scopes", "failure", actor, "web", "operator:"+request.Username, "storage_error")
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not update operator secret access"})
-		return
-	}
-	if updated != 1 {
-		s.recordAuditEvent(r, "update_operator_scopes", "failure", actor, "web", "operator:"+request.Username, "operator_not_found")
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "operator not found"})
-		return
-	}
-	s.recordAuditEvent(r, "update_operator_scopes", "success", actor, "web", "operator:"+request.Username, "")
-	writeJSON(w, http.StatusOK, map[string]any{"username": request.Username, "prefixes": prefixes})
 }
 
 func (s *server) updateAPITokenSecretPrefixes(w http.ResponseWriter, r *http.Request) {

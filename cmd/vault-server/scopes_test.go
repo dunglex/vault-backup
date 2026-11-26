@@ -119,7 +119,7 @@ func TestOperatorScopesRestrictWebSecretsAndLegacyEmptyScopesDeny(t *testing.T) 
 	); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.Exec(
+	if _, err := s.operatorDB.Exec(
 		"INSERT INTO accounts(username, password_hash, role) VALUES ('legacy-operator', 'hash', 'operator')",
 	); err != nil {
 		t.Fatal(err)
@@ -148,7 +148,7 @@ func TestOperatorScopesRestrictWebSecretsAndLegacyEmptyScopesDeny(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.Exec("UPDATE accounts SET secret_prefixes = ? WHERE username = 'legacy-operator'", prefixes); err != nil {
+	if _, err := s.operatorDB.Exec("UPDATE accounts SET secret_prefixes = ? WHERE username = 'legacy-operator'", prefixes); err != nil {
 		t.Fatal(err)
 	}
 

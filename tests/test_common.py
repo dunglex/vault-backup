@@ -88,10 +88,17 @@ class HttpClient:
 
 
 class ServerTest:
-    def __init__(self, port: int, http_port: int, setup_key: str = "integration-test-setup-key"):
+    def __init__(
+        self,
+        port: int,
+        http_port: int,
+        setup_key: str = "integration-test-setup-key",
+        operator_db: bool = False,
+    ):
         self.port = port
         self.http_port = http_port
         self.setup_key = setup_key
+        self.operator_db = operator_db
         self.temp = tempfile.TemporaryDirectory()
         self.path = Path(self.temp.name)
         self.cert = self.path / "test-cert.pem"
@@ -162,6 +169,9 @@ class ServerTest:
             "VAULT_SERVER_SECRETS_DB": str(self.path / "vault-secrets.db"),
             "VAULT_SERVER_DB_PASSWORD": self.password,
             "VAULT_SERVER_SETUP_KEY": self.setup_key,
+            "VAULT_SERVER_OPERATOR_DB": (
+                str(self.path / "operator.db") if self.operator_db else ""
+            ),
         }
         self.process = subprocess.Popen(
             [str(self.server_binary), "--tls-cert", str(self.cert), "--tls-key", str(self.key)],

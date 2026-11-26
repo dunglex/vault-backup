@@ -34,6 +34,8 @@ import (
 
 	"github.com/go-co-op/gocron/v2"
 	"golang.org/x/crypto/bcrypt"
+
+	"vault-backup/internal/operator"
 )
 
 const (
@@ -48,23 +50,25 @@ const (
 )
 
 type server struct {
-	db            *sql.DB
-	secretsDB     *sql.DB
-	auditStore    *auditStore
-	setupKey      string
-	setupKeyPath  string
-	setupDeadline time.Time
-	adminName     string
-	aead          cipher.AEAD
-	secretsAEAD   cipher.AEAD
-	clientCA      *managedClientCA
-	serverCerts   *serverCertificateManager
-	acmeAvailable bool
-	logWriter     *serverLogWriter
-	backupConfig  serverBackupConfig
-	backupCron    gocron.Scheduler
-	backupJob     gocron.Job
-	lastBackup    string
+	db              *sql.DB
+	secretsDB       *sql.DB
+	operatorDB      *sql.DB
+	operatorHandler *operator.Handler
+	auditStore      *auditStore
+	setupKey        string
+	setupKeyPath    string
+	setupDeadline   time.Time
+	adminName       string
+	aead            cipher.AEAD
+	secretsAEAD     cipher.AEAD
+	clientCA        *managedClientCA
+	serverCerts     *serverCertificateManager
+	acmeAvailable   bool
+	logWriter       *serverLogWriter
+	backupConfig    serverBackupConfig
+	backupCron      gocron.Scheduler
+	backupJob       gocron.Job
+	lastBackup      string
 
 	mu                sync.Mutex
 	backupMu          sync.Mutex
@@ -128,7 +132,7 @@ func (w httpErrorLogWriter) Write(p []byte) (int, error) {
 	return w.output.Write(p)
 }
 
-//go:embed *.gohtml *.css *.js
+//go:embed *.gohtml public
 var embeddedFiles embed.FS
 
 var pageTemplate = template.Must(template.ParseFS(embeddedFiles, "*.gohtml"))
@@ -162,6 +166,9 @@ func main() {
 		filepath.Dir(config.SecretsDBPath),
 		filepath.Dir(config.AuditDBPath),
 	}
+	if config.OperatorDBPath != "" {
+		databaseDirs = append(databaseDirs, filepath.Dir(config.OperatorDBPath))
+	}
 	for _, dir := range databaseDirs {
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			log.Fatal(err)
@@ -178,6 +185,13 @@ func main() {
 	secretsMasterKey, err := loadOrCreateKey(config.SecretsDBPath+".key", config.DBPassword)
 	if err != nil {
 		log.Fatal(err)
+	}
+	var operatorMasterKey []byte
+	if config.OperatorDBPath != "" {
+		operatorMasterKey, err = loadOrCreateKey(config.OperatorDBPath+".key", config.DBPassword)
+		if err != nil {
+			log.Fatal(err)
+		}
 	}
 
 	var activeServer *server
@@ -215,6 +229,26 @@ func main() {
 			log.Printf("Could not close secrets database cleanly: %v", err)
 		}
 	}()
+	var operatorDB *sql.DB
+	if config.OperatorDBPath != "" {
+		operatorDB, _, err = openDatabaseWithOptions(config.OperatorDBPath, operatorMasterKey, false)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer func() {
+			if activeServer != nil {
+				if activeServer.operatorDB != nil {
+					if err := activeServer.operatorDB.Close(); err != nil {
+						log.Printf("Could not close operator database cleanly: %v", err)
+					}
+				}
+				return
+			}
+			if err := operatorDB.Close(); err != nil {
+				log.Printf("Could not close operator database cleanly: %v", err)
+			}
+		}()
+	}
 	auditStore, err := openAnnualAuditStore(config.AuditDBPath)
 	if err != nil {
 		log.Fatal(err)
@@ -240,6 +274,14 @@ func main() {
 	if err := initializeDatabase(db); err != nil {
 		log.Fatal(err)
 	}
+	if operatorDB != nil {
+		if err := operator.Initialize(operatorDB); err != nil {
+			log.Fatal(err)
+		}
+		if err := operator.MigrateLegacyAccounts(db, operatorDB); err != nil {
+			log.Fatal(err)
+		}
+	}
 	fileLogging, err := readFileLoggingSetting(db)
 	if err != nil {
 		log.Fatal(err)
@@ -257,6 +299,11 @@ func main() {
 	}
 	if err := os.Chmod(config.SecretsDBPath, 0600); err != nil {
 		log.Fatal(err)
+	}
+	if config.OperatorDBPath != "" {
+		if err := os.Chmod(config.OperatorDBPath, 0600); err != nil {
+			log.Fatal(err)
+		}
 	}
 	serverCerts, err := newServerCertificateManager(
 		db,
@@ -313,6 +360,7 @@ func main() {
 	s := &server{
 		db:            db,
 		secretsDB:     secretsDB,
+		operatorDB:    operatorDB,
 		auditStore:    auditStore,
 		setupKey:      setupKey,
 		setupKeyPath:  setupKeyPath,
@@ -328,15 +376,20 @@ func main() {
 			backupDir:      config.BackupDir,
 			dbPath:         config.DBPath,
 			secretsDBPath:  config.SecretsDBPath,
+			operatorDBPath: config.OperatorDBPath,
 			auditDBPath:    config.AuditDBPath,
 			masterKey:      masterKey,
 			secretsKey:     secretsMasterKey,
+			operatorKey:    operatorMasterKey,
 			allowPlaintext: config.AllowPlaintextDB,
 		},
 		requestsIdle:   closedSignal(),
 		sessions:       map[string]sessionInfo{},
 		attempts:       map[string][]time.Time{},
 		trustedProxies: config.TrustedProxyRanges,
+	}
+	if s.operatorDB != nil {
+		s.operatorHandler = s.newOperatorHandler()
 	}
 	activeServer = s
 	// Load or create the managed client CA for mTLS.
@@ -378,7 +431,9 @@ func main() {
 	mux.HandleFunc("GET /settings", redirectSecurityPage)
 	mux.HandleFunc("GET /settings.html", redirectSecurityPage)
 	for _, path := range []string{"/operators", "/operators.html"} {
-		mux.HandleFunc("GET "+path, s.serveOperators)
+		if s.operatorDB != nil {
+			mux.HandleFunc("GET "+path, s.serveOperators)
+		}
 	}
 	for _, path := range []string{"/token", "/token.html"} {
 		mux.HandleFunc("GET "+path, func(w http.ResponseWriter, r *http.Request) {
@@ -424,14 +479,16 @@ func main() {
 	mux.HandleFunc("GET /v1/settings/blocked-login-ips", s.listBlockedLoginIPs)
 	mux.HandleFunc("GET /v1/settings/server-backups", s.listServerBackups)
 	mux.HandleFunc("DELETE /v1/settings/blocked-login-ips/{ip}", s.unblockLoginIP)
-	mux.HandleFunc("GET /v1/operators", s.listOperators)
-	mux.HandleFunc("GET /v1/operators/details", s.listOperatorDetails)
-	mux.HandleFunc("POST /v1/operators", s.createOperator)
-	mux.HandleFunc("DELETE /v1/operators", s.deleteOperator)
-	mux.HandleFunc("POST /v1/operators/password", s.resetOperatorPassword)
-	mux.HandleFunc("PATCH /v1/operators/lock", s.setOperatorLock)
-	mux.HandleFunc("DELETE /v1/operators/totp", s.removeOperatorTOTP)
-	mux.HandleFunc("PUT /v1/operators/prefixes", s.updateOperatorSecretPrefixes)
+	if s.operatorDB != nil {
+		mux.HandleFunc("GET /v1/operators", s.listOperators)
+		mux.HandleFunc("GET /v1/operators/details", s.listOperatorDetails)
+		mux.HandleFunc("POST /v1/operators", s.createOperator)
+		mux.HandleFunc("DELETE /v1/operators", s.deleteOperator)
+		mux.HandleFunc("POST /v1/operators/password", s.resetOperatorPassword)
+		mux.HandleFunc("PATCH /v1/operators/lock", s.setOperatorLock)
+		mux.HandleFunc("DELETE /v1/operators/totp", s.removeOperatorTOTP)
+		mux.HandleFunc("PUT /v1/operators/prefixes", s.updateOperatorSecretPrefixes)
+	}
 	mux.HandleFunc("PUT /v1/tokens/{id}/prefixes", s.updateAPITokenSecretPrefixes)
 	mux.HandleFunc("GET /v1/account/totp", s.getAccountTOTP)
 	mux.HandleFunc("POST /v1/account/totp/setup", s.setupAccountTOTP)
@@ -631,7 +688,7 @@ func decryptWithAEAD(aead cipher.AEAD, encoded string) ([]byte, error) {
 
 func serveEmbeddedAsset(name, contentType string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		data, err := embeddedFiles.ReadFile(name)
+		data, err := embeddedFiles.ReadFile("public/" + name)
 		if err != nil {
 			http.NotFound(w, r)
 			return
@@ -660,6 +717,11 @@ func (s *server) health(w http.ResponseWriter, r *http.Request) {
 				return checkDatabaseHealth(ctx, db)
 			})
 		},
+	}
+	if s.operatorDB != nil {
+		checks = append(checks, func(ctx context.Context) error {
+			return checkDatabaseHealth(ctx, s.operatorDB)
+		})
 	}
 	results := make(chan error, len(checks))
 	for _, check := range checks {
@@ -829,6 +891,17 @@ func (s *server) setup(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "username required and password must be at least 12 characters"})
 		return
 	}
+	if s.operatorDB != nil {
+		exists, err := s.accountExists(req.Username)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not check account name"})
+			return
+		}
+		if exists {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "an account with that username already exists"})
+			return
+		}
+	}
 	loginURL, err := s.setupLoginURL(r)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not prepare login redirect"})
@@ -940,25 +1013,20 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var hash, role string
-	var totpSecret sql.NullString
-	var totpEnabled, locked, mustChangePassword int
-	if err := s.db.QueryRow(
-		"SELECT password_hash, role, totp_secret, totp_enabled, locked, must_change_password FROM accounts WHERE username = ?",
-		req.Username,
-	).Scan(&hash, &role, &totpSecret, &totpEnabled, &locked, &mustChangePassword); err != nil {
+	account, _, err := s.loadAccount(req.Username)
+	if err != nil {
 		s.recordLoginFailure(r, "web")
 		s.recordAuditEvent(r, "login", "failure", req.Username, "web", "", "invalid_credentials")
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid username or password"})
 		return
 	}
-	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(req.Password)); err != nil {
+	if err := bcrypt.CompareHashAndPassword([]byte(account.passwordHash), []byte(req.Password)); err != nil {
 		s.recordLoginFailure(r, "web")
 		s.recordAuditEvent(r, "login", "failure", req.Username, "web", "", "invalid_credentials")
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid username or password"})
 		return
 	}
-	if locked == 1 {
+	if account.locked == 1 {
 		s.recordAuditEvent(r, "login", "failure", req.Username, "web", "", "account_locked")
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "account is locked"})
 		return
@@ -968,8 +1036,8 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read MFA settings"})
 		return
 	}
-	mfaSetupRequired := enforceMFA && totpEnabled != 1
-	if totpEnabled == 1 {
+	mfaSetupRequired := enforceMFA && account.totpEnabled != 1
+	if account.totpEnabled == 1 {
 		if r.TLS == nil {
 			writeJSON(w, http.StatusUpgradeRequired, map[string]string{"error": "HTTPS is required for two-factor login"})
 			return
@@ -979,7 +1047,7 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, map[string]bool{"requires_totp": true})
 			return
 		}
-		valid, err := s.verifyAccountSecondFactor(req.Username, totpSecret.String, req.TOTPCode)
+		valid, err := s.verifyAccountSecondFactor(req.Username, account.totpSecret.String, req.TOTPCode, account.role)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not verify authentication code"})
 			return
@@ -999,15 +1067,15 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
 	sessionTTL := defaultSessionTTL
-	if totpEnabled == 1 {
+	if account.totpEnabled == 1 {
 		sessionTTL = totpSessionTTL
 	}
 	session := sessionInfo{
 		username:           req.Username,
-		role:               role,
+		role:               account.role,
 		expiresAt:          time.Now().Add(sessionTTL),
 		ttl:                sessionTTL,
-		mustChangePassword: mustChangePassword == 1,
+		mustChangePassword: account.mustChangePassword == 1,
 	}
 	if err := s.storeSession(token, session); err != nil {
 		s.recordAuditEvent(r, "login", "failure", req.Username, "web", "", "session_storage_error")
@@ -1032,11 +1100,11 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"token":                token,
 			"requires_mfa_setup":   true,
-			"must_change_password": mustChangePassword == 1,
+			"must_change_password": account.mustChangePassword == 1,
 		})
 		return
 	}
-	if mustChangePassword == 1 {
+	if account.mustChangePassword == 1 {
 		s.recordAuditEvent(r, "login", "challenge", req.Username, "web", "", "password_change_required")
 		writeJSON(w, http.StatusOK, map[string]any{
 			"token":                token,
@@ -1068,30 +1136,25 @@ func (s *server) loginLDAP(w http.ResponseWriter, r *http.Request) {
 	if s.delayLoginAction(w, r) {
 		return
 	}
-	var hash, role string
-	var totpSecret sql.NullString
-	var totpEnabled, locked, mustChangePassword int
-	if err := s.db.QueryRow(
-		"SELECT password_hash, role, totp_secret, totp_enabled, locked, must_change_password FROM accounts WHERE username = ?",
-		username,
-	).Scan(&hash, &role, &totpSecret, &totpEnabled, &locked, &mustChangePassword); err != nil {
+	account, _, err := s.loadAccount(username)
+	if err != nil {
 		s.recordLoginFailure(r, "api")
 		s.recordAuditEvent(r, "login", "failure", username, "api", "", "invalid_credentials")
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid username or password"})
 		return
 	}
-	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(req.Password)); err != nil {
+	if err := bcrypt.CompareHashAndPassword([]byte(account.passwordHash), []byte(req.Password)); err != nil {
 		s.recordLoginFailure(r, "api")
 		s.recordAuditEvent(r, "login", "failure", username, "api", "", "invalid_credentials")
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid username or password"})
 		return
 	}
-	if locked == 1 {
+	if account.locked == 1 {
 		s.recordAuditEvent(r, "login", "failure", username, "api", "", "account_locked")
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "account is locked"})
 		return
 	}
-	if mustChangePassword == 1 {
+	if account.mustChangePassword == 1 {
 		s.recordAuditEvent(r, "login", "challenge", username, "api", "", "password_change_required")
 		writeJSON(w, http.StatusForbidden, map[string]any{
 			"error":                "password change is required through web login",
@@ -1104,7 +1167,7 @@ func (s *server) loginLDAP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read MFA settings"})
 		return
 	}
-	if enforceMFA && totpEnabled != 1 {
+	if enforceMFA && account.totpEnabled != 1 {
 		s.recordAuditEvent(r, "login", "challenge", username, "api", "", "mfa_setup_required")
 		writeJSON(w, http.StatusForbidden, map[string]any{
 			"error":              "MFA setup is required through web login",
@@ -1112,7 +1175,7 @@ func (s *server) loginLDAP(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	if totpEnabled == 1 {
+	if account.totpEnabled == 1 {
 		if r.TLS == nil {
 			writeJSON(w, http.StatusUpgradeRequired, map[string]string{"error": "HTTPS is required for two-factor login"})
 			return
@@ -1123,7 +1186,7 @@ func (s *server) loginLDAP(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authentication code required"})
 			return
 		}
-		valid, err := s.verifyAccountSecondFactor(username, totpSecret.String, req.TOTPCode)
+		valid, err := s.verifyAccountSecondFactor(username, account.totpSecret.String, req.TOTPCode, account.role)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not verify authentication code"})
 			return
@@ -1143,7 +1206,7 @@ func (s *server) loginLDAP(w http.ResponseWriter, r *http.Request) {
 	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
 	session := sessionInfo{
 		username:  username,
-		role:      role,
+		role:      account.role,
 		expiresAt: time.Now().Add(defaultSessionTTL),
 		ttl:       defaultSessionTTL,
 	}
@@ -2404,7 +2467,35 @@ func (s *server) serveSecurity(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) serveOperators(w http.ResponseWriter, r *http.Request) {
-	s.serveAdminProtectedPage(w, r, "operators.gohtml")
+	if s.operatorDB == nil {
+		s.serveNotFound(w, r)
+		return
+	}
+	if s.adminName == "" {
+		destination := "/setup.html"
+		if s.setupLocked() {
+			destination = "/lock.html"
+		}
+		http.Redirect(w, r, destination, http.StatusSeeOther)
+		return
+	}
+	session, ok := s.sessionFromRequest(r)
+	if !ok {
+		s.renderPage(w, "401.gohtml", http.StatusUnauthorized, nil)
+		return
+	}
+	if session.role != "admin" {
+		http.Error(w, "administrator access required", http.StatusForbidden)
+		return
+	}
+	var output bytes.Buffer
+	if err := operator.RenderPage(&output); err != nil {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = output.WriteTo(w)
 }
 
 func (s *server) serveAdminProtectedPage(w http.ResponseWriter, r *http.Request, name string) {
@@ -2425,7 +2516,10 @@ func (s *server) serveAdminProtectedPage(w http.ResponseWriter, r *http.Request,
 		http.Error(w, "administrator access required", http.StatusForbidden)
 		return
 	}
-	s.renderPage(w, name, http.StatusOK, map[string]bool{"IsAdmin": true})
+	s.renderPage(w, name, http.StatusOK, map[string]bool{
+		"IsAdmin":      true,
+		"HasOperators": s.operatorDB != nil,
+	})
 }
 
 func (s *server) serveProtectedPage(w http.ResponseWriter, r *http.Request, name string) {
@@ -2442,7 +2536,10 @@ func (s *server) serveProtectedPage(w http.ResponseWriter, r *http.Request, name
 		s.renderPage(w, "401.gohtml", http.StatusUnauthorized, nil)
 		return
 	}
-	data := map[string]bool{"IsAdmin": session.role == "admin"}
+	data := map[string]bool{
+		"IsAdmin":      session.role == "admin",
+		"HasOperators": s.operatorDB != nil,
+	}
 	if name == "token.gohtml" {
 		enforced, err := s.mtlsSettings()
 		if err != nil {

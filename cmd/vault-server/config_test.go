@@ -21,6 +21,7 @@ func TestLoadServerConfigAppliesEnvFileEnvironmentAndFlagPrecedence(t *testing.T
 		"VAULT_SERVER_DATA_DIR=" + filepath.Join(dir, "file-data"),
 		"VAULT_SERVER_BACKUP_DIR=" + filepath.Join(dir, "file-backups"),
 		"VAULT_SERVER_AUDIT_DB=" + filepath.Join(dir, "audit.db"),
+		"VAULT_SERVER_OPERATOR_DB=" + filepath.Join(dir, "operators.db"),
 		"VAULT_SERVER_ALLOW_PLAINTEXT_DB=true",
 		"VAULT_SERVER_TRUSTED_PROXIES=10.10.0.0/16",
 		"VAULT_SERVER_SETUP_KEY=from-file",
@@ -35,6 +36,7 @@ func TestLoadServerConfigAppliesEnvFileEnvironmentAndFlagPrecedence(t *testing.T
 		"--env-file", envPath,
 		"--https-addr", "127.0.0.1:8200",
 		"--db", filepath.Join(dir, "cli.db"),
+		"--operator-db", filepath.Join(dir, "cli-operators.db"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -46,8 +48,9 @@ func TestLoadServerConfigAppliesEnvFileEnvironmentAndFlagPrecedence(t *testing.T
 		config.DataDir != filepath.Join(dir, "file-data") ||
 		config.BackupDir != filepath.Join(dir, "file-backups") ||
 		config.SecretsDBPath != filepath.Join(dir, "cli-secrets.db") ||
+		config.OperatorDBPath != filepath.Join(dir, "cli-operators.db") ||
 		config.AuditDBPath != filepath.Join(dir, "audit.db") {
-		t.Fatalf("database paths = app:%q secrets:%q audit:%q", config.DBPath, config.SecretsDBPath, config.AuditDBPath)
+		t.Fatalf("database paths = app:%q secrets:%q operators:%q audit:%q", config.DBPath, config.SecretsDBPath, config.OperatorDBPath, config.AuditDBPath)
 	}
 	if config.TLSCertPath != filepath.Join(dir, "server.crt") || config.TLSKeyPath != filepath.Join(dir, "server.key") {
 		t.Fatalf("default TLS paths = %q / %q", config.TLSCertPath, config.TLSKeyPath)
@@ -87,6 +90,11 @@ func TestLoadServerConfigValidatesRequiredAndRelatedOptions(t *testing.T) {
 			want: "secrets database path must differ",
 		},
 		{
+			name: "operator database reuses app path",
+			args: []string{"--env-file=", "--db", "same.db", "--operator-db", "same.db"},
+			want: "operator database path must differ",
+		},
+		{
 			name: "backup directory reuses data path",
 			args: []string{"--env-file=", "--data-dir", "same", "--backup-dir", "same"},
 			want: "backup directory must differ",
@@ -123,6 +131,7 @@ func unsetServerConfigEnvironment(t *testing.T) {
 		"VAULT_SERVER_DATA_DIR",
 		"VAULT_SERVER_BACKUP_DIR",
 		"VAULT_SERVER_SECRETS_DB",
+		"VAULT_SERVER_OPERATOR_DB",
 		"VAULT_SERVER_AUDIT_DB",
 		"VAULT_SERVER_TLS_CERT",
 		"VAULT_SERVER_TLS_KEY",

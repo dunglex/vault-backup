@@ -35,8 +35,14 @@ func (s *server) changeAccountPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	db := s.accountDatabase(session.role)
+	if db == nil {
+		s.recordAuditEvent(r, "change_password", "failure", session.username, "web", "account:"+session.username, "storage_error")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read account"})
+		return
+	}
 	var currentHash string
-	if err := s.db.QueryRow("SELECT password_hash FROM accounts WHERE username = ?", session.username).Scan(&currentHash); err != nil {
+	if err := db.QueryRow("SELECT password_hash FROM accounts WHERE username = ?", session.username).Scan(&currentHash); err != nil {
 		s.recordAuditEvent(r, "change_password", "failure", session.username, "web", "account:"+session.username, "storage_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read account"})
 		return
@@ -53,7 +59,7 @@ func (s *server) changeAccountPassword(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not change password"})
 		return
 	}
-	result, err := s.db.Exec(
+	result, err := db.Exec(
 		"UPDATE accounts SET password_hash = ?, must_change_password = 0 WHERE username = ? AND password_hash = ?",
 		string(newHash),
 		session.username,

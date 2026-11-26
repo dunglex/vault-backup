@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
+
+	"vault-backup/internal/operator"
 )
 
 func newOperatorTestServer(t *testing.T) *server {
@@ -31,6 +33,19 @@ func newOperatorTestServer(t *testing.T) *server {
 	if err := initializeDatabase(db); err != nil {
 		t.Fatalf("initialize database: %v", err)
 	}
+	operatorDB, err := sql.Open("sqlite", filepath.Join(dir, "operator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := operatorDB.Close(); err != nil {
+			t.Errorf("close operator database: %v", err)
+		}
+	})
+	operatorDB.SetMaxOpenConns(1)
+	if err := operator.Initialize(operatorDB); err != nil {
+		t.Fatalf("initialize operator database: %v", err)
+	}
 	secretsDB, err := sql.Open("sqlite", filepath.Join(dir, "vault-secrets.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -48,9 +63,10 @@ func newOperatorTestServer(t *testing.T) *server {
 		t.Fatal(err)
 	}
 	s := &server{
-		db:        db,
-		secretsDB: secretsDB,
-		adminName: "admin",
+		db:         db,
+		secretsDB:  secretsDB,
+		operatorDB: operatorDB,
+		adminName:  "admin",
 		loginDelay: func(context.Context) error {
 			return nil
 		},
@@ -59,6 +75,7 @@ func newOperatorTestServer(t *testing.T) *server {
 		},
 		attempts: make(map[string][]time.Time),
 	}
+	s.operatorHandler = s.newOperatorHandler()
 	if err := s.storeSession("admin-session", s.sessions["admin-session"]); err != nil {
 		t.Fatalf("store admin test session: %v", err)
 	}
@@ -99,7 +116,7 @@ func TestOperatorCreationGeneratesOneTimeTemporaryPassword(t *testing.T) {
 	}
 	var passwordHash string
 	var mustChangePassword int
-	if err := s.db.QueryRow(
+	if err := s.operatorDB.QueryRow(
 		"SELECT password_hash, must_change_password FROM accounts WHERE username = ?",
 		"generated-operator",
 	).Scan(&passwordHash, &mustChangePassword); err != nil {
@@ -120,7 +137,7 @@ func TestAdminResetsOperatorPasswordAndRevokesSessions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.Exec(
+	if _, err := s.operatorDB.Exec(
 		"INSERT INTO accounts(username, password_hash, role) VALUES ('reset-target', ?, 'operator')",
 		string(oldHash),
 	); err != nil {
@@ -162,7 +179,7 @@ func TestAdminResetsOperatorPasswordAndRevokesSessions(t *testing.T) {
 
 	var passwordHash string
 	var mustChangePassword int
-	if err := s.db.QueryRow(
+	if err := s.operatorDB.QueryRow(
 		"SELECT password_hash, must_change_password FROM accounts WHERE username = 'reset-target'",
 	).Scan(&passwordHash, &mustChangePassword); err != nil {
 		t.Fatal(err)
@@ -240,14 +257,14 @@ func TestOperatorManagementIsAdminOnlyAndRevokesDeletedSessions(t *testing.T) {
 	}
 
 	var role string
-	if err := s.db.QueryRow("SELECT role FROM accounts WHERE username = ?", "night-shift").Scan(&role); err != nil {
+	if err := s.operatorDB.QueryRow("SELECT role FROM accounts WHERE username = ?", "night-shift").Scan(&role); err != nil {
 		t.Fatal(err)
 	}
 	if role != "operator" {
 		t.Fatalf("new account role = %q, want operator", role)
 	}
 	var mustChangePassword int
-	if err := s.db.QueryRow("SELECT must_change_password FROM accounts WHERE username = ?", "night-shift").Scan(&mustChangePassword); err != nil {
+	if err := s.operatorDB.QueryRow("SELECT must_change_password FROM accounts WHERE username = ?", "night-shift").Scan(&mustChangePassword); err != nil {
 		t.Fatal(err)
 	}
 	if mustChangePassword != 1 {
@@ -404,7 +421,7 @@ func TestAdminCanLockUnlockOperatorAndLockedLoginIsRejected(t *testing.T) {
 		t.Fatal("locked operator session remained valid")
 	}
 	var locked int
-	if err := s.db.QueryRow("SELECT locked FROM accounts WHERE username = 'night-shift'").Scan(&locked); err != nil {
+	if err := s.operatorDB.QueryRow("SELECT locked FROM accounts WHERE username = 'night-shift'").Scan(&locked); err != nil {
 		t.Fatal(err)
 	}
 	if locked != 1 {
@@ -456,7 +473,7 @@ func TestAdminCanRemoveOperatorTOTPAndRevokeSessions(t *testing.T) {
 	if created.Code != http.StatusCreated {
 		t.Fatalf("create operator status = %d, body %s", created.Code, created.Body.String())
 	}
-	if _, err := s.db.Exec(
+	if _, err := s.operatorDB.Exec(
 		"UPDATE accounts SET totp_secret = 'test-secret', totp_enabled = 1, totp_recovery_codes = '[\"test-hash\"]' WHERE username = 'night-shift'",
 	); err != nil {
 		t.Fatal(err)
@@ -485,7 +502,7 @@ func TestAdminCanRemoveOperatorTOTPAndRevokeSessions(t *testing.T) {
 	var secret sql.NullString
 	var enabled int
 	var recoveryCodes string
-	if err := s.db.QueryRow(
+	if err := s.operatorDB.QueryRow(
 		"SELECT totp_secret, totp_enabled, totp_recovery_codes FROM accounts WHERE username = 'night-shift'",
 	).Scan(&secret, &enabled, &recoveryCodes); err != nil {
 		t.Fatal(err)

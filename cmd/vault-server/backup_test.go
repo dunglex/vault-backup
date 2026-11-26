@@ -190,7 +190,7 @@ func TestListServerBackupsRequiresAdminAndReturnsMetadata(t *testing.T) {
 
 func TestServerBackupMetadataCountsOperatorsSecretsAndTokens(t *testing.T) {
 	s := newOperatorTestServer(t)
-	if _, err := s.db.Exec(
+	if _, err := s.operatorDB.Exec(
 		"INSERT INTO accounts(username, password_hash, role) VALUES ('operator', 'hash', 'operator')",
 	); err != nil {
 		t.Fatal(err)

@@ -7,6 +7,9 @@
 
 # Backend Rules
 - The backend consists of two Go applications: `cmd/vault-server` and `cmd/vault-backup`. Follow each command's README and existing package patterns; keep changes scoped to the requested behavior.
+- Put cohesive application capabilities and their domain-specific logic in `internal/<feature>` when they can be encapsulated behind a package API. This may include feature-specific persistence, validation, and HTTP handlers; `internal` packages must not import either `cmd` application.
+- Keep `cmd/<application>` focused on the executable and application composition: CLI/configuration, process lifecycle, route registration, and adapters that connect internal packages to app-specific services or state. Inject those dependencies through callbacks or interfaces rather than making internal packages depend on private `cmd` types.
+- For example, `internal/operator` owns operator account and management behavior; `cmd/vault-server` configures its optional database, registers its routes, and supplies server-owned auth, audit, token-revocation, and session-cache dependencies.
 - Preserve type safety and return/report errors explicitly. Backup and restore operations can partially succeed: aggregate item failures and make the command exit non-zero rather than reporting overall success.
 - The server's main database is SQLCipher-encrypted. Keep its key file protected (`0600`); the separate audit database is plaintext SQLite and must contain metadata only, never secret values or raw tokens. Do not silently enable or migrate plaintext main databases.
 - `/api/...` endpoints accept only admin-created managed API tokens (`X-Vault-Token` or Bearer). Web session cookies and username/password login tokens are not API credentials.

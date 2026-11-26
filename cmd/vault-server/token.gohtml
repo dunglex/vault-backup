@@ -17,7 +17,7 @@
       <a class="button button-outline" href="/secrets.html">Secrets</a>
       <a class="button" aria-current="page" href="/tokens.html">API tokens</a>
       <a class="button button-outline" href="/audits.html">Audit log</a>
-      {{if .IsAdmin}}<a class="button button-outline" href="/operators.html">Operators</a>{{end}}
+      {{if and .IsAdmin .HasOperators}}<a class="button button-outline" href="/operators.html">Operators</a>{{end}}
       {{if .IsAdmin}}<a class="button button-outline" href="/security.html">Security</a>{{end}}
       <a class="button button-outline" href="/account.html">Account</a>
     </nav>

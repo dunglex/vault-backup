@@ -24,7 +24,7 @@ func (s *server) getAccountTOTP(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	state, err := s.loadAccountTOTP(session.username)
+	state, err := s.loadAccountTOTP(session.username, session.role)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read two-factor settings"})
 		return
@@ -53,7 +53,7 @@ func (s *server) setupAccountTOTP(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	state, err := s.loadAccountTOTP(session.username)
+	state, err := s.loadAccountTOTP(session.username, session.role)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read account"})
 		return
@@ -67,7 +67,12 @@ func (s *server) setupAccountTOTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not create authenticator secret"})
 		return
 	}
-	result, err := s.db.Exec(
+	db := s.accountDatabase(session.role)
+	if db == nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not save authenticator setup"})
+		return
+	}
+	result, err := db.Exec(
 		"UPDATE accounts SET totp_secret = ?, totp_recovery_codes = '[]' WHERE username = ? AND totp_enabled = 0",
 		secret,
 		session.username,
@@ -104,7 +109,7 @@ func (s *server) enableAccountTOTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
 		return
 	}
-	state, err := s.loadAccountTOTP(session.username)
+	state, err := s.loadAccountTOTP(session.username, session.role)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read account security settings"})
 		return
@@ -131,7 +136,12 @@ func (s *server) enableAccountTOTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not save recovery codes"})
 		return
 	}
-	result, err := s.db.Exec(
+	db := s.accountDatabase(session.role)
+	if db == nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not enable two-factor authentication"})
+		return
+	}
+	result, err := db.Exec(
 		"UPDATE accounts SET totp_enabled = 1, totp_recovery_codes = ? WHERE username = ? AND totp_enabled = 0 AND totp_secret = ?",
 		string(encodedHashes),
 		session.username,
@@ -175,7 +185,13 @@ func (s *server) regenerateAccountRecoveryCodes(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	tx, err := s.db.Begin()
+	db := s.accountDatabase(session.role)
+	if db == nil {
+		auditFailure("storage_error")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not regenerate recovery codes"})
+		return
+	}
+	tx, err := db.Begin()
 	if err != nil {
 		auditFailure("storage_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not regenerate recovery codes"})
@@ -293,7 +309,7 @@ func (s *server) disableAccountTOTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
 		return
 	}
-	state, err := s.loadAccountTOTP(session.username)
+	state, err := s.loadAccountTOTP(session.username, session.role)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read account security settings"})
 		return
@@ -306,7 +322,7 @@ func (s *server) disableAccountTOTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid password"})
 		return
 	}
-	valid, err := s.verifyAccountSecondFactor(session.username, state.secret.String, request.Code)
+	valid, err := s.verifyAccountSecondFactor(session.username, state.secret.String, request.Code, session.role)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not verify authentication code"})
 		return
@@ -315,7 +331,12 @@ func (s *server) disableAccountTOTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid authentication code"})
 		return
 	}
-	result, err := s.db.Exec(
+	db := s.accountDatabase(session.role)
+	if db == nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not disable two-factor authentication"})
+		return
+	}
+	result, err := db.Exec(
 		"UPDATE accounts SET totp_secret = NULL, totp_enabled = 0, totp_recovery_codes = '[]' WHERE username = ? AND totp_enabled = 1",
 		session.username,
 	)
@@ -349,11 +370,19 @@ func (s *server) accountTOTPRequest(w http.ResponseWriter, r *http.Request) (ses
 	return session, true
 }
 
-func (s *server) loadAccountTOTP(username string) (accountTOTPState, error) {
+func (s *server) loadAccountTOTP(username string, roles ...string) (accountTOTPState, error) {
+	role := "admin"
+	if len(roles) != 0 {
+		role = roles[0]
+	}
+	db := s.accountDatabase(role)
+	if db == nil {
+		return accountTOTPState{}, sql.ErrNoRows
+	}
 	var state accountTOTPState
 	var enabled int
 	var encodedHashes string
-	err := s.db.QueryRow(`
+	err := db.QueryRow(`
 		SELECT password_hash, totp_secret, totp_enabled, totp_recovery_codes
 		FROM accounts WHERE username = ?`, username,
 	).Scan(&state.passwordHash, &state.secret, &enabled, &encodedHashes)
@@ -370,16 +399,28 @@ func (s *server) loadAccountTOTP(username string) (accountTOTPState, error) {
 	return state, nil
 }
 
-func (s *server) verifyAccountSecondFactor(username, secret, code string) (bool, error) {
+func (s *server) verifyAccountSecondFactor(username, secret, code string, roles ...string) (bool, error) {
 	if verifyTOTP(secret, code, time.Now()) {
 		return true, nil
 	}
-	return s.consumeRecoveryCode(username, code)
+	role := "admin"
+	if len(roles) != 0 {
+		role = roles[0]
+	}
+	return s.consumeRecoveryCode(username, code, role)
 }
 
-func (s *server) consumeRecoveryCode(username, code string) (bool, error) {
+func (s *server) consumeRecoveryCode(username, code string, roles ...string) (bool, error) {
+	role := "admin"
+	if len(roles) != 0 {
+		role = roles[0]
+	}
+	db := s.accountDatabase(role)
+	if db == nil {
+		return false, sql.ErrNoRows
+	}
 	candidate := hashRecoveryCode(code)
-	tx, err := s.db.Begin()
+	tx, err := db.Begin()
 	if err != nil {
 		return false, err
 	}

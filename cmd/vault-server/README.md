@@ -29,18 +29,21 @@ domains and the server certificate, create the Admin account, and continue to
 the login page. Skipping domain configuration keeps the current domain and
 certificate settings.
 
-The initial account has the **Admin** role. Existing accounts are migrated to
-Admin when the server starts with the role update. Admins can create, lock,
-unlock, reset two-factor authentication for, and remove Operator accounts from
-`/operators.html`. Locking an Operator blocks login and revokes their active
-web sessions. Resetting two-factor authentication clears their TOTP setup and
-recovery codes and revokes active sessions; when MFA enforcement is enabled,
-the Operator must enroll again before continuing. Operators can manage secrets,
-API tokens, and audit events within their assigned secret path prefixes. Their
-audit views include only resource paths that overlap their current prefixes,
-plus their own web secret-list events. Admins retain unrestricted audit access.
-Filtering uses the Operator's current account prefixes at query time; audit
-records do not duplicate role or account-scope data.
+The initial account has the **Admin** role. The default installation is
+administrator-only: operator routes and accounts are disabled unless an
+operator database is configured with `--operator-db` or
+`VAULT_SERVER_OPERATOR_DB`. The configured database is encrypted and uses its
+own protected key file. Admins can then create, lock, unlock, reset two-factor
+authentication for, and remove Operator accounts from `/operators.html`.
+Locking an Operator blocks login and revokes their active web sessions.
+Resetting two-factor authentication clears their TOTP setup and recovery codes
+and revokes active sessions; when MFA enforcement is enabled, the Operator must
+enroll again before continuing. Operators can manage secrets, API tokens, and
+audit events within their assigned secret path prefixes. Their audit views
+include only resource paths that overlap their current prefixes, plus their
+own web secret-list events. Admins retain unrestricted audit access. Filtering
+uses the Operator's current account prefixes at query time; audit records do
+not duplicate role or account-scope data.
 Operators cannot access `/security.html`,
 `/v1/settings`, `/operators.html`, or operator-management endpoints.
 Admin accounts retain unrestricted web access. Admins assign one or more
@@ -71,8 +74,9 @@ Recovery codes are shown once when TOTP is enabled. Users can generate and
 display a replacement set from their account page by confirming their password
 and second factor; this invalidates all previous recovery codes. Once enabled,
 web and LDAP-compatible logins require an authenticator code or an unused
-recovery code. TOTP secrets and recovery-code hashes are stored in the
-encrypted main database.
+recovery code. TOTP secrets and recovery-code hashes are stored in the encrypted account
+database: the main database for Admin accounts, and the optional operator
+database for Operator accounts.
 
 Admins can enable **Enforce MFA for all users** in `/security.html`; it is
 disabled by default. Users without enrolled TOTP are restricted to their
@@ -84,10 +88,17 @@ LDAP-compatible login. MFA cannot be disabled while enforcement is active.
 Web session cookies last 30 minutes for accounts without TOTP and 8 hours
 after a successful TOTP or recovery-code login. The session duration is chosen
 at login, so an account that just enabled TOTP receives the longer duration on
-its next sign-in. Session records are stored in the encrypted main database
+its next sign-in. Session records are stored in the encrypted account database
 with only a hash of each cookie token, so valid sessions survive server
-restarts. Logging out removes the persistent session; inactive or expired
-sessions are rejected and cleaned up.
+restarts. Admin sessions are in the main database; Operator sessions are in
+the optional operator database. Logging out removes the persistent session;
+inactive or expired sessions are rejected and cleaned up.
+
+When an existing application database contains Operator accounts, starting
+with `--operator-db` migrates those accounts and their valid sessions to the
+separate encrypted database. Without that option, legacy Operator accounts are
+left in the old encrypted database but are not available for login or
+management. Configure the operator database to migrate and re-enable them.
 
 ## Configuration from .env
 
@@ -100,6 +111,9 @@ VAULT_SERVER_HTTP_ADDR=
 VAULT_SERVER_DB=/var/lib/vault/vault.db
 VAULT_SERVER_SECRETS_DB=/var/lib/vault/vault-secrets.db
 VAULT_SERVER_AUDIT_DB=/var/lib/vault/audit.db
+# Optional: enables Operator accounts in a separate encrypted database.
+# This path can also be named team.db if it will hold future team data.
+# VAULT_SERVER_OPERATOR_DB=/var/lib/vault/operator.db
 VAULT_SERVER_DATA_DIR=/var/lib/vault
 VAULT_SERVER_BACKUP_DIR=/var/lib/vault/backups
 VAULT_SERVER_TLS_CERT=/etc/vault/tls/server.crt
@@ -121,8 +135,11 @@ Use another file with `--env-file` or `VAULT_SERVER_ENV_FILE`:
 
 Restrict `.env` permissions to `0600` because it contains the database password.
 The application and secrets databases each have a separate protected key file:
-`vault.db.key` and `vault-secrets.db.key`. Both keys are wrapped using the
-configured database password.
+`vault.db.key` and `vault-secrets.db.key`. When the optional operator database
+is configured, it also has a separate `operator.db.key`. Each key is wrapped
+using the configured database password. Operator database files and key files
+should be stored inside the data directory to include them in scheduled
+backups.
 
 Security events are stored separately in plaintext SQLite audit databases. The
 `--audit-db` or `VAULT_SERVER_AUDIT_DB` value is the database base path; for
@@ -171,7 +188,7 @@ six-field cron expression uses UTC and defaults to `0 0 2 * * *` (daily at
 02:00). The Security page describes the entered schedule as it changes; the
 server validates it when settings are saved. Each run serves a maintenance page,
 waits for active requests to drain,
-closes the application, secrets, and audit database handles, archives the
+closes the application, secrets, optional operator, and audit database handles, archives the
 configured data directory, then reopens the databases. Archives are gzip tar
 files with SHA-256 manifests, mode `0600`, and are stored in the configured
 backup directory. Files older than 30 days are removed after a successful
@@ -179,19 +196,11 @@ backup. Data and backup directories can be set with `--data-dir` /
 `VAULT_SERVER_DATA_DIR` and `--backup-dir` / `VAULT_SERVER_BACKUP_DIR`.
 Files stored outside the data directory must be backed up separately.
 
-Restore a backup into a clean `/data` directory:
-
-```bash
-./scripts/restore-vault-server.sh \
-  --data-dir /data \
-  /secure/backups/vault-server.tar.gz
-```
-
 The restore refuses to overwrite a non-empty destination unless `--replace` is specified. It verifies SHA-256 checksums before installing files with restricted permissions.
 
 ## Managed API tokens
 
-After logging in through the web UI at `/tokens.html`, an admin or operator can
+After logging in through the web UI at `/tokens.html`, an admin or enabled operator can
 create tokens in the add-token dialog, list, and revoke API tokens. Each token
 requires one or more secret path prefixes and can read, write, delete, and list
 only within those prefixes. Prefixes use the secret path format described above.
@@ -219,7 +228,8 @@ enforcement is enabled; replacement immediately revokes the previous
 certificate and does not extend the token's expiry. Protect downloaded files as
 secrets.
 
-Management endpoints use a web session. Operators can manage API tokens, but
+Management endpoints use a web session. When the optional operator database is
+enabled, Operators can manage API tokens, but
 their token prefixes cannot exceed their own assigned prefixes. Security
 settings and operator-management endpoints require the Admin role:
 
@@ -234,14 +244,14 @@ PUT    /v1/settings
 GET    /v1/settings/blocked-login-ips
 GET    /v1/settings/server-backups
 DELETE /v1/settings/blocked-login-ips/{ip}
-GET    /v1/operators
-GET    /v1/operators/details
-POST   /v1/operators
-PUT    /v1/operators/prefixes
-DELETE /v1/operators
-POST   /v1/operators/password
-PATCH  /v1/operators/lock
-DELETE /v1/operators/totp
+GET    /v1/operators                 (operator database required)
+GET    /v1/operators/details         (operator database required)
+POST   /v1/operators                 (operator database required)
+PUT    /v1/operators/prefixes        (operator database required)
+DELETE /v1/operators                 (operator database required)
+POST   /v1/operators/password        (operator database required)
+PATCH  /v1/operators/lock            (operator database required)
+DELETE /v1/operators/totp            (operator database required)
 GET    /v1/account/totp
 POST   /v1/account/totp/setup
 POST   /v1/account/totp/enable

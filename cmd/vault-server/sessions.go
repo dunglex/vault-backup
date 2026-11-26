@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -24,10 +25,11 @@ func (s *server) storeSession(token string, session sessionInfo) error {
 	if session.expiresAt.IsZero() {
 		session.expiresAt = time.Now().Add(session.ttl)
 	}
-	if s.db == nil {
+	db := s.accountDatabase(session.role)
+	if db == nil {
 		return fmt.Errorf("app database is unavailable")
 	}
-	_, err := s.db.Exec(`
+	_, err := db.Exec(`
 		INSERT INTO web_sessions(token_hash, username, expires_at, ttl_seconds, created_at)
 		VALUES (?, ?, ?, ?, ?)`,
 		sessionTokenHash(token),
@@ -52,11 +54,22 @@ func (s *server) deleteSession(token string) error {
 	s.mu.Lock()
 	delete(s.sessions, token)
 	s.mu.Unlock()
-	if token == "" || s.db == nil {
+	if token == "" {
 		return nil
 	}
-	if _, err := s.db.Exec("DELETE FROM web_sessions WHERE token_hash = ?", sessionTokenHash(token)); err != nil {
-		return fmt.Errorf("delete web session: %w", err)
+	var failures []error
+	if s.db != nil {
+		if _, err := s.db.Exec("DELETE FROM web_sessions WHERE token_hash = ?", sessionTokenHash(token)); err != nil {
+			failures = append(failures, fmt.Errorf("delete admin web session: %w", err))
+		}
+	}
+	if s.operatorDB != nil {
+		if _, err := s.operatorDB.Exec("DELETE FROM web_sessions WHERE token_hash = ?", sessionTokenHash(token)); err != nil {
+			failures = append(failures, fmt.Errorf("delete operator web session: %w", err))
+		}
+	}
+	if len(failures) != 0 {
+		return errors.Join(failures...)
 	}
 	return nil
 }
@@ -73,22 +86,42 @@ func (s *server) sessionForToken(token string) (sessionInfo, bool) {
 	var session sessionInfo
 	var expiresAt, ttlSeconds int64
 	var mustChangePassword int
-	err := s.db.QueryRow(`
+	db := s.db
+	err := db.QueryRow(`
 		SELECT accounts.username, accounts.role, web_sessions.expires_at, web_sessions.ttl_seconds,
 			accounts.must_change_password
 		FROM web_sessions
 		JOIN accounts ON accounts.username = web_sessions.username
-		WHERE web_sessions.token_hash = ? AND web_sessions.expires_at > ? AND accounts.locked = 0`,
+		WHERE web_sessions.token_hash = ? AND web_sessions.expires_at > ?
+		  AND accounts.locked = 0 AND accounts.role = 'admin'`,
 		sessionTokenHash(token),
 		now.Unix(),
 	).Scan(&session.username, &session.role, &expiresAt, &ttlSeconds, &mustChangePassword)
+	if err == sql.ErrNoRows && s.operatorDB != nil {
+		db = s.operatorDB
+		err = db.QueryRow(`
+			SELECT accounts.username, accounts.role, web_sessions.expires_at, web_sessions.ttl_seconds,
+				accounts.must_change_password
+			FROM web_sessions
+			JOIN accounts ON accounts.username = web_sessions.username
+			WHERE web_sessions.token_hash = ? AND web_sessions.expires_at > ?
+			  AND accounts.locked = 0 AND accounts.role = 'operator'`,
+			sessionTokenHash(token),
+			now.Unix(),
+		).Scan(&session.username, &session.role, &expiresAt, &ttlSeconds, &mustChangePassword)
+	}
 	if err != nil {
 		if err == sql.ErrNoRows {
-			if _, cleanupErr := s.db.Exec(
-				"DELETE FROM web_sessions WHERE token_hash = ?",
-				sessionTokenHash(token),
-			); cleanupErr != nil {
-				log.Printf("WARNING: could not delete invalid web session: %v", cleanupErr)
+			for _, sessionDB := range []*sql.DB{s.db, s.operatorDB} {
+				if sessionDB == nil {
+					continue
+				}
+				if _, cleanupErr := sessionDB.Exec(
+					"DELETE FROM web_sessions WHERE token_hash = ?",
+					sessionTokenHash(token),
+				); cleanupErr != nil {
+					log.Printf("WARNING: could not delete invalid web session: %v", cleanupErr)
+				}
 			}
 			s.removeSessionFromCache(token)
 			return sessionInfo{}, false
@@ -104,7 +137,7 @@ func (s *server) sessionForToken(token string) (sessionInfo, bool) {
 	session.ttl = time.Duration(ttlSeconds) * time.Second
 	session.expiresAt = now.Add(session.ttl)
 	session.mustChangePassword = mustChangePassword == 1
-	result, err := s.db.Exec(
+	result, err := db.Exec(
 		"UPDATE web_sessions SET expires_at = ? WHERE token_hash = ? AND expires_at > ?",
 		session.expiresAt.Unix(),
 		sessionTokenHash(token),
@@ -155,8 +188,13 @@ func (s *server) removeSessionFromCache(token string) {
 }
 
 func (s *server) removePersistentSession(token string) {
-	if _, err := s.db.Exec("DELETE FROM web_sessions WHERE token_hash = ?", sessionTokenHash(token)); err != nil {
-		log.Printf("ERROR: could not delete invalid web session: %v", err)
+	for _, db := range []*sql.DB{s.db, s.operatorDB} {
+		if db == nil {
+			continue
+		}
+		if _, err := db.Exec("DELETE FROM web_sessions WHERE token_hash = ?", sessionTokenHash(token)); err != nil {
+			log.Printf("ERROR: could not delete invalid web session: %v", err)
+		}
 	}
 	s.removeSessionFromCache(token)
 }

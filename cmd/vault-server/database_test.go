@@ -248,7 +248,6 @@ func TestAuthenticatedPagesShareAccountSecurityNavigation(t *testing.T) {
 		"secrets.gohtml",
 		"token.gohtml",
 		"audit.gohtml",
-		"operators.gohtml",
 		"security.gohtml",
 		"account.gohtml",
 	}
@@ -307,7 +306,6 @@ func TestPageTemplatesRenderStandalonePages(t *testing.T) {
 		{"secrets.gohtml", []string{`id="secret-groups"`, `id="secret-list"`, "/v1/secrets-browser", `get('group')`}},
 		{"token.gohtml", []string{`id="tokens"`, `id="openCreateToken"`, `id="createTokenDialog"`, `id="createToken"`, `id="closeCreateToken"`, `id="finishCreateToken"`, `id="tokenPrefixes"`, `<select id="tokenLifetimeDays" name="expires_in_days" required>`, `<option value="30" selected>30 days</option>`, `<option value="60">60 days</option>`, `<option value="90">90 days</option>`, `<option value="180">180 days</option>`, `<option value="365">365 days</option>`, `id="editTokenPrefixes"`, `id="tokenCopyPanel"`, `id="copyToken"`, "downloadClientCert", "downloadClientKey", "token-actions", "Sample vault-backup command", `id="sampleCommand"`, "window.confirm", "addEventListener('beforeunload'", "async function refreshTokens()"}},
 		{"security.gohtml", []string{`id="settingsForm"`, `id="enforceMTLS"`, `id="autoBlockLoginBruteforceIP"`, `id="fileLogging"`, `id="viewBlockedIPs"`, `id="blockedIPsDialog"`, `id="viewServerBackups"`, `id="serverBackupsDialog"`, `id="serverBackups"`, "/v1/settings/server-backups"}},
-		{"operators.gohtml", []string{`id="openCreateOperator"`, `<dialog id="createOperatorDialog"`, `id="closeCreateOperator"`, `id="operatorForm"`, `id="operatorUsername"`, `id="operatorPrefixes"`, `id="editOperatorPrefixes"`, "setOperatorLock", "removeOperatorMFA", "/v1/operators/prefixes", "/v1/operators"}},
 		{"account.gohtml", []string{`id="totpSetupPanel"`, `id="openTOTPSetup"`, `>Setup 2FA</button>`, `<dialog id="totpSetupDialog"`, `id="closeTOTPSetup"`, `id="setupTOTP"`, `id="totpQRCode"`, `id="enableForm"`, `id="totpEnabledPanel"`, `id="openRecoveryCodesDialog"`, `<dialog id="recoveryCodesDialog"`, `id="regenerateRecoveryCodesForm"`, `<dialog id="disableTOTPDialog"`, `id="openDisableTOTPDialog"`, `<dialog id="passwordDialog"`, `id="passwordForm"`, `id="currentPassword"`, `id="newPassword"`, `id="repeatNewPassword"`, "/v1/account/totp/recovery-codes", "/v1/account/password", "/qrcode.js", "/v1/account/totp"}},
 		{"audit.gohtml", []string{`id="events"`, `href="/audits.html"`, "/v1/audit", "create_token", "update_token_scopes", "update_operator_scopes", "revoke_token", "issue_certificate", "rotate_certificate", "update_settings", "block_login_ip", "unblock_login_ip", "server_backup", ">started</option>", "async function refresh()"}},
 		{"401.gohtml", []string{"401", "Go to login"}},
@@ -325,8 +323,8 @@ func TestPageTemplatesRenderStandalonePages(t *testing.T) {
 				data = map[string]bool{"ACMEAvailable": true}
 			case "login.gohtml":
 				data = map[string]bool{"AutoBlockLoginIPEnabled": true}
-			case "secret.gohtml", "secrets.gohtml", "token.gohtml", "audit.gohtml", "operators.gohtml", "account.gohtml":
-				data = map[string]bool{"IsAdmin": true}
+			case "secret.gohtml", "secrets.gohtml", "token.gohtml", "audit.gohtml", "account.gohtml":
+				data = map[string]bool{"IsAdmin": true, "HasOperators": true}
 			}
 			var output bytes.Buffer
 			if err := pageTemplate.ExecuteTemplate(&output, test.name, data); err != nil {
@@ -343,7 +341,7 @@ func TestPageTemplatesRenderStandalonePages(t *testing.T) {
 			}
 			switch test.name {
 			case "login.gohtml", "secret.gohtml", "secrets.gohtml", "token.gohtml",
-				"security.gohtml", "operators.gohtml", "account.gohtml", "audit.gohtml":
+				"security.gohtml", "account.gohtml", "audit.gohtml":
 				if !strings.Contains(output.String(), `<h1 class="brand"><a href="/">Vault Server</a></h1>`) {
 					t.Errorf("%s brand heading does not link to the root page", test.name)
 				}
@@ -471,8 +469,8 @@ func TestWebPagesUseExpectedStatusAndContent(t *testing.T) {
 	}
 }
 
-func TestHealthChecksAllThreeDatabases(t *testing.T) {
-	for _, unavailable := range []string{"app", "secrets", "audit"} {
+func TestHealthChecksConfiguredDatabases(t *testing.T) {
+	for _, unavailable := range []string{"app", "secrets", "operator", "audit"} {
 		t.Run(unavailable, func(t *testing.T) {
 			dir := t.TempDir()
 			db, err := sql.Open("sqlite", filepath.Join(dir, "vault.db"))
@@ -480,6 +478,10 @@ func TestHealthChecksAllThreeDatabases(t *testing.T) {
 				t.Fatal(err)
 			}
 			secretsDB, err := sql.Open("sqlite", filepath.Join(dir, "secrets.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			operatorDB, err := sql.Open("sqlite", filepath.Join(dir, "operator.db"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -497,6 +499,11 @@ func TestHealthChecksAllThreeDatabases(t *testing.T) {
 					if err := secretsDB.Close(); err != nil {
 						t.Errorf("close secrets database: %v", err)
 					}
+					if operatorDB != nil {
+						if err := operatorDB.Close(); err != nil {
+							t.Errorf("close operator database: %v", err)
+						}
+					}
 				}
 				if auditStore != nil {
 					if err := auditStore.Close(); err != nil {
@@ -505,7 +512,7 @@ func TestHealthChecksAllThreeDatabases(t *testing.T) {
 				}
 			})
 
-			s := &server{db: db, secretsDB: secretsDB, auditStore: auditStore}
+			s := &server{db: db, secretsDB: secretsDB, operatorDB: operatorDB, auditStore: auditStore}
 			healthy := httptest.NewRecorder()
 			s.health(healthy, httptest.NewRequest(http.MethodGet, "/health", nil))
 			if healthy.Code != http.StatusOK || healthy.Body.String() != "{\"ok\":true}\n" {
@@ -523,6 +530,11 @@ func TestHealthChecksAllThreeDatabases(t *testing.T) {
 					t.Fatal(err)
 				}
 				secretsDB = nil
+			case "operator":
+				if err := operatorDB.Close(); err != nil {
+					t.Fatal(err)
+				}
+				operatorDB = nil
 			case "audit":
 				if err := auditStore.Close(); err != nil {
 					t.Fatal(err)

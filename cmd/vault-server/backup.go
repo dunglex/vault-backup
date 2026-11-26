@@ -34,9 +34,11 @@ type serverBackupConfig struct {
 	backupDir      string
 	dbPath         string
 	secretsDBPath  string
+	operatorDBPath string
 	auditDBPath    string
 	masterKey      []byte
 	secretsKey     []byte
+	operatorKey    []byte
 	allowPlaintext bool
 }
 
@@ -145,8 +147,10 @@ func (s *server) serverBackupMetadata(createdAt time.Time) (serverBackupMetadata
 	metadata := serverBackupMetadata{
 		CreatedAt: createdAt.UTC(),
 	}
-	if err := s.db.QueryRow("SELECT COUNT(*) FROM accounts WHERE role = 'operator'").Scan(&metadata.Operators); err != nil {
-		return serverBackupMetadata{}, fmt.Errorf("count server backup operators: %w", err)
+	if s.operatorDB != nil {
+		if err := s.operatorDB.QueryRow("SELECT COUNT(*) FROM accounts WHERE role = 'operator'").Scan(&metadata.Operators); err != nil {
+			return serverBackupMetadata{}, fmt.Errorf("count server backup operators: %w", err)
+		}
 	}
 	if err := s.secretsDB.QueryRow("SELECT COUNT(*) FROM secrets").Scan(&metadata.Secrets); err != nil {
 		return serverBackupMetadata{}, fmt.Errorf("count server backup secrets: %w", err)
@@ -307,7 +311,11 @@ func validateBackupDatabaseScope(config serverBackupConfig) error {
 	if err != nil {
 		return fmt.Errorf("resolve backup data directory: %w", err)
 	}
-	for _, path := range []string{config.dbPath, config.dbPath + ".key", config.secretsDBPath, config.secretsDBPath + ".key", config.auditDBPath} {
+	paths := []string{config.dbPath, config.dbPath + ".key", config.secretsDBPath, config.secretsDBPath + ".key", config.auditDBPath}
+	if config.operatorDBPath != "" {
+		paths = append(paths, config.operatorDBPath, config.operatorDBPath+".key")
+	}
+	for _, path := range paths {
 		if path == "" {
 			continue
 		}
@@ -414,6 +422,12 @@ func (s *server) closeDatabaseFiles() error {
 		}
 		s.secretsDB = nil
 	}
+	if s.operatorDB != nil {
+		if err := s.operatorDB.Close(); err != nil {
+			failures = append(failures, fmt.Errorf("close operator database: %w", err))
+		}
+		s.operatorDB = nil
+	}
 	if s.db != nil {
 		if err := s.db.Close(); err != nil {
 			failures = append(failures, fmt.Errorf("close application database: %w", err))
@@ -442,14 +456,37 @@ func (s *server) reopenDatabaseFiles() error {
 		_ = secretsDB.Close()
 		return fmt.Errorf("verify reopened secrets database: %w", err)
 	}
+	var operatorDB *sql.DB
+	if s.backupConfig.operatorDBPath != "" {
+		operatorDB, _, err = openDatabaseWithOptions(
+			s.backupConfig.operatorDBPath,
+			s.backupConfig.operatorKey,
+			false,
+		)
+		if err != nil {
+			_ = db.Close()
+			_ = secretsDB.Close()
+			return fmt.Errorf("reopen operator database: %w", err)
+		}
+		if err := operatorDB.Ping(); err != nil {
+			_ = db.Close()
+			_ = secretsDB.Close()
+			_ = operatorDB.Close()
+			return fmt.Errorf("verify reopened operator database: %w", err)
+		}
+	}
 	auditStore, err := openAnnualAuditStore(s.backupConfig.auditDBPath)
 	if err != nil {
 		_ = db.Close()
 		_ = secretsDB.Close()
+		if operatorDB != nil {
+			_ = operatorDB.Close()
+		}
 		return fmt.Errorf("reopen audit database: %w", err)
 	}
 	s.db = db
 	s.secretsDB = secretsDB
+	s.operatorDB = operatorDB
 	s.auditStore = auditStore
 	return nil
 }
