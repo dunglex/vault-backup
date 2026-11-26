@@ -14,7 +14,7 @@ def mode(path) -> int:
 
 
 def main() -> None:
-    with ServerTest(18228, 18229) as server:
+    with ServerTest(18228, 18229, enable_backup=True) as server:
         require(mode(server.path / "vault.db") == 0o600, "database permissions")
         print("PASS: database file permissions")
         require(not (server.path / "vault.db").read_bytes().startswith(b"SQLite format 3\0"), "database is plaintext")
@@ -62,7 +62,7 @@ def main() -> None:
 
         status, settings = server.client.json(
             "PUT",
-            f"{server.https_url}/v1/settings",
+            f"{server.https_url}/v1/backup/settings",
             data={
                 "automatic_server_backup": True,
                 "server_backup_cron": "*/2 * * * * *",
@@ -104,7 +104,7 @@ def main() -> None:
         else:
             raise RuntimeError("server did not resume after scheduled backup")
         print("PASS: server resumes after maintenance backup")
-        status, settings = server.client.json("GET", f"{server.https_url}/v1/settings")
+        status, settings = server.client.json("GET", f"{server.https_url}/v1/backup/settings")
         assert_status(200, status, "read scheduled backup completion time")
         require(settings["server_backup_last_success"], "backup completion time was not saved")
         _, audit = server.client.json("GET", f"{server.https_url}/v1/audit")

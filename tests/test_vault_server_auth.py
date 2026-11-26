@@ -470,12 +470,13 @@ def main() -> None:
                 "auto_block_login_bruteforce_ip": False,
                 "enforce_mfa": False,
                 "file_logging": False,
-                "automatic_server_backup": False,
-                "server_backup_cron": "0 0 2 * * *",
-                "server_backup_last_success": "",
             },
             "default security settings",
         )
+        status, _ = server.client.request(
+            "GET", f"{server.https_url}/v1/backup/settings"
+        )
+        assert_status(404, status, "keep backup settings unavailable when backup is disabled")
         status, blocked = server.client.json(
             "GET", f"{server.https_url}/v1/settings/blocked-login-ips"
         )

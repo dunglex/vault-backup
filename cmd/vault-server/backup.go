@@ -37,7 +37,6 @@ const (
 	serverBackupEnabledSetting = backup.AutomaticSetting
 	serverBackupCronSetting    = backup.CronSetting
 	serverBackupLastSetting    = backup.LastSuccessSetting
-	defaultServerBackupCron    = backup.DefaultCron
 	serverBackupRetention      = backup.Retention
 )
 
@@ -62,16 +61,29 @@ func validateBackupDatabaseScope(config serverBackupConfig) error {
 	})
 }
 
-func createServerDataBackup(dataDir, backupDir string, now time.Time) (string, error) {
-	return backup.Create(dataDir, backupDir, now)
-}
-
 func createServerDataBackupWithMetadata(dataDir, backupDir string, metadata serverBackupMetadata) (string, error) {
 	return backup.CreateWithMetadata(dataDir, backupDir, metadata)
 }
 
 func pruneServerBackups(directory string, cutoff time.Time) error {
 	return backup.Prune(directory, cutoff)
+}
+
+func (s *server) recordServerBackupAudit(r *http.Request, outcome, detail string) {
+	if s.auditStore == nil {
+		return
+	}
+	actor, source, clientIP := "system", "system", ""
+	if r != nil {
+		actor = s.auditRequestActor(r, "web")
+		source = "web"
+		clientIP = s.clientIP(r)
+	}
+	if err := s.auditStore.Record(
+		time.Now().UTC().Unix(), "server_backup", outcome, actor, clientIP, source, "server-backup", detail,
+	); err != nil {
+		log.Printf("WARNING: could not write server backup audit event %s: %v", outcome, err)
+	}
 }
 
 func (s *server) getBackupSettings(w http.ResponseWriter, r *http.Request) {
@@ -223,29 +235,35 @@ func (s *server) createServerBackupNow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := os.MkdirAll(s.backupConfig.backupDir, 0700); err != nil {
+		s.recordServerBackupAudit(r, "failure", "directory_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not create server backup directory"})
 		return
 	}
+	s.recordServerBackupAudit(r, "started", "")
 	s.beginMaintenance()
 	defer s.endMaintenance()
 	createdAt := time.Now().UTC()
 	metadata, err := s.serverBackupMetadata(createdAt)
 	if err != nil {
+		s.recordServerBackupAudit(r, "failure", "metadata_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not collect server backup metadata"})
 		return
 	}
 	if err := s.closeDatabaseFiles(); err != nil {
 		_ = s.reopenDatabaseFiles()
+		s.recordServerBackupAudit(r, "failure", "database_close_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not pause databases for server backup"})
 		return
 	}
 	archivePath, backupErr := createServerDataBackupWithMetadata(s.backupConfig.dataDir, s.backupConfig.backupDir, metadata)
 	reopenErr := s.reopenDatabaseFiles()
 	if backupErr != nil {
+		s.recordServerBackupAudit(r, "failure", "backup_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not create server backup"})
 		return
 	}
 	if reopenErr != nil {
+		s.recordServerBackupAudit(r, "failure", "database_reopen_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "server backup created but databases could not be reopened"})
 		return
 	}
@@ -253,6 +271,7 @@ func (s *server) createServerBackupNow(w http.ResponseWriter, r *http.Request) {
 		log.Printf("ERROR: server backup completed but success time could not be saved: %v", err)
 	}
 	_ = pruneServerBackups(s.backupConfig.backupDir, time.Now().UTC().Add(-serverBackupRetention))
+	s.recordServerBackupAudit(r, "success", "")
 	writeJSON(w, http.StatusCreated, map[string]string{"name": filepath.Base(archivePath)})
 }
 
@@ -399,28 +418,34 @@ func (s *server) performScheduledBackup() {
 	}
 	defer s.backupRunMu.Unlock()
 	if err := os.MkdirAll(s.backupConfig.backupDir, 0700); err != nil {
+		s.recordServerBackupAudit(nil, "failure", "directory_error")
 		log.Printf("ERROR: could not create server backup directory: %v", err)
 		return
 	}
+	s.recordServerBackupAudit(nil, "started", "")
 	s.beginMaintenance()
 	defer s.endMaintenance()
 	createdAt := time.Now().UTC()
 	metadata, err := s.serverBackupMetadata(createdAt)
 	if err != nil {
+		s.recordServerBackupAudit(nil, "failure", "metadata_error")
 		log.Printf("ERROR: could not collect server backup metadata: %v", err)
 		return
 	}
 	if err := s.closeDatabaseFiles(); err != nil {
 		_ = s.reopenDatabaseFiles()
+		s.recordServerBackupAudit(nil, "failure", "database_close_error")
 		return
 	}
 	archivePath, backupErr := createServerDataBackupWithMetadata(s.backupConfig.dataDir, s.backupConfig.backupDir, metadata)
 	reopenErr := s.reopenDatabaseFiles()
 	if backupErr != nil {
+		s.recordServerBackupAudit(nil, "failure", "backup_error")
 		log.Printf("ERROR: scheduled server backup failed: %v", backupErr)
 		return
 	}
 	if reopenErr != nil {
+		s.recordServerBackupAudit(nil, "failure", "database_reopen_error")
 		log.Printf("CRITICAL: could not reopen databases after server backup: %v", reopenErr)
 		s.failMaintenance()
 		return
@@ -429,6 +454,7 @@ func (s *server) performScheduledBackup() {
 		log.Printf("ERROR: server backup completed but success time could not be saved: %v", err)
 	}
 	_ = pruneServerBackups(s.backupConfig.backupDir, time.Now().UTC().Add(-serverBackupRetention))
+	s.recordServerBackupAudit(nil, "success", "")
 	log.Printf("Scheduled server backup completed: %s", archivePath)
 }
 

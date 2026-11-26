@@ -94,11 +94,13 @@ class ServerTest:
         http_port: int,
         setup_key: str = "integration-test-setup-key",
         operator_db: bool = False,
+        enable_backup: bool = False,
     ):
         self.port = port
         self.http_port = http_port
         self.setup_key = setup_key
         self.operator_db = operator_db
+        self.enable_backup = enable_backup
         self.temp = tempfile.TemporaryDirectory()
         self.path = Path(self.temp.name)
         self.cert = self.path / "test-cert.pem"
@@ -228,6 +230,7 @@ class ServerTest:
                 "username": self.user,
                 "password": self.password,
                 "password_confirmation": self.password,
+                "enable_backup": self.enable_backup,
             },
         )
         assert_status(201, status, "set up vault server")
