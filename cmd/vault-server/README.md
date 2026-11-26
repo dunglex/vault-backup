@@ -31,6 +31,8 @@ keeps the current domain and certificate settings. When Operators is selected,
 setup initializes its encrypted operator database at the default
 `*-operators.db` path beside the main database; an explicitly configured
 `--operator-db` or `VAULT_SERVER_OPERATOR_DB` database remains in use.
+Selecting Backup enables the `/backup.html` menu for scheduled backups,
+on-demand archives, and restoring server data archives.
 
 The initial account has the **Admin** role. The default installation is
 administrator-only: operator routes and accounts are disabled unless Operators
@@ -247,8 +249,12 @@ DELETE /v1/tokens/{id}
 GET    /v1/settings
 PUT    /v1/settings
 GET    /v1/settings/blocked-login-ips
-GET    /v1/settings/server-backups
 DELETE /v1/settings/blocked-login-ips/{ip}
+GET    /v1/backup/settings            (backup extension required)
+PUT    /v1/backup/settings            (backup extension required)
+GET    /v1/backup                     (backup extension required)
+POST   /v1/backup                     (backup extension required)
+POST   /v1/backup/restore             (backup extension required)
 GET    /v1/operators                 (operator database required)
 GET    /v1/operators/details         (operator database required)
 POST   /v1/operators                 (operator database required)
@@ -267,7 +273,7 @@ POST   /v1/account/password
 
 Server backup archives include a `vault-server/metadata.json` entry with their
 creation time and operator, secret, and API token counts. The admin-only
-`GET /v1/settings/server-backups` endpoint lists these summaries; archives
+`GET /v1/backup` endpoint lists these summaries; archives
 created before metadata was added are listed with counts shown as unavailable.
 
 Create a token:

@@ -161,14 +161,15 @@ func TestListServerBackupsRequiresAdminAndReturnsMetadata(t *testing.T) {
 	s.backupConfig.backupDir = backupDir
 
 	unauthorized := httptest.NewRecorder()
-	s.listServerBackups(unauthorized, httptest.NewRequest(http.MethodGet, "/v1/settings/server-backups", nil))
+	s.backupEnabled = true
+	s.listServerBackups(unauthorized, httptest.NewRequest(http.MethodGet, "/v1/backup", nil))
 	if unauthorized.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthorized list status = %d, want %d", unauthorized.Code, http.StatusUnauthorized)
 	}
 
 	response := httptest.NewRecorder()
 	s.listServerBackups(response, operatorRequestWithSession(
-		http.MethodGet, "/v1/settings/server-backups", "", "admin-session", false,
+		http.MethodGet, "/v1/backup", "", "admin-session", false,
 	))
 	if response.Code != http.StatusOK {
 		t.Fatalf("list server backups status = %d, body %s", response.Code, response.Body.String())

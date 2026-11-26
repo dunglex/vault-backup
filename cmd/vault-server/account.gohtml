@@ -23,6 +23,7 @@
         <a class="button button-outline" href="/tokens.html">API tokens</a>
         <a class="button button-outline" href="/audits.html">Audit log</a>
         {{if and .IsAdmin .HasOperators}}<a class="button button-outline" href="/operators.html">Operators</a>{{end}}
+        {{if and .IsAdmin .HasBackup}}<a class="button button-outline" href="/backup.html">Backup</a>{{end}}
         {{if .IsAdmin}}<a class="button button-outline" href="/security.html">Security</a>{{end}}
         <a class="button" aria-current="page" href="/account.html">Account</a>
       </div>

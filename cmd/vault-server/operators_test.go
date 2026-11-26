@@ -91,10 +91,11 @@ func newOperatorTestServer(t *testing.T) *server {
 		t.Fatal(err)
 	}
 	s := &server{
-		db:         db,
-		secretsDB:  secretsDB,
-		operatorDB: operatorDB,
-		adminName:  "admin",
+		db:            db,
+		secretsDB:     secretsDB,
+		operatorDB:    operatorDB,
+		adminName:     "admin",
+		backupEnabled: true,
 		loginDelay: func(context.Context) error {
 			return nil
 		},

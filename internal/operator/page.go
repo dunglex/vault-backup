@@ -14,3 +14,10 @@ var pageTemplate = template.Must(template.ParseFS(pageFiles, "operators.gohtml")
 func RenderPage(w io.Writer) error {
 	return pageTemplate.ExecuteTemplate(w, "operators.gohtml", map[string]bool{"IsAdmin": true})
 }
+
+func RenderPageWithOptions(w io.Writer, hasBackup bool) error {
+	return pageTemplate.ExecuteTemplate(w, "operators.gohtml", map[string]bool{
+		"IsAdmin":   true,
+		"HasBackup": hasBackup,
+	})
+}

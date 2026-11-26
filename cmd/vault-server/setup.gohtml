@@ -56,6 +56,11 @@
         Enable Operators
       </label>
       <p class="muted">Create and manage operator accounts with restricted secret path access.</p>
+      <label class="setting-option">
+        <input id="enableBackup" name="enable_backup" type="checkbox">
+        Enable Backup
+      </label>
+      <p class="muted">Add server backup and restore tools for encrypted application data.</p>
       <button type="submit">Enable selected extensions</button>
       <button id="skipExtensions" type="button" class="button button-outline">Skip for now</button>
     </form>
@@ -131,10 +136,11 @@ document.getElementById('adminForm').addEventListener('submit', async event => {
   showPhase(4);
 });
 
-async function completeSetup(enableOperators) {
+async function completeSetup(enableOperators, enableBackup) {
   if (!pendingAdmin) return;
   pendingAdmin.setup_key = setupKey.value;
   pendingAdmin.enable_operators = enableOperators;
+  pendingAdmin.enable_backup = enableBackup;
   try {
     const result = await postJSON('/v1/setup', pendingAdmin);
     document.getElementById('loginLink').href = result.redirect_url;
@@ -148,10 +154,13 @@ async function completeSetup(enableOperators) {
 document.getElementById('extensionsForm').addEventListener('submit', async event => {
   event.preventDefault();
   errorBox.textContent = '';
-  await completeSetup(document.getElementById('enableOperators').checked);
+  await completeSetup(
+    document.getElementById('enableOperators').checked,
+    document.getElementById('enableBackup').checked
+  );
 });
 
-document.getElementById('skipExtensions').addEventListener('click', () => completeSetup(false));
+document.getElementById('skipExtensions').addEventListener('click', () => completeSetup(false, false));
 </script>
 </body>
 </html>

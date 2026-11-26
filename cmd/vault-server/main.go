@@ -35,6 +35,7 @@ import (
 	"github.com/go-co-op/gocron/v2"
 	"golang.org/x/crypto/bcrypt"
 
+	"vault-backup/internal/backup"
 	"vault-backup/internal/operator"
 )
 
@@ -72,6 +73,7 @@ type server struct {
 	backupCron        gocron.Scheduler
 	backupJob         gocron.Job
 	lastBackup        string
+	backupEnabled     bool
 
 	mu                sync.Mutex
 	backupMu          sync.Mutex
@@ -118,6 +120,7 @@ type setupAdminRequest struct {
 	Password             string `json:"password"`
 	PasswordConfirmation string `json:"password_confirmation"`
 	EnableOperators      bool   `json:"enable_operators"`
+	EnableBackup         bool   `json:"enable_backup"`
 }
 
 type secretRequest struct {
@@ -350,6 +353,10 @@ func main() {
 			log.Fatal(err)
 		}
 	}
+	backupEnabled, err := backup.ReadExtensionEnabled(db)
+	if err != nil {
+		log.Fatal(err)
+	}
 	operatorDBPath := config.OperatorDBPath
 	if operatorDBPath == "" {
 		operatorDBPath = defaultOperatorDatabasePath(config.DBPath)
@@ -381,6 +388,7 @@ func main() {
 		serverCerts:    serverCerts,
 		acmeAvailable:  config.HTTPAddr != "",
 		logWriter:      logWriter,
+		backupEnabled:  backupEnabled,
 		backupConfig: serverBackupConfig{
 			dataDir:        config.DataDir,
 			backupDir:      config.BackupDir,
@@ -444,6 +452,9 @@ func main() {
 	for _, path := range []string{"/operators", "/operators.html"} {
 		mux.HandleFunc("GET "+path, s.serveOperators)
 	}
+	for _, path := range []string{"/backup", "/backup.html"} {
+		mux.HandleFunc("GET "+path, s.serveBackup)
+	}
 	for _, path := range []string{"/token", "/token.html"} {
 		mux.HandleFunc("GET "+path, func(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "/tokens.html", http.StatusMovedPermanently)
@@ -486,8 +497,12 @@ func main() {
 	mux.HandleFunc("GET /v1/settings", s.getSettings)
 	mux.HandleFunc("PUT /v1/settings", s.updateSettings)
 	mux.HandleFunc("GET /v1/settings/blocked-login-ips", s.listBlockedLoginIPs)
-	mux.HandleFunc("GET /v1/settings/server-backups", s.listServerBackups)
 	mux.HandleFunc("DELETE /v1/settings/blocked-login-ips/{ip}", s.unblockLoginIP)
+	mux.HandleFunc("GET /v1/backup", s.listServerBackups)
+	mux.HandleFunc("POST /v1/backup", s.createServerBackupNow)
+	mux.HandleFunc("POST /v1/backup/restore", s.restoreServerBackup)
+	mux.HandleFunc("GET /v1/backup/settings", s.getBackupSettings)
+	mux.HandleFunc("PUT /v1/backup/settings", s.updateBackupSettings)
 	mux.HandleFunc("GET /v1/operators", s.listOperators)
 	mux.HandleFunc("GET /v1/operators/details", s.listOperatorDetails)
 	mux.HandleFunc("POST /v1/operators", s.createOperator)
@@ -936,11 +951,22 @@ func (s *server) setup(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not create account"})
 		return
 	}
+	if req.EnableBackup {
+		if _, err := tx.Exec(
+			"INSERT INTO server_settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+			backup.EnabledSetting,
+			"true",
+		); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not save extension settings"})
+			return
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not create account"})
 		return
 	}
 	s.adminName = req.Username
+	s.backupEnabled = req.EnableBackup
 	s.setupKey = ""
 	if err := os.Remove(s.setupKeyPath); err != nil && !os.IsNotExist(err) {
 		log.Printf("WARNING: could not remove setup key file %s: %v", s.setupKeyPath, err)
@@ -2501,6 +2527,38 @@ func (s *server) serveSecurity(w http.ResponseWriter, r *http.Request) {
 	s.serveAdminProtectedPage(w, r, "security.gohtml")
 }
 
+func (s *server) serveBackup(w http.ResponseWriter, r *http.Request) {
+	if !s.backupEnabled {
+		s.serveNotFound(w, r)
+		return
+	}
+	if s.adminName == "" {
+		destination := "/setup.html"
+		if s.setupLocked() {
+			destination = "/lock.html"
+		}
+		http.Redirect(w, r, destination, http.StatusSeeOther)
+		return
+	}
+	session, ok := s.sessionFromRequest(r)
+	if !ok {
+		s.renderPage(w, "401.gohtml", http.StatusUnauthorized, nil)
+		return
+	}
+	if session.role != "admin" {
+		http.Error(w, "administrator access required", http.StatusForbidden)
+		return
+	}
+	var output bytes.Buffer
+	if err := backup.RenderPageWithOptions(&output, s.operatorDB != nil); err != nil {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = output.WriteTo(w)
+}
+
 func (s *server) serveOperators(w http.ResponseWriter, r *http.Request) {
 	if s.operatorDB == nil {
 		s.serveNotFound(w, r)
@@ -2524,7 +2582,7 @@ func (s *server) serveOperators(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var output bytes.Buffer
-	if err := operator.RenderPage(&output); err != nil {
+	if err := operator.RenderPageWithOptions(&output, s.backupEnabled); err != nil {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -2554,6 +2612,7 @@ func (s *server) serveAdminProtectedPage(w http.ResponseWriter, r *http.Request,
 	s.renderPage(w, name, http.StatusOK, map[string]bool{
 		"IsAdmin":      true,
 		"HasOperators": s.operatorDB != nil,
+		"HasBackup":    s.backupEnabled,
 	})
 }
 
@@ -2574,6 +2633,7 @@ func (s *server) serveProtectedPage(w http.ResponseWriter, r *http.Request, name
 	data := map[string]bool{
 		"IsAdmin":      session.role == "admin",
 		"HasOperators": s.operatorDB != nil,
+		"HasBackup":    s.backupEnabled,
 	}
 	if name == "token.gohtml" {
 		enforced, err := s.mtlsSettings()

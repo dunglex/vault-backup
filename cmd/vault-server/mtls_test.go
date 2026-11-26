@@ -122,6 +122,7 @@ func TestMFAEnforcementSettingPersistsAndSupportsPartialUpdates(t *testing.T) {
 
 func TestAutomaticBackupSettingsAndCronValidation(t *testing.T) {
 	s := newOperatorTestServer(t)
+	s.backupEnabled = true
 	if err := s.startBackupScheduler(); err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +133,7 @@ func TestAutomaticBackupSettingsAndCronValidation(t *testing.T) {
 	})
 
 	response := httptest.NewRecorder()
-	s.getSettings(response, operatorRequestWithSession(http.MethodGet, "/v1/settings", "", "admin-session", true))
+	s.getBackupSettings(response, operatorRequestWithSession(http.MethodGet, "/v1/backup/settings", "", "admin-session", true))
 	if response.Code != http.StatusOK ||
 		!strings.Contains(response.Body.String(), `"automatic_server_backup":false`) ||
 		!strings.Contains(response.Body.String(), `"server_backup_cron":"0 0 2 * * *"`) {
@@ -140,9 +141,9 @@ func TestAutomaticBackupSettingsAndCronValidation(t *testing.T) {
 	}
 
 	invalid := httptest.NewRecorder()
-	s.updateSettings(invalid, operatorRequestWithSession(
+	s.updateBackupSettings(invalid, operatorRequestWithSession(
 		http.MethodPut,
-		"/v1/settings",
+		"/v1/backup/settings",
 		`{"automatic_server_backup":true,"server_backup_cron":"0 2 * * *"}`,
 		"admin-session",
 		true,
@@ -152,9 +153,9 @@ func TestAutomaticBackupSettingsAndCronValidation(t *testing.T) {
 	}
 
 	enable := httptest.NewRecorder()
-	s.updateSettings(enable, operatorRequestWithSession(
+	s.updateBackupSettings(enable, operatorRequestWithSession(
 		http.MethodPut,
-		"/v1/settings",
+		"/v1/backup/settings",
 		`{"automatic_server_backup":true,"server_backup_cron":"0 0 0 1 1 *"}`,
 		"admin-session",
 		true,
@@ -167,9 +168,9 @@ func TestAutomaticBackupSettingsAndCronValidation(t *testing.T) {
 	}
 
 	disable := httptest.NewRecorder()
-	s.updateSettings(disable, operatorRequestWithSession(
+	s.updateBackupSettings(disable, operatorRequestWithSession(
 		http.MethodPut,
-		"/v1/settings",
+		"/v1/backup/settings",
 		`{"automatic_server_backup":false}`,
 		"admin-session",
 		true,

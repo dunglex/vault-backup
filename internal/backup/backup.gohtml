@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Backup - Vault Server</title>
+  <link rel="stylesheet" href="/normalize.css">
+  <link rel="stylesheet" href="/miligram.css">
+  <link rel="stylesheet" href="/admin.css">
+</head>
+<body>
+<main class="app-shell">
+  <header class="app-header">
+    <h1 class="brand"><a href="/">Vault Server</a></h1>
+    <nav class="app-nav" aria-label="Admin navigation">
+      <a class="button button-outline" href="/secrets.html">Secrets</a>
+      <a class="button button-outline" href="/tokens.html">API tokens</a>
+      <a class="button button-outline" href="/audits.html">Audit log</a>
+      {{if .HasOperators}}<a class="button button-outline" href="/operators.html">Operators</a>{{end}}
+      <a class="button" aria-current="page" href="/backup.html">Backup</a>
+      <a class="button button-outline" href="/security.html">Security</a>
+      <a class="button button-outline" href="/account.html">Account</a>
+    </nav>
+  </header>
+  <div id="error" class="notice" role="alert"></div>
+  <section class="panel">
+    <h2 class="section-label">Scheduled backup</h2>
+    <form id="backupSettingsForm">
+      <label class="setting-option">
+        <input id="automaticServerBackup" type="checkbox">
+        Enable scheduled server backups
+      </label>
+      <label for="serverBackupCron">Backup schedule (six-field cron, UTC)</label>
+      <input id="serverBackupCron" type="text" maxlength="128" value="0 0 2 * * *" autocomplete="off" spellcheck="false">
+      <p class="muted">Every day at 02:00:00 UTC by default. Archives older than 30 days are removed after a successful backup.</p>
+      <p class="muted">Last successful backup: <span id="lastServerBackup">None</span></p>
+      <button type="submit">Save backup settings</button>
+      <span id="saved" class="success" role="status"></span>
+    </form>
+  </section>
+  <section class="panel">
+    <div class="token-page-header">
+      <h2 class="section-label">Server backups</h2>
+      <button id="createServerBackup" type="button">Create backup now</button>
+    </div>
+    <table>
+      <thead><tr><th>Name</th><th>Created</th><th>Operators</th><th>Secrets</th><th>API tokens</th><th>Actions</th></tr></thead>
+      <tbody id="backups"></tbody>
+    </table>
+    <p id="backupsEmpty" class="muted" hidden>No server backups found.</p>
+  </section>
+</main>
+<dialog id="restoreBackupDialog" class="admin-dialog" aria-labelledby="restoreBackupTitle">
+  <div class="admin-dialog-heading">
+    <h2 id="restoreBackupTitle">Restore server backup</h2>
+    <button id="closeRestoreBackup" class="button button-outline" type="button">Close</button>
+  </div>
+  <div id="restoreError" class="notice" role="alert"></div>
+  <p>Restoring replaces server data and pauses the service for the operation. Only restore a backup you created or trust.</p>
+  <button id="confirmRestoreBackup" type="button">Restore this backup</button>
+</dialog>
+<script>
+const errorBox = document.getElementById('error');
+let restoreName = '';
+async function api(path, options = {}) {
+  options.credentials = 'same-origin';
+  const response = await fetch(path, options);
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.error || 'Backup request failed');
+  return body;
+}
+async function loadSettings() {
+  const settings = await api('/v1/backup/settings');
+  document.getElementById('automaticServerBackup').checked = settings.automatic_server_backup;
+  document.getElementById('serverBackupCron').value = settings.server_backup_cron;
+  document.getElementById('lastServerBackup').textContent = settings.server_backup_last_success || 'None';
+}
+async function refreshBackups() {
+  const body = document.getElementById('backups');
+  body.replaceChildren();
+  const result = await api('/v1/backup');
+  for (const backup of result.backups) {
+    const row = body.insertRow();
+    [backup.name, new Date(backup.created_at).toLocaleString(), backup.operators ?? 'N/A', backup.secrets ?? 'N/A', backup.api_tokens ?? 'N/A'].forEach(value => {
+      row.insertCell().textContent = String(value);
+    });
+    const action = row.insertCell();
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'button button-outline';
+    button.textContent = 'Restore';
+    button.addEventListener('click', () => {
+      restoreName = backup.name;
+      document.getElementById('restoreError').textContent = '';
+      document.getElementById('restoreBackupDialog').showModal();
+    });
+    action.append(button);
+  }
+  document.getElementById('backupsEmpty').hidden = result.backups.length !== 0;
+}
+document.getElementById('backupSettingsForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  try {
+    await api('/v1/backup/settings', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({
+      automatic_server_backup:document.getElementById('automaticServerBackup').checked,
+      server_backup_cron:document.getElementById('serverBackupCron').value
+    })});
+    document.getElementById('saved').textContent = 'Saved';
+  } catch (error) { errorBox.textContent = error.message; }
+});
+document.getElementById('createServerBackup').addEventListener('click', async () => {
+  try {
+    await api('/v1/backup', {method:'POST'});
+    await refreshBackups();
+  } catch (error) { errorBox.textContent = error.message; }
+});
+document.getElementById('confirmRestoreBackup').addEventListener('click', async () => {
+  if (!restoreName) return;
+  if (!window.confirm(`Restore "${restoreName}"? This replaces current server data.`)) return;
+  try {
+    await api('/v1/backup/restore', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name:restoreName})});
+    document.getElementById('restoreBackupDialog').close();
+    await refreshBackups();
+  } catch (error) { document.getElementById('restoreError').textContent = error.message; }
+});
+document.getElementById('closeRestoreBackup').addEventListener('click', () => document.getElementById('restoreBackupDialog').close());
+Promise.all([loadSettings(), refreshBackups()]).catch(error => { errorBox.textContent = error.message; });
+</script>
+</body>
+</html>
