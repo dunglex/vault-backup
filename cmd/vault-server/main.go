@@ -2106,8 +2106,8 @@ func secretGroup(path string) string {
 }
 
 func (s *server) listAuditEvents(w http.ResponseWriter, r *http.Request) {
-	if !s.authorizedWeb(r) {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+	access, ok := s.webSecretAccessForRequest(w, r)
+	if !ok {
 		return
 	}
 
@@ -2163,6 +2163,11 @@ func (s *server) listAuditEvents(w http.ResponseWriter, r *http.Request) {
 	addFilter("outcome", r.URL.Query().Get("outcome"))
 	addFilter("actor", r.URL.Query().Get("actor"))
 	addFilter("source", r.URL.Query().Get("source"))
+	if !access.unrestricted {
+		scopeFilter, scopeArgs := auditResourceScopeFilter(access, s.auditRequestActor(r, "web"))
+		conditions = append(conditions, scopeFilter)
+		args = append(args, scopeArgs...)
+	}
 
 	if search := strings.TrimSpace(r.URL.Query().Get("q")); search != "" {
 		conditions = append(conditions, "(actor LIKE ? OR resource LIKE ? OR detail LIKE ?)")
@@ -2254,15 +2259,56 @@ func queryAuditEvents(db *sql.DB, year int, where string, args []any, limit, off
 	}, nil
 }
 
+func auditResourceScopeFilter(access secretPrefixAccess, actor string) (string, []any) {
+	if access.unrestricted {
+		return "", nil
+	}
+	return `(
+		EXISTS (
+			SELECT 1
+			FROM json_each(?) AS scope
+			WHERE audit_events.resource = scope.value
+			   OR substr(audit_events.resource, 1, length(scope.value) + 1) = scope.value || '/'
+			   OR substr(scope.value, 1, length(audit_events.resource) + 1) = audit_events.resource || '/'
+		)
+		OR (
+			audit_events.action = 'list'
+			AND audit_events.source = 'web'
+			AND audit_events.resource = '*'
+			AND audit_events.actor = ?
+		)
+	)`, []any{access.encoded, actor}
+}
+
 func (s *server) listAuditYears(w http.ResponseWriter, r *http.Request) {
-	if !s.authorizedWeb(r) {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+	access, ok := s.webSecretAccessForRequest(w, r)
+	if !ok {
 		return
 	}
 	years, err := s.auditStore.AvailableYears()
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not list audit years"})
 		return
+	}
+	if !access.unrestricted {
+		filter, args := auditResourceScopeFilter(access, s.auditRequestActor(r, "web"))
+		visibleYears := make([]int, 0, len(years))
+		for _, year := range years {
+			hasEvents := false
+			if err := s.auditStore.withYear(year, func(db *sql.DB) error {
+				return db.QueryRow("SELECT EXISTS (SELECT 1 FROM audit_events WHERE "+filter+")", args...).Scan(&hasEvents)
+			}); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not query audit years"})
+				return
+			}
+			if hasEvents {
+				visibleYears = append(visibleYears, year)
+			}
+		}
+		if len(visibleYears) == 0 {
+			visibleYears = append(visibleYears, time.Now().UTC().Year())
+		}
+		years = visibleYears
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"years": years})
 }

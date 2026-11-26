@@ -1,4 +1,4 @@
-# Vault Backup and Vault Server
+# Vault Server and Vault Backup
 
 This repository contains two Go applications:
 

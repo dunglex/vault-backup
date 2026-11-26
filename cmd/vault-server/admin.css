@@ -171,6 +171,13 @@ textarea {
   min-width: 0;
 }
 
+.admin-dialog select[multiple] {
+  background-image: none;
+  height: auto;
+  min-height: 14rem;
+  padding: 0.8rem 1rem;
+}
+
 .row-actions {
   align-items: center;
   display: flex;

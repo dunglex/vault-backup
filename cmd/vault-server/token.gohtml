@@ -26,7 +26,7 @@
   <section class="panel">
     <div class="token-page-header">
       <h2 class="section-label">API tokens</h2>
-      <button id="openCreateToken" type="button">Add token</button>
+      <button id="openCreateToken" type="button" {{if not .IsAdmin}}disabled{{end}}>Add token</button>
     </div>
     <ul id="tokens"></ul>
   </section>
@@ -48,8 +48,14 @@
         <option value="180">180 days</option>
         <option value="365">365 days</option>
       </select>
+      {{if .IsAdmin}}
       <label for="tokenPrefixes">Allowed secret path prefixes (up to 100, one per line)</label>
       <textarea id="tokenPrefixes" name="prefixes" rows="4" required placeholder="team-a&#10;shared/build"></textarea>
+      {{else}}
+      <label for="tokenPrefixes">Choose allowed secret path prefixes</label>
+      <select id="tokenPrefixes" name="prefixes" multiple required size="5"></select>
+      <p class="muted">Only prefixes assigned to your operator account are available. Hold Ctrl or Command to choose multiple prefixes.</p>
+      {{end}}
       <p class="muted">Each prefix grants access to that exact secret path and its descendants.</p>
       {{if .EnforceMTLS}}<p class="muted">The client certificate expires at the same time as the token.</p>{{end}}
     </div>
@@ -83,8 +89,14 @@
       <button id="closeEditTokenPrefixes" class="button button-outline" type="button">Close</button>
     </div>
     <div id="editTokenPrefixesError" class="notice" role="alert"></div>
+    {{if .IsAdmin}}
     <label for="editTokenPrefixes">Allowed secret path prefixes (up to 100, one per line)</label>
     <textarea id="editTokenPrefixes" rows="5" required></textarea>
+    {{else}}
+    <label for="editTokenPrefixes">Choose allowed secret path prefixes</label>
+    <select id="editTokenPrefixes" multiple required size="5"></select>
+    <p class="muted">Only prefixes assigned to your operator account are available. Hold Ctrl or Command to choose multiple prefixes.</p>
+    {{end}}
     <div class="row-actions admin-dialog-actions">
       <button type="submit">Save access</button>
     </div>
@@ -92,14 +104,46 @@
 </dialog>
 <script>
 const enforceMTLS = {{if .EnforceMTLS}}true{{else}}false{{end}};
+const isAdmin = {{if .IsAdmin}}true{{else}}false{{end}};
 const errorBox = document.getElementById('error');
 const createDialog = document.getElementById('createTokenDialog');
 const editPrefixesDialog = document.getElementById('editTokenPrefixesDialog');
 let apiTokens = [];
 let newCredentials = null;
 let editingTokenId = 0;
+let operatorPrefixes = [];
 
 function showError(message) { errorBox.textContent = message || ''; }
+function readPrefixValues(id) {
+  const control = document.getElementById(id);
+  if (control instanceof HTMLSelectElement) {
+    return Array.from(control.selectedOptions, option => option.value);
+  }
+  return control.value.split('\n').map(prefix => prefix.trim()).filter(Boolean);
+}
+function setPrefixValues(id, prefixes) {
+  const control = document.getElementById(id);
+  if (control instanceof HTMLSelectElement) {
+    const selectablePrefixes = operatorPrefixes.filter(prefix =>
+      prefixes.some(granted => prefix === granted || prefix.startsWith(granted + '/')));
+    for (const option of control.options) {
+      option.selected = selectablePrefixes.includes(option.value);
+    }
+    return;
+  }
+  control.value = prefixes.join('\n');
+}
+function populateOperatorPrefixChoices(id) {
+  const select = document.getElementById(id);
+  if (!(select instanceof HTMLSelectElement)) return;
+  select.replaceChildren();
+  for (const prefix of operatorPrefixes) {
+    const option = document.createElement('option');
+    option.value = prefix;
+    option.textContent = prefix;
+    select.append(option);
+  }
+}
 function sampleCommand() {
   return [
     'export VAULT_TOKEN="PASTE_COPIED_TOKEN_HERE"',
@@ -217,7 +261,7 @@ function renderTokens() {
       editingTokenId = token.id;
       document.getElementById('editTokenPrefixesTitle').textContent = `Edit paths for ${token.name}`;
       document.getElementById('editTokenPrefixesError').textContent = '';
-      document.getElementById('editTokenPrefixes').value = token.prefixes.join('\n');
+      setPrefixValues('editTokenPrefixes', token.prefixes);
       editPrefixesDialog.showModal();
     };
     actions.appendChild(editPrefixes);
@@ -298,7 +342,7 @@ document.getElementById('finishCreateToken').addEventListener('click', closeWith
 createDialog.addEventListener('close', () => {
   document.getElementById('tokenName').value = '';
   document.getElementById('tokenLifetimeDays').value = '30';
-  document.getElementById('tokenPrefixes').value = '';
+  setPrefixValues('tokenPrefixes', []);
   document.getElementById('credentialNotice').textContent = '';
   document.getElementById('credentialNotice').hidden = true;
   document.getElementById('dialogError').textContent = '';
@@ -344,7 +388,7 @@ document.getElementById('createTokenForm').addEventListener('submit', async even
       body:JSON.stringify({
         name,
         expires_in_days:Number(document.getElementById('tokenLifetimeDays').value),
-        prefixes:document.getElementById('tokenPrefixes').value.split('\n').map(prefix => prefix.trim()).filter(Boolean)
+        prefixes:readPrefixValues('tokenPrefixes')
       })
     });
     document.getElementById('createTokenTitle').textContent = 'Token created';
@@ -366,7 +410,24 @@ document.getElementById('createTokenForm').addEventListener('submit', async even
 });
 
 
-refreshTokens();
+async function initializeTokenPage() {
+  try {
+    if (!isAdmin) {
+      const session = await api('/v1/session');
+      if (session.role !== 'operator' || !Array.isArray(session.secret_prefixes)) {
+        throw new Error('Could not load your allowed secret path prefixes');
+      }
+      operatorPrefixes = session.secret_prefixes;
+      populateOperatorPrefixChoices('tokenPrefixes');
+      populateOperatorPrefixChoices('editTokenPrefixes');
+      document.getElementById('openCreateToken').disabled = false;
+    }
+  } catch (error) {
+    showError(error.message);
+  }
+  await refreshTokens();
+}
+initializeTokenPage();
 document.getElementById('closeEditTokenPrefixes').addEventListener('click', () => editPrefixesDialog.close());
 document.getElementById('editTokenPrefixesForm').addEventListener('submit', async event => {
   event.preventDefault();
@@ -377,7 +438,7 @@ document.getElementById('editTokenPrefixesForm').addEventListener('submit', asyn
       method:'PUT',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({
-        prefixes:document.getElementById('editTokenPrefixes').value.split('\n').map(prefix => prefix.trim()).filter(Boolean)
+        prefixes:readPrefixValues('editTokenPrefixes')
       })
     });
     editPrefixesDialog.close();

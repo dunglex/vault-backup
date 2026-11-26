@@ -36,8 +36,12 @@ unlock, reset two-factor authentication for, and remove Operator accounts from
 web sessions. Resetting two-factor authentication clears their TOTP setup and
 recovery codes and revokes active sessions; when MFA enforcement is enabled,
 the Operator must enroll again before continuing. Operators can manage secrets,
-API tokens, and audit events within their assigned secret path prefixes, but
-cannot access `/security.html`,
+API tokens, and audit events within their assigned secret path prefixes. Their
+audit views include only resource paths that overlap their current prefixes,
+plus their own web secret-list events. Admins retain unrestricted audit access.
+Filtering uses the Operator's current account prefixes at query time; audit
+records do not duplicate role or account-scope data.
+Operators cannot access `/security.html`,
 `/v1/settings`, `/operators.html`, or operator-management endpoints.
 Admin accounts retain unrestricted web access. Admins assign one or more
 prefixes when creating an Operator and can change them later from
@@ -192,10 +196,11 @@ create tokens in the add-token dialog, list, and revoke API tokens. Each token
 requires one or more secret path prefixes and can read, write, delete, and list
 only within those prefixes. Prefixes use the secret path format described above.
 Operators may create tokens only for paths within their own assigned prefixes;
-their tokens remain bounded by the Operator's current prefixes. Admins can
-change token prefixes from `/tokens.html`; Operators can only assign prefixes
-within their own access. Tokens with no configured prefixes, including existing
-tokens after upgrade, cannot access secrets until an Admin assigns prefixes.
+their tokens remain bounded by the Operator's current prefixes. Admins enter
+token prefixes directly; Operators choose from the prefixes assigned to them by
+an Admin. The server rejects out-of-scope prefixes even if an Operator bypasses
+the web form. Tokens with no configured prefixes, including existing tokens
+after upgrade, cannot access secrets until an Admin assigns prefixes.
 Tokens:
 
 - Must have a unique name

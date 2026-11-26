@@ -241,6 +241,18 @@ func TestOperatorScopesConstrainCreatedTokensAfterScopeChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	updateOutOfOperatorScope := httptest.NewRecorder()
+	updateOutOfScopeRequest := operatorRequestWithSession(
+		http.MethodPut, "/v1/tokens/"+strconv.FormatInt(tokenResponse.ID, 10)+"/prefixes",
+		`{"prefixes":["team-b"]}`,
+		"scoped-operator-session", true,
+	)
+	updateOutOfScopeRequest.SetPathValue("id", strconv.FormatInt(tokenResponse.ID, 10))
+	s.updateAPITokenSecretPrefixes(updateOutOfOperatorScope, updateOutOfScopeRequest)
+	if updateOutOfOperatorScope.Code != http.StatusForbidden {
+		t.Fatalf("update token outside operator scope status = %d, want %d", updateOutOfOperatorScope.Code, http.StatusForbidden)
+	}
+
 	updateToken := httptest.NewRecorder()
 	updateTokenRequest := operatorRequestWithSession(
 		http.MethodPut, "/v1/tokens/"+strconv.FormatInt(tokenResponse.ID, 10)+"/prefixes",

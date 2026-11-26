@@ -203,6 +203,19 @@ def main() -> None:
         status, visible_secrets = operator_client.json("GET", f"{server.https_url}/v1/secrets")
         assert_status(200, status, "list secrets within operator prefixes")
         require(visible_secrets == ["team-a/auth-test"], "filter operator secret listing by prefix")
+        status, scoped_audit = operator_client.json(
+            "GET", f"{server.https_url}/v1/audit?q=team-a%2Fauth-test"
+        )
+        assert_status(200, status, "search audit events within operator prefixes")
+        require(
+            any(event["resource"] == "team-a/auth-test" for event in scoped_audit["events"]),
+            "include audit records for assigned prefixes",
+        )
+        status, hidden_audit = operator_client.json(
+            "GET", f"{server.https_url}/v1/audit?q=team-b%2Fauth-test"
+        )
+        assert_status(200, status, "search audit events outside operator prefixes")
+        require(hidden_audit["total"] == 0, "exclude audit records outside assigned prefixes")
         status, _ = operator_client.request(
             "GET", f"{server.https_url}/v1/secrets/team-b/auth-test"
         )
@@ -261,6 +274,14 @@ def main() -> None:
         )
         status, _ = operator_client.request("GET", f"{server.https_url}/v1/tokens")
         assert_status(200, status, "allow operator token management")
+        status, operator_token_page = operator_client.request("GET", f"{server.https_url}/tokens.html")
+        assert_status(200, status, "open operator token management page")
+        require(
+            b'<select id="tokenPrefixes" name="prefixes" multiple' in operator_token_page
+            and b'<select id="editTokenPrefixes" multiple' in operator_token_page
+            and b'<textarea id="tokenPrefixes"' not in operator_token_page,
+            "restrict operator token path choices to assigned prefixes",
+        )
         status, _ = operator_client.request("GET", f"{server.https_url}/v1/audit")
         assert_status(200, status, "allow operator audit access")
         status, operator_details = server.client.json(
