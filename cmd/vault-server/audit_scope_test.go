@@ -11,7 +11,7 @@ import (
 
 func TestOperatorAuditEventsAreFilteredBySecretPrefixes(t *testing.T) {
 	s := newOperatorTestServer(t)
-	prefixes, err := encodeSecretPrefixes([]string{"team-a", "kv/team-a"})
+	prefixes, err := encodeSecretPrefixes([]string{"team-a"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,9 +43,9 @@ func TestOperatorAuditEventsAreFilteredBySecretPrefixes(t *testing.T) {
 	}{
 		{"read", "operator-token", "web", "team-a/database"},
 		{"read", "operator-token", "web", "team-a-archive/database"},
-		{"read", "api-token:abc123", "api", "kv/team-a/database"},
-		{"read", "api-token:def456", "api", "kv/team-b/database"},
-		{"list", "api-token:abc123", "api", "kv"},
+		{"read", "api-token:abc123", "api", "team-a/database"},
+		{"read", "api-token:def456", "api", "team-b/database"},
+		{"list", "api-token:abc123", "api", ""},
 		{"list", "scoped-operator", "web", "*"},
 		{"list", "other-operator", "web", "*"},
 		{"login", "other-operator", "web", ""},
@@ -84,7 +84,7 @@ func TestOperatorAuditEventsAreFilteredBySecretPrefixes(t *testing.T) {
 	for _, event := range result.Events {
 		visibleResources[event.Resource] = true
 	}
-	for _, resource := range []string{"team-a/database", "kv/team-a/database", "kv", "*"} {
+	for _, resource := range []string{"team-a/database", "", "*"} {
 		if !visibleResources[resource] {
 			t.Errorf("operator audit omitted allowed resource %q", resource)
 		}

@@ -24,7 +24,9 @@ python3 ./test_data/restore_dummy_secrets_with_vault_backup.py --insecure-tls
 
 Use `--input-dir`, `--mount`, or `--binary` to override their defaults. The
 script restores each JSON file with `bin/vault-backup --restore`, using its
-relative path as the Vault secret path. Use `--ca-cert` instead of
+relative path as the Vault secret path. The mount only selects the API route;
+it is not prepended to the secret path, and all mounts share the same secret
+namespace. Use `--ca-cert` instead of
 `--insecure-tls` when the server certificate is issued by a trusted CA. Paths
 passed to `--ca-cert`, `--client-cert`, and `--client-key` are resolved relative
 to the directory from which the script is run.

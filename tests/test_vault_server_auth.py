@@ -361,7 +361,7 @@ def main() -> None:
         status, _ = server.client.json(
             "POST",
             f"{server.http_url}/v1/tokens",
-            data={"name": "insecure-token", "prefixes": ["kv/app"]},
+            data={"name": "insecure-token", "prefixes": ["app"]},
             headers=server.cookie_header(),
         )
         assert_status(426, status, "require HTTPS when issuing tokens and private keys")
@@ -369,13 +369,13 @@ def main() -> None:
         status, _ = server.client.json(
             "POST",
             f"{server.https_url}/v1/tokens",
-            data={"name": "invalid-expiry", "expires_in_days": 366, "prefixes": ["kv/app"]},
+            data={"name": "invalid-expiry", "expires_in_days": 366, "prefixes": ["app"]},
         )
         assert_status(400, status, "reject token lifetime above one year")
         status, _ = server.client.json(
             "POST",
             f"{server.https_url}/v1/tokens",
-            data={"name": "invalid-expiry", "expires_in_days": 0, "prefixes": ["kv/app"]},
+            data={"name": "invalid-expiry", "expires_in_days": 0, "prefixes": ["app"]},
         )
         assert_status(400, status, "reject non-positive token lifetime")
 
@@ -415,7 +415,7 @@ def main() -> None:
         status, duplicate_name = server.client.json(
             "POST",
             f"{server.https_url}/v1/tokens",
-            data={"name": "backup-agent", "prefixes": ["kv/token"]},
+            data={"name": "backup-agent", "prefixes": ["token"]},
         )
         assert_status(409, status, "reject duplicate API token name")
         require("already exists" in duplicate_name["error"], "explain duplicate API token name")
@@ -448,7 +448,7 @@ def main() -> None:
         assert_status(200, status, "read secret with managed API token")
         status, _ = server.client.json(
             "PUT",
-            f"{server.https_url}/v1/secrets/kv/private/auth-test",
+            f"{server.https_url}/v1/secrets/private/auth-test",
             data={"data": {"marker": "outside-token-scope"}},
         )
         assert_status(200, status, "seed API token scope boundary test secret")

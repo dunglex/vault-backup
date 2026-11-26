@@ -253,7 +253,7 @@ class ServerTest:
     ) -> tuple[str, int, dict]:
         data: dict[str, str | int | list[str]] = {
             "name": name,
-            "prefixes": ["kv/app", "kv/token", "kv/session"],
+            "prefixes": ["app", "token", "session"],
         }
         if expires_in_days is not None:
             data["expires_in_days"] = expires_in_days

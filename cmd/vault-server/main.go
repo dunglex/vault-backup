@@ -1671,8 +1671,8 @@ func (s *server) revokeAPIToken(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) getKVSecret(w http.ResponseWriter, r *http.Request) {
-	source, path := "api", r.PathValue("mount")+"/"+r.PathValue("path")
-	if !validSecretPath(path) {
+	source, path := "api", r.PathValue("path")
+	if !validSecretPath(r.PathValue("mount") + "/" + path) {
 		s.recordAuditEvent(r, "read", "failure", s.auditRequestActor(r, source), source, path, "invalid_secret_path")
 		writeInvalidSecretPath(w)
 		return
@@ -1716,8 +1716,8 @@ func (s *server) getKVSecret(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) putKVSecret(w http.ResponseWriter, r *http.Request) {
-	source, path := "api", r.PathValue("mount")+"/"+r.PathValue("path")
-	if !validSecretPath(path) {
+	source, path := "api", r.PathValue("path")
+	if !validSecretPath(r.PathValue("mount") + "/" + path) {
 		s.recordAuditEvent(r, "update", "failure", s.auditRequestActor(r, source), source, path, "invalid_secret_path")
 		writeInvalidSecretPath(w)
 		return
@@ -1778,8 +1778,8 @@ func (s *server) putKVSecret(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) deleteKVSecret(w http.ResponseWriter, r *http.Request) {
-	source, path := "api", r.PathValue("mount")+"/"+r.PathValue("path")
-	if !validSecretPath(path) {
+	source, path := "api", r.PathValue("path")
+	if !validSecretPath(r.PathValue("mount") + "/" + path) {
 		s.recordAuditEvent(r, "delete", "failure", s.auditRequestActor(r, source), source, path, "invalid_secret_path")
 		writeInvalidSecretPath(w)
 		return
@@ -1811,21 +1811,29 @@ func (s *server) deleteKVSecret(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) listKVMetadata(w http.ResponseWriter, r *http.Request) {
 	source := "api"
-	path := r.PathValue("mount")
-	if secretPath := r.PathValue("path"); secretPath != "" {
-		path += "/" + secretPath
+	mount := r.PathValue("mount")
+	path := r.PathValue("path")
+	fullPath := mount
+	if path != "" {
+		fullPath += "/" + path
 	}
-	if !validSecretPath(path) {
+	if !validSecretPath(fullPath) {
 		s.recordAuditEvent(r, "list", "failure", s.auditRequestActor(r, source), source, path, "invalid_secret_path")
 		writeInvalidSecretPath(w)
 		return
 	}
 	access, ok := s.apiSecretAccessForRequest(w, r)
 	if !ok {
-		s.recordAuditEvent(r, "list", "failure", s.auditRequestActor(r, source), source, r.PathValue("mount")+"/"+r.PathValue("path"), "unauthorized")
+		s.recordAuditEvent(r, "list", "failure", s.auditRequestActor(r, source), source, path, "unauthorized")
 		return
 	}
-	intersects, err := s.secretPathIntersects(access, path)
+	var intersects bool
+	var err error
+	if path == "" {
+		intersects = !access.empty()
+	} else {
+		intersects, err = s.secretPathIntersects(access, path)
+	}
 	if err != nil {
 		s.recordAuditEvent(r, "list", "failure", s.auditRequestActor(r, source), source, path, "scope_lookup_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not verify secret access"})
@@ -1836,19 +1844,27 @@ func (s *server) listKVMetadata(w http.ResponseWriter, r *http.Request) {
 		denySecretScope(w)
 		return
 	}
-	prefix := path + "/"
+	prefix := ""
+	if path != "" {
+		prefix = path + "/"
+	}
 	query := `
 		WITH candidates AS (
 			SELECT CASE
+				WHEN ? = '' THEN
+					CASE
+						WHEN instr(path, '/') = 0 THEN path
+						ELSE substr(path, 1, instr(path, '/') - 1)
+					END
 				WHEN instr(substr(path, length(?) + 2), '/') = 0 THEN path
 				ELSE substr(path, 1, length(?) + instr(substr(path, length(?) + 2), '/'))
 			END AS child_path
 			FROM secrets
-			WHERE path LIKE ?
+			WHERE ? = '' OR path LIKE ?
 		)
 		SELECT DISTINCT child_path
 		FROM candidates`
-	args := []any{path, path, path, prefix + "%"}
+	args := []any{path, path, path, path, path, prefix + "%"}
 	if !access.unrestricted {
 		query += `
 			WHERE EXISTS (
@@ -1863,7 +1879,7 @@ func (s *server) listKVMetadata(w http.ResponseWriter, r *http.Request) {
 	query += " ORDER BY child_path"
 	rows, err := s.secretsDB.Query(query, args...)
 	if err != nil {
-		s.recordAuditEvent(r, "list", "failure", s.auditRequestActor(r, source), source, r.PathValue("mount")+"/"+r.PathValue("path"), "storage_error")
+		s.recordAuditEvent(r, "list", "failure", s.auditRequestActor(r, source), source, path, "storage_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not list secrets"})
 		return
 	}
@@ -1872,18 +1888,18 @@ func (s *server) listKVMetadata(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var childPath string
 		if err := rows.Scan(&childPath); err != nil {
-			s.recordAuditEvent(r, "list", "failure", s.auditRequestActor(r, source), source, r.PathValue("mount")+"/"+r.PathValue("path"), "storage_error")
+			s.recordAuditEvent(r, "list", "failure", s.auditRequestActor(r, source), source, path, "storage_error")
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read secrets"})
 			return
 		}
 		keys = append(keys, strings.TrimPrefix(childPath, prefix))
 	}
 	if err := rows.Err(); err != nil {
-		s.recordAuditEvent(r, "list", "failure", s.auditRequestActor(r, source), source, r.PathValue("mount")+"/"+r.PathValue("path"), "storage_error")
+		s.recordAuditEvent(r, "list", "failure", s.auditRequestActor(r, source), source, path, "storage_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not list secrets"})
 		return
 	}
-	s.recordAuditEvent(r, "list", "success", s.auditRequestActor(r, source), source, r.PathValue("mount")+"/"+r.PathValue("path"), "")
+	s.recordAuditEvent(r, "list", "success", s.auditRequestActor(r, source), source, path, "")
 	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"keys": keys}})
 }
 
@@ -2333,6 +2349,11 @@ func auditResourceScopeFilter(access secretPrefixAccess, actor string) (string, 
 			WHERE audit_events.resource = scope.value
 			   OR substr(audit_events.resource, 1, length(scope.value) + 1) = scope.value || '/'
 			   OR substr(scope.value, 1, length(audit_events.resource) + 1) = audit_events.resource || '/'
+		)
+		OR (
+			audit_events.action = 'list'
+			AND audit_events.source = 'api'
+			AND audit_events.resource = ''
 		)
 		OR (
 			audit_events.action = 'list'

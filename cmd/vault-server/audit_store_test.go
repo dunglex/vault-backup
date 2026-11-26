@@ -18,7 +18,7 @@ func TestAnnualAuditStoreMigratesLegacyEventsAndSealsPastYears(t *testing.T) {
 	pastYearTime := time.Date(time.Now().UTC().Year()-1, time.January, 2, 3, 4, 5, 0, time.UTC)
 	if _, err := legacyDB.Exec(`
 		INSERT INTO audit_events(created_at, action, outcome, actor, client_ip, source, resource, detail)
-		VALUES (?, 'read', 'success', 'admin', '127.0.0.1', 'web', 'kv/secret', '')`,
+		VALUES (?, 'read', 'success', 'admin', '127.0.0.1', 'web', 'secret', '')`,
 		pastYearTime.Unix(),
 	); err != nil {
 		t.Fatal(err)
@@ -41,7 +41,7 @@ func TestAnnualAuditStoreMigratesLegacyEventsAndSealsPastYears(t *testing.T) {
 	pastYear := pastYearTime.Year()
 	var migratedCount int
 	if err := store.withYear(pastYear, func(db *sql.DB) error {
-		return db.QueryRow("SELECT COUNT(*) FROM audit_events WHERE resource = 'kv/secret'").Scan(&migratedCount)
+		return db.QueryRow("SELECT COUNT(*) FROM audit_events WHERE resource = 'secret'").Scan(&migratedCount)
 	}); err != nil {
 		t.Fatalf("read migrated audit events: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestAnnualAuditStoreMigratesLegacyEventsAndSealsPastYears(t *testing.T) {
 	defer store.Close()
 	migratedCount = 0
 	if err := store.withYear(pastYear, func(db *sql.DB) error {
-		return db.QueryRow("SELECT COUNT(*) FROM audit_events WHERE resource = 'kv/secret'").Scan(&migratedCount)
+		return db.QueryRow("SELECT COUNT(*) FROM audit_events WHERE resource = 'secret'").Scan(&migratedCount)
 	}); err != nil {
 		t.Fatalf("read migrated events after restart: %v", err)
 	}

@@ -592,10 +592,10 @@ func TestBrowseSecretsGroupsAndPaginates(t *testing.T) {
 		t.Fatal(err)
 	}
 	paths := []string{
-		"kv/dummy/secret1",
-		"kv/dummy/secret2",
-		"kv/dummy/z-nested/secret3",
-		"kv/production/database",
+		"dummy/app/secret1",
+		"dummy/app/secret2",
+		"dummy/app/z-nested/secret3",
+		"production/database",
 		"other",
 	}
 	for _, path := range paths {
@@ -608,7 +608,7 @@ func TestBrowseSecretsGroupsAndPaginates(t *testing.T) {
 		secretsDB: db,
 		sessions:  map[string]sessionInfo{"session": {role: "admin", expiresAt: time.Now().Add(time.Minute)}},
 	}
-	request := httptest.NewRequest(http.MethodGet, "/v1/secrets-browser?group=kv%2Fdummy&limit=10&offset=1", nil)
+	request := httptest.NewRequest(http.MethodGet, "/v1/secrets-browser?group=dummy%2Fapp&limit=10&offset=1", nil)
 	request.AddCookie(&http.Cookie{Name: "vault_session", Value: "session"})
 	response := httptest.NewRecorder()
 	s.browseSecrets(response, request)
@@ -618,23 +618,23 @@ func TestBrowseSecretsGroupsAndPaginates(t *testing.T) {
 	}
 	body := response.Body.String()
 	for _, want := range []string{
-		`"group":"kv/dummy"`,
-		`"paths":["kv/dummy/secret2","kv/dummy/z-nested/secret3"]`,
+		`"group":"dummy/app"`,
+		`"paths":["dummy/app/secret2","dummy/app/z-nested/secret3"]`,
 		`"total":3`,
 		`"count":3`,
-		`"name":"kv/production"`,
+		`"name":"production/database"`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("browse response %q does not contain %q", body, want)
 		}
 	}
-	nestedRequest := httptest.NewRequest(http.MethodGet, "/v1/secrets-browser?group=kv%2Fdummy%2Fz-nested", nil)
+	nestedRequest := httptest.NewRequest(http.MethodGet, "/v1/secrets-browser?group=dummy%2Fapp%2Fz-nested", nil)
 	nestedRequest.AddCookie(&http.Cookie{Name: "vault_session", Value: "session"})
 	nestedResponse := httptest.NewRecorder()
 	s.browseSecrets(nestedResponse, nestedRequest)
 	if nestedResponse.Code != http.StatusOK ||
-		!strings.Contains(nestedResponse.Body.String(), `"group":"kv/dummy/z-nested"`) ||
-		!strings.Contains(nestedResponse.Body.String(), `"paths":["kv/dummy/z-nested/secret3"]`) {
+		!strings.Contains(nestedResponse.Body.String(), `"group":"dummy/app/z-nested"`) ||
+		!strings.Contains(nestedResponse.Body.String(), `"paths":["dummy/app/z-nested/secret3"]`) {
 		t.Fatalf("nested browse response = status %d, body %s", nestedResponse.Code, nestedResponse.Body.String())
 	}
 }

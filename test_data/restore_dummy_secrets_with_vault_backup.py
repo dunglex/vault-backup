@@ -24,7 +24,7 @@ def main() -> None:
     parser.add_argument(
         "--mount",
         default=os.environ.get("VAULT_SECRET_NAME", "kv"),
-        help="Vault KV mount (default: VAULT_SECRET_NAME or kv)",
+        help="Vault API mount; not part of secret paths (default: VAULT_SECRET_NAME or kv)",
     )
     parser.add_argument(
         "--input-dir",

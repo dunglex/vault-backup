@@ -53,9 +53,11 @@ Admin to assign them before they can access secrets. Each account or token can
 have up to 100 prefixes. A prefix grants access to
 the exact path and its descendants at segment boundaries; for example, `team-a`
 covers `team-a/database`, but not `team-archive`. Prefixes use the same path
-validation as secrets; for KV API secrets, use the full path including the mount
-segment (for example, `kv/team-a`). Operators with no configured prefixes cannot
-access secrets.
+validation as secrets. The API mount is a routing component, not part of a
+secret's path: `team-a` grants access to `team-a/database` through
+`/api/v1/kv/data/team-a/database`. All mounts share the same secret-path
+namespace, so the same path through another mount refers to the same secret.
+Operators with no configured prefixes cannot access secrets.
 Creating an Operator generates a random 12-20 character temporary password
 shown only once in the admin dialog. Copy or record it before closing the
 dialog, then provide it to the Operator through a secure channel. The Operator

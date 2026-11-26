@@ -21,8 +21,8 @@ Invalid or incomplete configuration is rejected with exit status 2 before connec
 | `--user` | `VAULT_USER` | Vault username |
 | `--pass` | `VAULT_PASS` | Vault password |
 | `--token` | `VAULT_TOKEN` | Managed API token (alternative to username/password; cannot be combined with user/pass) |
-| `--secret_name` | `VAULT_SECRET_NAME` | Secret mount/name |
-| `--secret_path` | `VAULT_SECRET_PATH` | Secret path for backup |
+| `--secret_name` | `VAULT_SECRET_NAME` | API mount/name |
+| `--secret_path` | `VAULT_SECRET_PATH` | Secret path for backup, without the mount |
 | `--output_mode` | `VAULT_OUTPUT_MODE` | `all`, `data`, or `file` (default: `all`) |
 | `--output_format` | `VAULT_OUTPUT_FORMAT` | `json`, `yaml`, `ini`, or `env` (default: `json`) |
 | `--output_path` | `VAULT_OUTPUT_PATH` | Output file or directory (default: `.`) |
@@ -38,7 +38,11 @@ Use HTTPS for direct TLS connections. HTTP is insecure and prints a warning when
 
 Backup files are written with mode `0600`. Output directories created by `vault-backup` use mode `0700`.
 
-Folder backups recurse through nested secret paths. Backup and restore operations exit with a non-zero status if any item fails, even when other items were processed successfully.
+Folder backups recurse through nested secret paths. For vault-server, the API
+mount is only used for routing and is not included in secret paths; all mounts
+share the same path namespace. Backup and restore operations exit with a
+non-zero status if any item fails, even when other items were processed
+successfully.
 
 When the administrator has created a managed API token, `vault-backup` can use it directly:
 

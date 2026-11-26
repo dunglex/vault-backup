@@ -52,16 +52,16 @@ func TestAPITokenScopesRestrictCRUDAndFilterList(t *testing.T) {
 		t.Fatal(err)
 	}
 	const token = "scope-test-token"
-	insertScopedAPIToken(t, s, token, []string{"kv/team-a", "kv/shared/build"}, "")
+	insertScopedAPIToken(t, s, token, []string{"team-a", "shared/build"}, "")
 	if _, err := s.secretsDB.Exec(
 		"INSERT INTO secrets(path, data) VALUES (?, ?)",
-		"kv/team-b/hidden", "unused",
+		"team-b/hidden", "unused",
 	); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.secretsDB.Exec(
 		"INSERT INTO secrets(path, data) VALUES (?, ?)",
-		"kv/shared/build/visible", "unused",
+		"shared/build/visible", "unused",
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -73,11 +73,27 @@ func TestAPITokenScopesRestrictCRUDAndFilterList(t *testing.T) {
 	if write.Code != http.StatusOK {
 		t.Fatalf("allowed API write status = %d, body %s", write.Code, write.Body.String())
 	}
+	var storedPath string
+	if err := s.secretsDB.QueryRow(
+		"SELECT path FROM secrets WHERE path = ?",
+		"team-a/database",
+	).Scan(&storedPath); err != nil {
+		t.Fatalf("secret was not stored without mount prefix: %v", err)
+	}
 
 	read := httptest.NewRecorder()
 	s.getKVSecret(read, apiScopeRequest(http.MethodGet, "/api/v1/kv/data/team-a/database", "", token))
 	if read.Code != http.StatusOK || !strings.Contains(read.Body.String(), `"username":"alice"`) {
 		t.Fatalf("allowed API read = %d, body %s", read.Code, read.Body.String())
+	}
+	otherMountRequest := httptest.NewRequest(http.MethodGet, "/api/v1/other/data/team-a/database", nil)
+	otherMountRequest.Header.Set("X-Vault-Token", token)
+	otherMountRequest.SetPathValue("mount", "other")
+	otherMountRequest.SetPathValue("path", "team-a/database")
+	otherMountRead := httptest.NewRecorder()
+	s.getKVSecret(otherMountRead, otherMountRequest)
+	if otherMountRead.Code != http.StatusOK || !strings.Contains(otherMountRead.Body.String(), `"username":"alice"`) {
+		t.Fatalf("same secret through another mount = %d, body %s", otherMountRead.Code, otherMountRead.Body.String())
 	}
 
 	outOfScope := httptest.NewRecorder()
