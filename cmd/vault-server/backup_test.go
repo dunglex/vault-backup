@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -35,7 +36,12 @@ func TestCreateServerDataBackupArchivesDataAndSkipsBackupDirectory(t *testing.T)
 		}
 	}
 	createdAt := time.Date(2026, 11, 26, 2, 0, 0, 0, time.UTC)
-	archivePath, err := createServerDataBackup(dataDir, backupDir, createdAt)
+	archivePath, err := createServerDataBackupWithMetadata(dataDir, backupDir, serverBackupMetadata{
+		CreatedAt: createdAt,
+		Operators: 2,
+		Secrets:   3,
+		APITokens: 4,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,6 +94,32 @@ func TestCreateServerDataBackupArchivesDataAndSkipsBackupDirectory(t *testing.T)
 	if !ok {
 		t.Fatal("backup manifest missing")
 	}
+	metadataBytes, ok := contents["vault-server/metadata.json"]
+	if !ok {
+		t.Fatal("backup metadata missing")
+	}
+	var metadata serverBackupMetadata
+	if err := json.Unmarshal(metadataBytes, &metadata); err != nil {
+		t.Fatalf("decode backup metadata: %v", err)
+	}
+	if metadata.Name != filepath.Base(archivePath) || !metadata.CreatedAt.Equal(createdAt) ||
+		metadata.Operators != 2 || metadata.Secrets != 3 || metadata.APITokens != 4 {
+		t.Fatalf("backup metadata = %+v", metadata)
+	}
+	metadataChecksum := fmt.Sprintf("%x  metadata.json\n", sha256.Sum256(metadataBytes))
+	if !strings.Contains(string(manifest), metadataChecksum) {
+		t.Fatal("backup manifest missing metadata checksum")
+	}
+	summary, err := readServerBackupSummary(archivePath, filepath.Base(archivePath), time.Time{})
+	if err != nil {
+		t.Fatalf("read backup summary: %v", err)
+	}
+	if summary.Operators == nil || *summary.Operators != 2 ||
+		summary.Secrets == nil || *summary.Secrets != 3 ||
+		summary.APITokens == nil || *summary.APITokens != 4 ||
+		!summary.CreatedAt.Equal(createdAt) {
+		t.Fatalf("backup summary = %+v", summary)
+	}
 	for name, content := range files {
 		path := filepath.ToSlash(filepath.Join("vault-server", "data", name))
 		got, ok := contents[path]
@@ -103,6 +135,83 @@ func TestCreateServerDataBackupArchivesDataAndSkipsBackupDirectory(t *testing.T)
 		if strings.Contains(path, "/backups/") {
 			t.Errorf("backup recursively included archive %q", path)
 		}
+	}
+}
+
+func TestListServerBackupsRequiresAdminAndReturnsMetadata(t *testing.T) {
+	s := newOperatorTestServer(t)
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "data")
+	backupDir := filepath.Join(root, "backups")
+	if err := os.MkdirAll(dataDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "vault.db"), []byte("backup data"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	createdAt := time.Date(2026, 11, 26, 2, 0, 0, 0, time.UTC)
+	if _, err := createServerDataBackupWithMetadata(dataDir, backupDir, serverBackupMetadata{
+		CreatedAt: createdAt,
+		Operators: 1,
+		Secrets:   2,
+		APITokens: 3,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s.backupConfig.backupDir = backupDir
+
+	unauthorized := httptest.NewRecorder()
+	s.listServerBackups(unauthorized, httptest.NewRequest(http.MethodGet, "/v1/settings/server-backups", nil))
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized list status = %d, want %d", unauthorized.Code, http.StatusUnauthorized)
+	}
+
+	response := httptest.NewRecorder()
+	s.listServerBackups(response, operatorRequestWithSession(
+		http.MethodGet, "/v1/settings/server-backups", "", "admin-session", false,
+	))
+	if response.Code != http.StatusOK {
+		t.Fatalf("list server backups status = %d, body %s", response.Code, response.Body.String())
+	}
+	var body struct {
+		Backups []serverBackupSummary `json:"backups"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode backup list: %v", err)
+	}
+	if len(body.Backups) != 1 || body.Backups[0].Name == "" ||
+		!body.Backups[0].CreatedAt.Equal(createdAt) ||
+		body.Backups[0].Operators == nil || *body.Backups[0].Operators != 1 ||
+		body.Backups[0].Secrets == nil || *body.Backups[0].Secrets != 2 ||
+		body.Backups[0].APITokens == nil || *body.Backups[0].APITokens != 3 {
+		t.Fatalf("listed backups = %+v", body.Backups)
+	}
+}
+
+func TestServerBackupMetadataCountsOperatorsSecretsAndTokens(t *testing.T) {
+	s := newOperatorTestServer(t)
+	if _, err := s.db.Exec(
+		"INSERT INTO accounts(username, password_hash, role) VALUES ('operator', 'hash', 'operator')",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.secretsDB.Exec(
+		"INSERT INTO secrets(path, data) VALUES ('app/key', 'value')",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(
+		"INSERT INTO api_tokens(name, token_hash, created_at, expires_at) VALUES ('backup', 'hash', ?, ?)",
+		time.Now().Unix(), time.Now().Add(time.Hour).Unix(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := s.serverBackupMetadata(time.Date(2026, 11, 26, 2, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadata.Operators != 1 || metadata.Secrets != 1 || metadata.APITokens != 1 {
+		t.Fatalf("server backup counts = %+v", metadata)
 	}
 }
 

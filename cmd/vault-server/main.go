@@ -419,6 +419,7 @@ func main() {
 	mux.HandleFunc("GET /v1/settings", s.getSettings)
 	mux.HandleFunc("PUT /v1/settings", s.updateSettings)
 	mux.HandleFunc("GET /v1/settings/blocked-login-ips", s.listBlockedLoginIPs)
+	mux.HandleFunc("GET /v1/settings/server-backups", s.listServerBackups)
 	mux.HandleFunc("DELETE /v1/settings/blocked-login-ips/{ip}", s.unblockLoginIP)
 	mux.HandleFunc("GET /v1/operators", s.listOperators)
 	mux.HandleFunc("GET /v1/operators/details", s.listOperatorDetails)

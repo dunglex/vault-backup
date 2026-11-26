@@ -54,7 +54,10 @@
       <input id="serverBackupCron" type="text" maxlength="128" value="0 0 2 * * *" autocomplete="off" spellcheck="false" aria-describedby="serverBackupCronDescription">
       <p id="serverBackupCronDescription" class="muted" aria-live="polite">Every day at 02:00:00 UTC.</p>
       <p class="muted">Format: second minute hour day month weekday (UTC). Default: 02:00 daily. Backups pause service and archive the data folder. Archives older than 30 days are removed after a successful backup. Last successful backup: <span id="lastServerBackup">None</span>.</p>
-      <p><button id="viewBlockedIPs" class="button button-outline" type="button">View blocked IPs</button></p>
+      <div class="row-actions">
+        <button id="viewBlockedIPs" class="button button-outline" type="button">View blocked IPs</button>
+        <button id="viewServerBackups" class="button button-outline" type="button">View backups</button>
+      </div>
       <div class="row-actions">
         <button id="saveSettings" type="submit">Save settings</button>
         <span id="saved" class="success" role="status"></span>
@@ -72,6 +75,20 @@
         <table>
           <thead><tr><th>IP address</th><th>Blocked at (UTC)</th><th>Failed logins</th><th>Action</th></tr></thead>
           <tbody id="blockedIPs"></tbody>
+        </table>
+      </div>
+    </dialog>
+    <dialog id="serverBackupsDialog" class="admin-dialog" aria-labelledby="serverBackupsTitle">
+      <div class="admin-dialog-heading">
+        <h2 id="serverBackupsTitle">Server backups</h2>
+        <button id="closeServerBackups" class="button button-outline" type="button">Close</button>
+      </div>
+      <div id="serverBackupsError" class="notice" role="alert"></div>
+      <p id="serverBackupsEmpty" class="muted" hidden>No server backups found.</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Name</th><th>Created at (UTC)</th><th>Operators</th><th>Secrets</th><th>API tokens</th></tr></thead>
+          <tbody id="serverBackups"></tbody>
         </table>
       </div>
     </dialog>
@@ -238,6 +255,40 @@ document.getElementById('viewBlockedIPs').addEventListener('click', async () => 
 });
 document.getElementById('closeBlockedIPs').addEventListener('click', () => {
   document.getElementById('blockedIPsDialog').close();
+});
+async function refreshServerBackups() {
+  const body = document.getElementById('serverBackups');
+  const empty = document.getElementById('serverBackupsEmpty');
+  body.replaceChildren();
+  const result = await api('/v1/settings/server-backups');
+  for (const backup of result.backups) {
+    const row = body.insertRow();
+    for (const value of [
+      backup.name,
+      new Date(backup.created_at).toLocaleString(undefined, {timeZone:'UTC'}),
+      backup.operators,
+      backup.secrets,
+      backup.api_tokens
+    ]) {
+      const cell = row.insertCell();
+      cell.textContent = value === null ? 'N/A' : String(value);
+    }
+  }
+  empty.hidden = result.backups.length !== 0;
+}
+document.getElementById('viewServerBackups').addEventListener('click', async () => {
+  const dialog = document.getElementById('serverBackupsDialog');
+  const dialogError = document.getElementById('serverBackupsError');
+  dialogError.textContent = '';
+  dialog.showModal();
+  try {
+    await refreshServerBackups();
+  } catch (error) {
+    dialogError.textContent = error.message;
+  }
+});
+document.getElementById('closeServerBackups').addEventListener('click', () => {
+  document.getElementById('serverBackupsDialog').close();
 });
 loadSettings();
 </script>

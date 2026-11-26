@@ -205,6 +205,7 @@ DELETE /v1/tokens/{id}
 GET    /v1/settings
 PUT    /v1/settings
 GET    /v1/settings/blocked-login-ips
+GET    /v1/settings/server-backups
 DELETE /v1/settings/blocked-login-ips/{ip}
 GET    /v1/operators
 GET    /v1/operators/details
@@ -220,6 +221,11 @@ POST   /v1/account/totp/recovery-codes
 DELETE /v1/account/totp
 POST   /v1/account/password
 ```
+
+Server backup archives include a `vault-server/metadata.json` entry with their
+creation time and operator, secret, and API token counts. The admin-only
+`GET /v1/settings/server-backups` endpoint lists these summaries; archives
+created before metadata was added are listed with counts shown as unavailable.
 
 Create a token:
 

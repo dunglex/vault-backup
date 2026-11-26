@@ -5,11 +5,13 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -36,6 +38,123 @@ type serverBackupConfig struct {
 	masterKey      []byte
 	secretsKey     []byte
 	allowPlaintext bool
+}
+
+type serverBackupMetadata struct {
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"created_at"`
+	Operators int       `json:"operators"`
+	Secrets   int       `json:"secrets"`
+	APITokens int       `json:"api_tokens"`
+}
+
+type serverBackupSummary struct {
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"created_at"`
+	Operators *int      `json:"operators"`
+	Secrets   *int      `json:"secrets"`
+	APITokens *int      `json:"api_tokens"`
+}
+
+func (s *server) listServerBackups(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	entries, err := os.ReadDir(s.backupConfig.backupDir)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not list server backups"})
+		return
+	}
+	backups := make([]serverBackupSummary, 0)
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), "vault-server-backup-") || !strings.HasSuffix(entry.Name(), ".tar.gz") {
+			continue
+		}
+		path := filepath.Join(s.backupConfig.backupDir, entry.Name())
+		info, err := os.Lstat(path)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not inspect server backups"})
+			return
+		}
+		if !info.Mode().IsRegular() {
+			continue
+		}
+		summary, err := readServerBackupSummary(path, entry.Name(), info.ModTime())
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read server backup metadata"})
+			return
+		}
+		backups = append(backups, summary)
+	}
+	sort.Slice(backups, func(i, j int) bool {
+		return backups[i].CreatedAt.After(backups[j].CreatedAt)
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"backups": backups})
+}
+
+func readServerBackupSummary(path, name string, modifiedAt time.Time) (serverBackupSummary, error) {
+	summary := serverBackupSummary{Name: name, CreatedAt: modifiedAt.UTC()}
+	file, err := os.Open(path)
+	if err != nil {
+		return serverBackupSummary{}, fmt.Errorf("open server backup: %w", err)
+	}
+	defer file.Close()
+	gz, err := gzip.NewReader(file)
+	if err != nil {
+		return serverBackupSummary{}, fmt.Errorf("open compressed server backup: %w", err)
+	}
+	defer gz.Close()
+	reader := tar.NewReader(gz)
+	for {
+		header, err := reader.Next()
+		if err == io.EOF {
+			return summary, nil
+		}
+		if err != nil {
+			return serverBackupSummary{}, fmt.Errorf("read server backup entry: %w", err)
+		}
+		if header.Name == "vault-server/metadata.json" && header.Typeflag == tar.TypeReg {
+			const maxMetadataSize = 64 * 1024
+			if header.Size < 0 || header.Size > maxMetadataSize {
+				return serverBackupSummary{}, fmt.Errorf("server backup metadata is too large")
+			}
+			data, err := io.ReadAll(io.LimitReader(reader, maxMetadataSize+1))
+			if err != nil {
+				return serverBackupSummary{}, fmt.Errorf("read server backup metadata: %w", err)
+			}
+			var metadata serverBackupMetadata
+			if err := json.Unmarshal(data, &metadata); err != nil {
+				return serverBackupSummary{}, fmt.Errorf("decode server backup metadata: %w", err)
+			}
+			if metadata.Operators < 0 || metadata.Secrets < 0 || metadata.APITokens < 0 || metadata.CreatedAt.IsZero() {
+				return serverBackupSummary{}, fmt.Errorf("server backup metadata contains invalid values")
+			}
+			summary.CreatedAt = metadata.CreatedAt.UTC()
+			summary.Operators = &metadata.Operators
+			summary.Secrets = &metadata.Secrets
+			summary.APITokens = &metadata.APITokens
+			return summary, nil
+		}
+		if strings.HasPrefix(header.Name, "vault-server/data/") && header.Typeflag == tar.TypeReg {
+			return summary, nil
+		}
+	}
+}
+
+func (s *server) serverBackupMetadata(createdAt time.Time) (serverBackupMetadata, error) {
+	metadata := serverBackupMetadata{
+		CreatedAt: createdAt.UTC(),
+	}
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM accounts WHERE role = 'operator'").Scan(&metadata.Operators); err != nil {
+		return serverBackupMetadata{}, fmt.Errorf("count server backup operators: %w", err)
+	}
+	if err := s.secretsDB.QueryRow("SELECT COUNT(*) FROM secrets").Scan(&metadata.Secrets); err != nil {
+		return serverBackupMetadata{}, fmt.Errorf("count server backup secrets: %w", err)
+	}
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM api_tokens").Scan(&metadata.APITokens); err != nil {
+		return serverBackupMetadata{}, fmt.Errorf("count server backup API tokens: %w", err)
+	}
+	return metadata, nil
 }
 
 func readServerBackupSettings(db *sql.DB) (bool, string, string, error) {
@@ -237,6 +356,14 @@ func (s *server) performScheduledBackup() {
 		}
 	}()
 
+	createdAt := time.Now().UTC()
+	metadata, err := s.serverBackupMetadata(createdAt)
+	if err != nil {
+		log.Printf("ERROR: could not collect server backup metadata: %v", err)
+		s.recordServerBackupAudit("failure", "metadata_collection_failed")
+		reopened = true
+		return
+	}
 	if err := s.closeDatabaseFiles(); err != nil {
 		log.Printf("ERROR: could not close database files for server backup: %v", err)
 		if reopenErr := s.reopenDatabaseFiles(); reopenErr != nil {
@@ -249,7 +376,7 @@ func (s *server) performScheduledBackup() {
 		return
 	}
 
-	archivePath, backupErr := createServerDataBackup(s.backupConfig.dataDir, s.backupConfig.backupDir, time.Now().UTC())
+	archivePath, backupErr := createServerDataBackupWithMetadata(s.backupConfig.dataDir, s.backupConfig.backupDir, metadata)
 	reopenErr := s.reopenDatabaseFiles()
 	if reopenErr != nil {
 		log.Printf("CRITICAL: could not reopen database files after server backup: %v", reopenErr)
@@ -350,6 +477,10 @@ func (s *server) recordServerBackupAudit(outcome, detail string) {
 }
 
 func createServerDataBackup(dataDir, backupDir string, now time.Time) (string, error) {
+	return createServerDataBackupWithMetadata(dataDir, backupDir, serverBackupMetadata{CreatedAt: now.UTC()})
+}
+
+func createServerDataBackupWithMetadata(dataDir, backupDir string, metadata serverBackupMetadata) (string, error) {
 	source, err := filepath.EvalSymlinks(dataDir)
 	if err != nil {
 		return "", fmt.Errorf("resolve server data directory: %w", err)
@@ -424,14 +555,16 @@ func createServerDataBackup(dataDir, backupDir string, now time.Time) (string, e
 		return "", fmt.Errorf("server data directory contains no files")
 	}
 	sort.Strings(files)
-	archivePath := filepath.Join(backupDir, "vault-server-backup-"+now.UTC().Format("20060102-150405.000000000")+".tar.gz")
-	if err := writeServerDataArchive(source, archivePath, files, now.UTC()); err != nil {
+	archivePath := filepath.Join(backupDir, "vault-server-backup-"+metadata.CreatedAt.UTC().Format("20060102-150405.000000000")+".tar.gz")
+	metadata.Name = filepath.Base(archivePath)
+	metadata.CreatedAt = metadata.CreatedAt.UTC()
+	if err := writeServerDataArchive(source, archivePath, files, metadata); err != nil {
 		return "", err
 	}
 	return archivePath, nil
 }
 
-func writeServerDataArchive(source, archivePath string, files []string, createdAt time.Time) (resultErr error) {
+func writeServerDataArchive(source, archivePath string, files []string, metadata serverBackupMetadata) (resultErr error) {
 	temp, err := os.CreateTemp(filepath.Dir(archivePath), ".vault-server-backup-*.tmp")
 	if err != nil {
 		return fmt.Errorf("create temporary server backup: %w", err)
@@ -455,7 +588,22 @@ func writeServerDataArchive(source, archivePath string, files []string, createdA
 	if err := tw.WriteHeader(&tar.Header{Name: "vault-server/data/", Typeflag: tar.TypeDir, Mode: 0700}); err != nil {
 		return fmt.Errorf("write archive data directory: %w", err)
 	}
-	checksums := make(map[string]string, len(files))
+	metadataBytes, err := json.MarshalIndent(metadata, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode server backup metadata: %w", err)
+	}
+	metadataBytes = append(metadataBytes, '\n')
+	if err := tw.WriteHeader(&tar.Header{
+		Name: "vault-server/metadata.json", Mode: 0600, Size: int64(len(metadataBytes)),
+	}); err != nil {
+		return fmt.Errorf("write server backup metadata header: %w", err)
+	}
+	if _, err := tw.Write(metadataBytes); err != nil {
+		return fmt.Errorf("write server backup metadata: %w", err)
+	}
+	checksums := map[string]string{
+		"metadata.json": fmt.Sprintf("%x", sha256.Sum256(metadataBytes)),
+	}
 	directories := make(map[string]struct{})
 	for _, path := range files {
 		relative, err := filepath.Rel(source, path)
@@ -490,7 +638,7 @@ func writeServerDataArchive(source, archivePath string, files []string, createdA
 			return err
 		}
 	}
-	if err := writeServerBackupManifest(tw, checksums, createdAt); err != nil {
+	if err := writeServerBackupManifest(tw, checksums, metadata.CreatedAt); err != nil {
 		return err
 	}
 	if err := tw.Close(); err != nil {

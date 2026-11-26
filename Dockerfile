@@ -24,9 +24,6 @@ COPY --from=builder --chown=vault:vault /app/bin/vault-backup /usr/local/bin/vau
 COPY --from=builder --chown=vault:vault /app/bin/vault-server /usr/local/bin/vault-server
 COPY --from=builder --chown=vault:vault /app/bin/mkcert /usr/local/bin/mkcert
 
-# Copy scripts
-COPY --from=builder --chown=vault:vault /app/scripts /app/scripts
-
 # Create a directory for Vault server data and set ownership
 RUN mkdir -p /data /backups && chown -R vault:vault /data /backups
 VOLUME ["/data", "/backups"]
