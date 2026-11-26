@@ -11,21 +11,24 @@ import (
 	"math/big"
 	"net/http"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/bcrypt"
 )
 
 type operatorRequest struct {
-	Username             string `json:"username"`
-	Password             string `json:"password"`
-	PasswordConfirmation string `json:"password_confirmation"`
+	Username             string   `json:"username"`
+	Password             string   `json:"password"`
+	PasswordConfirmation string   `json:"password_confirmation"`
+	Prefixes             []string `json:"prefixes"`
 }
 
 type operatorSummary struct {
-	Username      string `json:"username"`
-	Locked        bool   `json:"locked"`
-	MFAEnabled    bool   `json:"mfa_enabled"`
-	MFAConfigured bool   `json:"mfa_configured"`
+	Username      string   `json:"username"`
+	Locked        bool     `json:"locked"`
+	MFAEnabled    bool     `json:"mfa_enabled"`
+	MFAConfigured bool     `json:"mfa_configured"`
+	Prefixes      []string `json:"prefixes"`
 }
 
 func (s *server) listOperators(w http.ResponseWriter, r *http.Request) {
@@ -60,7 +63,7 @@ func (s *server) listOperatorDetails(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := s.db.Query(`
-		SELECT username, locked, totp_enabled, (totp_secret IS NOT NULL AND totp_secret != '')
+		SELECT username, locked, totp_enabled, (totp_secret IS NOT NULL AND totp_secret != ''), secret_prefixes
 		FROM accounts WHERE role = 'operator' ORDER BY username`)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read operators"})
@@ -72,8 +75,14 @@ func (s *server) listOperatorDetails(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var operator operatorSummary
 		var locked, mfaEnabled, mfaPending int
-		if err := rows.Scan(&operator.Username, &locked, &mfaEnabled, &mfaPending); err != nil {
+		var encodedPrefixes string
+		if err := rows.Scan(&operator.Username, &locked, &mfaEnabled, &mfaPending, &encodedPrefixes); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read operators"})
+			return
+		}
+		operator.Prefixes, err = decodeSecretPrefixes(encodedPrefixes)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read operator secret access"})
 			return
 		}
 		operator.Locked = locked == 1
@@ -229,21 +238,38 @@ func (s *server) removeOperatorSessionsFromCache(username string) {
 }
 
 func (s *server) createOperator(w http.ResponseWriter, r *http.Request) {
+	actor := s.auditRequestActor(r, "web")
 	if !s.requireAdmin(w, r) {
+		s.recordAuditEvent(r, "create_operator", "failure", actor, "web", "operator", "unauthorized")
 		return
 	}
 	if r.TLS == nil {
+		s.recordAuditEvent(r, "create_operator", "failure", actor, "web", "operator", "https_required")
 		writeJSON(w, http.StatusUpgradeRequired, map[string]string{"error": "HTTPS is required to manage operator accounts"})
 		return
 	}
 	var request operatorRequest
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		s.recordAuditEvent(r, "create_operator", "failure", actor, "web", "operator", "invalid_request")
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
 		return
 	}
 	request.Username = strings.TrimSpace(request.Username)
 	if request.Username == "" || len(request.Username) > 128 {
+		s.recordAuditEvent(r, "create_operator", "failure", actor, "web", "operator", "invalid_username")
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "username is required and must be at most 128 characters"})
+		return
+	}
+	prefixes, err := normalizeSecretPrefixes(request.Prefixes)
+	if err != nil {
+		s.recordAuditEvent(r, "create_operator", "failure", actor, "web", "operator:"+request.Username, "invalid_secret_prefixes")
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	encodedPrefixes, err := encodeSecretPrefixes(prefixes)
+	if err != nil {
+		s.recordAuditEvent(r, "create_operator", "failure", actor, "web", "operator:"+request.Username, "encoding_error")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not create operator"})
 		return
 	}
 	generatedPassword := request.Password == "" && request.PasswordConfirmation == ""
@@ -274,9 +300,10 @@ func (s *server) createOperator(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := s.db.Exec(
-		"INSERT INTO accounts(username, password_hash, role, must_change_password) VALUES (?, ?, 'operator', 1) ON CONFLICT(username) DO NOTHING",
+		"INSERT INTO accounts(username, password_hash, role, secret_prefixes, must_change_password) VALUES (?, ?, 'operator', ?, 1) ON CONFLICT(username) DO NOTHING",
 		request.Username,
 		string(passwordHash),
+		encodedPrefixes,
 	)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not create operator"})
@@ -291,7 +318,7 @@ func (s *server) createOperator(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "an account with that username already exists"})
 		return
 	}
-	s.recordAuditEvent(r, "create_operator", "success", s.auditRequestActor(r, "web"), "web", "operator:"+request.Username, "")
+	s.recordAuditEvent(r, "create_operator", "success", actor, "web", "operator:"+request.Username, "")
 	response := map[string]any{
 		"username":             request.Username,
 		"role":                 "operator",
@@ -459,6 +486,21 @@ func (s *server) deleteOperator(w http.ResponseWriter, r *http.Request) {
 	if _, err := tx.Exec("DELETE FROM web_sessions WHERE username = ?", request.Username); err != nil {
 		log.Printf("ERROR: could not revoke deleted operator sessions: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not revoke operator sessions"})
+		return
+	}
+	now := time.Now().Unix()
+	if _, err := tx.Exec(
+		"UPDATE managed_client_certificates SET revoked_at = ? WHERE token_id IN (SELECT id FROM api_tokens WHERE created_by = ?) AND revoked_at IS NULL",
+		now, request.Username,
+	); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not revoke operator API credentials"})
+		return
+	}
+	if _, err := tx.Exec(
+		"UPDATE api_tokens SET revoked_at = ? WHERE created_by = ? AND revoked_at IS NULL",
+		now, request.Username,
+	); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not revoke operator API credentials"})
 		return
 	}
 	if err := tx.Commit(); err != nil {

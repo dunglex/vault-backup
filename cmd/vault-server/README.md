@@ -36,8 +36,19 @@ unlock, reset two-factor authentication for, and remove Operator accounts from
 web sessions. Resetting two-factor authentication clears their TOTP setup and
 recovery codes and revokes active sessions; when MFA enforcement is enabled,
 the Operator must enroll again before continuing. Operators can manage secrets,
-API tokens, and audit events, but cannot access `/security.html`,
+API tokens, and audit events within their assigned secret path prefixes, but
+cannot access `/security.html`,
 `/v1/settings`, `/operators.html`, or operator-management endpoints.
+Admin accounts retain unrestricted web access. Admins assign one or more
+prefixes when creating an Operator and can change them later from
+`/operators.html`. Existing Operators are migrated without prefixes and need an
+Admin to assign them before they can access secrets. Each account or token can
+have up to 100 prefixes. A prefix grants access to
+the exact path and its descendants at segment boundaries; for example, `team-a`
+covers `team-a/database`, but not `team-archive`. Prefixes use the same path
+validation as secrets; for KV API secrets, use the full path including the mount
+segment (for example, `kv/team-a`). Operators with no configured prefixes cannot
+access secrets.
 Creating an Operator generates a random 12-20 character temporary password
 shown only once in the admin dialog. Copy or record it before closing the
 dialog, then provide it to the Operator through a secure channel. The Operator
@@ -176,8 +187,16 @@ The restore refuses to overwrite a non-empty destination unless `--replace` is s
 
 ## Managed API tokens
 
-After logging in through the web UI at `/tokens.html`, an admin can create
-tokens in the add-token dialog, list, and revoke API tokens. Tokens:
+After logging in through the web UI at `/tokens.html`, an admin or operator can
+create tokens in the add-token dialog, list, and revoke API tokens. Each token
+requires one or more secret path prefixes and can read, write, delete, and list
+only within those prefixes. Prefixes use the secret path format described above.
+Operators may create tokens only for paths within their own assigned prefixes;
+their tokens remain bounded by the Operator's current prefixes. Admins can
+change token prefixes from `/tokens.html`; Operators can only assign prefixes
+within their own access. Tokens with no configured prefixes, including existing
+tokens after upgrade, cannot access secrets until an Admin assigns prefixes.
+Tokens:
 
 - Must have a unique name
 - Default to a 30-day lifetime; choose between 1 and 365 days when creating one
@@ -195,12 +214,14 @@ enforcement is enabled; replacement immediately revokes the previous
 certificate and does not extend the token's expiry. Protect downloaded files as
 secrets.
 
-Management endpoints use a web session. Security settings and
-operator-management endpoints require the Admin role:
+Management endpoints use a web session. Operators can manage API tokens, but
+their token prefixes cannot exceed their own assigned prefixes. Security
+settings and operator-management endpoints require the Admin role:
 
 ```bash
 POST   /v1/tokens
 GET    /v1/tokens
+PUT    /v1/tokens/{id}/prefixes
 POST   /v1/tokens/{id}/certificate
 DELETE /v1/tokens/{id}
 GET    /v1/settings
@@ -211,6 +232,7 @@ DELETE /v1/settings/blocked-login-ips/{ip}
 GET    /v1/operators
 GET    /v1/operators/details
 POST   /v1/operators
+PUT    /v1/operators/prefixes
 DELETE /v1/operators
 POST   /v1/operators/password
 PATCH  /v1/operators/lock

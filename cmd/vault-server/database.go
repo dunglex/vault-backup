@@ -101,6 +101,7 @@ func initializeDatabase(db *sql.DB) error {
 			username TEXT PRIMARY KEY,
 			password_hash TEXT NOT NULL,
 			role TEXT NOT NULL DEFAULT 'admin' CHECK (role IN ('admin', 'operator')),
+			secret_prefixes TEXT NOT NULL DEFAULT '[]',
 			locked INTEGER NOT NULL DEFAULT 0 CHECK (locked IN (0, 1)),
 			must_change_password INTEGER NOT NULL DEFAULT 0 CHECK (must_change_password IN (0, 1)),
 			totp_secret TEXT,
@@ -124,7 +125,9 @@ func initializeDatabase(db *sql.DB) error {
 			token_hash TEXT NOT NULL UNIQUE,
 			created_at INTEGER NOT NULL,
 			expires_at INTEGER NOT NULL,
-			revoked_at INTEGER
+			revoked_at INTEGER,
+			secret_prefixes TEXT NOT NULL DEFAULT '[]',
+			created_by TEXT
 		);
 		CREATE TABLE IF NOT EXISTS server_settings (
 			key TEXT PRIMARY KEY,
@@ -172,6 +175,9 @@ func initializeDatabase(db *sql.DB) error {
 	if err := allowDuplicateAPITokenNames(db); err != nil {
 		return err
 	}
+	if err := ensureSecretPrefixColumns(db); err != nil {
+		return err
+	}
 	if _, err := db.Exec("DELETE FROM web_sessions WHERE expires_at <= ?", time.Now().Unix()); err != nil {
 		return fmt.Errorf("remove expired web sessions: %w", err)
 	}
@@ -198,6 +204,53 @@ func newDatabaseAEAD(masterKey []byte) (cipher.AEAD, error) {
 		return nil, err
 	}
 	return cipher.NewGCM(block)
+}
+
+func ensureSecretPrefixColumns(db *sql.DB) error {
+	accountColumns, err := accountColumns(db)
+	if err != nil {
+		return err
+	}
+	if !accountColumns["secret_prefixes"] {
+		if _, err := db.Exec("ALTER TABLE accounts ADD COLUMN secret_prefixes TEXT NOT NULL DEFAULT '[]'"); err != nil {
+			return err
+		}
+	}
+
+	tokenColumns, err := tableColumns(db, "api_tokens")
+	if err != nil {
+		return err
+	}
+	if !tokenColumns["secret_prefixes"] {
+		if _, err := db.Exec("ALTER TABLE api_tokens ADD COLUMN secret_prefixes TEXT NOT NULL DEFAULT '[]'"); err != nil {
+			return err
+		}
+	}
+	if !tokenColumns["created_by"] {
+		if _, err := db.Exec("ALTER TABLE api_tokens ADD COLUMN created_by TEXT"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func tableColumns(db *sql.DB, table string) (map[string]bool, error) {
+	rows, err := db.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	columns := make(map[string]bool)
+	for rows.Next() {
+		var sequence, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue sql.NullString
+		if err := rows.Scan(&sequence, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return nil, err
+		}
+		columns[name] = true
+	}
+	return columns, rows.Err()
 }
 
 func ensureAccountRoleColumn(db *sql.DB) error {

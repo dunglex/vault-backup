@@ -121,7 +121,17 @@ class ServerTest:
         self.temp.cleanup()
 
     def build(self, backup: bool = False) -> None:
-        run("go", "build", "-o", self.server_binary, "./cmd/vault-server")
+        server_env = os.environ | {"CGO_ENABLED": "1"}
+        run(
+            "go",
+            "build",
+            "-tags",
+            "fts5 json1 secure_delete",
+            "-o",
+            self.server_binary,
+            "./cmd/vault-server",
+            env=server_env,
+        )
         if backup:
             run("go", "build", "-o", self.backup_binary, "./cmd/vault-backup")
 
@@ -231,7 +241,10 @@ class ServerTest:
     def create_api_token(
         self, name: str = "test-token", expires_in_days: int | None = None
     ) -> tuple[str, int, dict]:
-        data: dict[str, str | int] = {"name": name}
+        data: dict[str, str | int | list[str]] = {
+            "name": name,
+            "prefixes": ["kv/app", "kv/token", "kv/session"],
+        }
         if expires_in_days is not None:
             data["expires_in_days"] = expires_in_days
         status, body = self.client.json(

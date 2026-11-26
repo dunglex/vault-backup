@@ -48,6 +48,9 @@
         <option value="180">180 days</option>
         <option value="365">365 days</option>
       </select>
+      <label for="tokenPrefixes">Allowed secret path prefixes (up to 100, one per line)</label>
+      <textarea id="tokenPrefixes" name="prefixes" rows="4" required placeholder="team-a&#10;shared/build"></textarea>
+      <p class="muted">Each prefix grants access to that exact secret path and its descendants.</p>
       {{if .EnforceMTLS}}<p class="muted">The client certificate expires at the same time as the token.</p>{{end}}
     </div>
     <p id="dialogError" class="notice" role="alert"></p>
@@ -73,12 +76,28 @@
     </div>
   </form>
 </dialog>
+<dialog id="editTokenPrefixesDialog" class="admin-dialog" aria-labelledby="editTokenPrefixesTitle">
+  <form id="editTokenPrefixesForm">
+    <div class="admin-dialog-heading">
+      <h2 id="editTokenPrefixesTitle">Edit token access</h2>
+      <button id="closeEditTokenPrefixes" class="button button-outline" type="button">Close</button>
+    </div>
+    <div id="editTokenPrefixesError" class="notice" role="alert"></div>
+    <label for="editTokenPrefixes">Allowed secret path prefixes (up to 100, one per line)</label>
+    <textarea id="editTokenPrefixes" rows="5" required></textarea>
+    <div class="row-actions admin-dialog-actions">
+      <button type="submit">Save access</button>
+    </div>
+  </form>
+</dialog>
 <script>
 const enforceMTLS = {{if .EnforceMTLS}}true{{else}}false{{end}};
 const errorBox = document.getElementById('error');
 const createDialog = document.getElementById('createTokenDialog');
+const editPrefixesDialog = document.getElementById('editTokenPrefixesDialog');
 let apiTokens = [];
 let newCredentials = null;
+let editingTokenId = 0;
 
 function showError(message) { errorBox.textContent = message || ''; }
 function sampleCommand() {
@@ -185,11 +204,24 @@ function renderTokens() {
       ? 'client cert expires ' + token.certificate_expires_at
       : 'no client certificate';
     details.textContent = token.name + ' (' + state + ', token expires ' + token.expires_at
-      + (certificate ? '; ' + certificate : '') + ')';
+      + (certificate ? '; ' + certificate : '') + '; allowed paths: '
+      + (token.prefixes.length ? token.prefixes.join(', ') : 'none') + ')';
     li.appendChild(details);
+    const actions = document.createElement('div');
+    actions.className = 'row-actions token-actions';
+    const editPrefixes = document.createElement('button');
+    editPrefixes.className = 'button button-outline';
+    editPrefixes.textContent = 'Edit paths';
+    editPrefixes.type = 'button';
+    editPrefixes.onclick = () => {
+      editingTokenId = token.id;
+      document.getElementById('editTokenPrefixesTitle').textContent = `Edit paths for ${token.name}`;
+      document.getElementById('editTokenPrefixesError').textContent = '';
+      document.getElementById('editTokenPrefixes').value = token.prefixes.join('\n');
+      editPrefixesDialog.showModal();
+    };
+    actions.appendChild(editPrefixes);
     if (!token.revoked && !token.expired) {
-      const actions = document.createElement('div');
-      actions.className = 'row-actions token-actions';
       if (enforceMTLS) {
         const certificateButton = document.createElement('button');
         certificateButton.className = 'button button-outline';
@@ -226,8 +258,8 @@ function renderTokens() {
         } catch (error) { showError(error.message); }
       };
       actions.appendChild(button);
-      li.appendChild(actions);
     }
+    li.appendChild(actions);
     list.appendChild(li);
   });
 }
@@ -266,6 +298,7 @@ document.getElementById('finishCreateToken').addEventListener('click', closeWith
 createDialog.addEventListener('close', () => {
   document.getElementById('tokenName').value = '';
   document.getElementById('tokenLifetimeDays').value = '30';
+  document.getElementById('tokenPrefixes').value = '';
   document.getElementById('credentialNotice').textContent = '';
   document.getElementById('credentialNotice').hidden = true;
   document.getElementById('dialogError').textContent = '';
@@ -310,7 +343,8 @@ document.getElementById('createTokenForm').addEventListener('submit', async even
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({
         name,
-        expires_in_days:Number(document.getElementById('tokenLifetimeDays').value)
+        expires_in_days:Number(document.getElementById('tokenLifetimeDays').value),
+        prefixes:document.getElementById('tokenPrefixes').value.split('\n').map(prefix => prefix.trim()).filter(Boolean)
       })
     });
     document.getElementById('createTokenTitle').textContent = 'Token created';
@@ -333,6 +367,25 @@ document.getElementById('createTokenForm').addEventListener('submit', async even
 
 
 refreshTokens();
+document.getElementById('closeEditTokenPrefixes').addEventListener('click', () => editPrefixesDialog.close());
+document.getElementById('editTokenPrefixesForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  const error = document.getElementById('editTokenPrefixesError');
+  error.textContent = '';
+  try {
+    await api('/v1/tokens/' + editingTokenId + '/prefixes', {
+      method:'PUT',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        prefixes:document.getElementById('editTokenPrefixes').value.split('\n').map(prefix => prefix.trim()).filter(Boolean)
+      })
+    });
+    editPrefixesDialog.close();
+    await refreshTokens();
+  } catch (failure) {
+    error.textContent = failure.message;
+  }
+});
 </script>
 </body>
 </html>

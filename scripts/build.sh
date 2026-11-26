@@ -9,4 +9,4 @@ cd "$ROOT_DIR"
 mkdir -p bin
 go build --ldflags="-s -w" -o bin/mkcert ./cmd/mkcert
 go build --ldflags="-s -w" -o bin/vault-backup ./cmd/vault-backup
-CGO_ENABLED=1 go build --ldflags="-s -w" -o bin/vault-server ./cmd/vault-server
+CGO_ENABLED=1 go build -tags "fts5 json1 secure_delete" --ldflags="-s -w" -o bin/vault-server ./cmd/vault-server

@@ -80,7 +80,7 @@ func TestOperatorCreationGeneratesOneTimeTemporaryPassword(t *testing.T) {
 	s.createOperator(response, operatorRequestWithSession(
 		http.MethodPost,
 		"/v1/operators",
-		`{"username":"generated-operator"}`,
+		`{"username":"generated-operator","prefixes":["team-a"]}`,
 		"admin-session",
 		true,
 	))
@@ -231,7 +231,7 @@ func TestOperatorManagementIsAdminOnlyAndRevokesDeletedSessions(t *testing.T) {
 	s.createOperator(created, operatorRequestWithSession(
 		http.MethodPost,
 		"/v1/operators",
-		`{"username":"night-shift","password":"correct horse battery","password_confirmation":"correct horse battery"}`,
+		`{"username":"night-shift","password":"correct horse battery","password_confirmation":"correct horse battery","prefixes":["team-a"]}`,
 		"admin-session",
 		true,
 	))
@@ -373,7 +373,7 @@ func TestAdminCanLockUnlockOperatorAndLockedLoginIsRejected(t *testing.T) {
 	s.createOperator(created, operatorRequestWithSession(
 		http.MethodPost,
 		"/v1/operators",
-		`{"username":"night-shift","password":"operator-test-password","password_confirmation":"operator-test-password"}`,
+		`{"username":"night-shift","password":"operator-test-password","password_confirmation":"operator-test-password","prefixes":["team-a"]}`,
 		"admin-session",
 		true,
 	))
@@ -449,7 +449,7 @@ func TestAdminCanRemoveOperatorTOTPAndRevokeSessions(t *testing.T) {
 	s.createOperator(created, operatorRequestWithSession(
 		http.MethodPost,
 		"/v1/operators",
-		`{"username":"night-shift","password":"operator-test-password","password_confirmation":"operator-test-password"}`,
+		`{"username":"night-shift","password":"operator-test-password","password_confirmation":"operator-test-password","prefixes":["team-a"]}`,
 		"admin-session",
 		true,
 	))
@@ -500,7 +500,7 @@ func TestAdminCanRemoveOperatorTOTPAndRevokeSessions(t *testing.T) {
 
 func TestOperatorCreationRequiresHTTPSAndRejectsDuplicateNames(t *testing.T) {
 	s := newOperatorTestServer(t)
-	body := `{"username":"operator-one","password":"correct horse battery","password_confirmation":"correct horse battery"}`
+	body := `{"username":"operator-one","password":"correct horse battery","password_confirmation":"correct horse battery","prefixes":["team-a"]}`
 
 	insecure := httptest.NewRecorder()
 	s.createOperator(insecure, operatorRequestWithSession(http.MethodPost, "/v1/operators", body, "admin-session", false))
@@ -526,7 +526,7 @@ func TestOperatorCreateRejectsPasswordMismatch(t *testing.T) {
 	request := operatorRequestWithSession(
 		http.MethodPost,
 		"/v1/operators",
-		`{"username":"operator-one","password":"correct horse battery","password_confirmation":"different password"}`,
+		`{"username":"operator-one","password":"correct horse battery","password_confirmation":"different password","prefixes":["team-a"]}`,
 		"admin-session",
 		true,
 	)

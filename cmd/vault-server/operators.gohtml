@@ -27,7 +27,7 @@
       <h2 class="section-label">Operator accounts</h2>
       <button id="openCreateOperator" type="button">Add operator</button>
     </div>
-    <p>Operators can manage secrets, API tokens, and audit events. Locking an operator revokes their sessions. If MFA is enforced, operators must re-enroll after 2FA is removed.</p>
+    <p>Operators can manage secrets, API tokens, and audit events within their allowed secret path prefixes. Each prefix includes that path and its descendants. Locking an operator revokes their sessions. If MFA is enforced, operators must re-enroll after 2FA is removed.</p>
     <h3 class="section-label">Current operators</h3>
     <ul id="operators" class="operator-list" aria-live="polite"></ul>
   </section>
@@ -40,6 +40,8 @@
       <div id="operatorDialogError" class="notice" role="alert"></div>
       <label for="operatorUsername">Username</label>
       <input id="operatorUsername" name="username" maxlength="128" required>
+      <label for="operatorPrefixes">Allowed secret path prefixes (up to 100, one per line)</label>
+      <textarea id="operatorPrefixes" name="prefixes" rows="4" required placeholder="team-a&#10;shared/build"></textarea>
       <div class="row-actions admin-dialog-actions">
         <button id="createOperator" type="submit">Create operator</button>
       </div>
@@ -54,6 +56,20 @@
         <p id="operatorPasswordCopyStatus" role="status" class="muted">Copy the password or select it to copy manually.</p>
         <label><input id="acknowledgeOperatorPassword" type="checkbox"> I have copied or recorded this password.</label>
       </section>
+    </form>
+  </dialog>
+  <dialog id="operatorPrefixesDialog" class="admin-dialog" aria-labelledby="operatorPrefixesTitle">
+    <form id="operatorPrefixesForm">
+      <div class="admin-dialog-heading">
+        <h2 id="operatorPrefixesTitle">Edit operator access</h2>
+        <button id="closeOperatorPrefixes" class="button button-outline" type="button">Close</button>
+      </div>
+      <div id="operatorPrefixesError" class="notice" role="alert"></div>
+      <label for="editOperatorPrefixes">Allowed secret path prefixes (up to 100, one per line)</label>
+      <textarea id="editOperatorPrefixes" rows="5" required></textarea>
+      <div class="row-actions admin-dialog-actions">
+        <button type="submit">Save access</button>
+      </div>
     </form>
   </dialog>
   <dialog id="resetOperatorPasswordDialog" class="admin-dialog" aria-labelledby="resetOperatorPasswordTitle">
@@ -75,8 +91,10 @@
 const errorBox = document.getElementById('error');
 const createDialog = document.getElementById('createOperatorDialog');
 const resetPasswordDialog = document.getElementById('resetOperatorPasswordDialog');
+const prefixesDialog = document.getElementById('operatorPrefixesDialog');
 let passwordAcknowledgementRequired = false;
 let resetPasswordAcknowledgementRequired = false;
+let editingOperator = '';
 async function api(url, options = {}) {
   options.credentials = 'same-origin';
   const response = await fetch(url, options);
@@ -112,7 +130,10 @@ function renderOperators(operators) {
     mfaStatus.className = 'operator-badge operator-badge-muted';
     mfaStatus.textContent = operator.mfa_enabled ? '2FA enabled' :
       operator.mfa_configured ? '2FA setup pending' : '2FA disabled';
-    identity.append(label, status, mfaStatus);
+    const prefixes = document.createElement('span');
+    prefixes.className = 'operator-badge operator-badge-muted';
+    prefixes.textContent = operator.prefixes.length ? 'Paths: ' + operator.prefixes.join(', ') : 'No secret path access';
+    identity.append(label, status, mfaStatus, prefixes);
     const actions = document.createElement('div');
     actions.className = 'operator-actions';
     const lock = document.createElement('button');
@@ -131,7 +152,18 @@ function renderOperators(operators) {
     resetPassword.className = 'button button-outline';
     resetPassword.textContent = 'Reset password';
     resetPassword.addEventListener('click', () => resetOperatorPassword(operator, resetPassword));
-    actions.append(lock, removeMFA, resetPassword);
+    const editPrefixes = document.createElement('button');
+    editPrefixes.type = 'button';
+    editPrefixes.className = 'button button-outline';
+    editPrefixes.textContent = 'Edit paths';
+    editPrefixes.addEventListener('click', () => {
+      editingOperator = operator.username;
+      document.getElementById('operatorPrefixesTitle').textContent = `Edit paths for ${operator.username}`;
+      document.getElementById('operatorPrefixesError').textContent = '';
+      document.getElementById('editOperatorPrefixes').value = operator.prefixes.join('\n');
+      prefixesDialog.showModal();
+    });
+    actions.append(lock, removeMFA, resetPassword, editPrefixes);
     item.append(identity, actions);
     list.append(item);
   }
@@ -213,7 +245,8 @@ document.getElementById('operatorForm').addEventListener('submit', async event =
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({
-        username:document.getElementById('operatorUsername').value
+        username:document.getElementById('operatorUsername').value,
+        prefixes:document.getElementById('operatorPrefixes').value.split('\n').map(prefix => prefix.trim()).filter(Boolean)
       })
     });
     document.getElementById('operatorUsername').disabled = true;
@@ -306,6 +339,26 @@ resetPasswordDialog.addEventListener('close', () => {
   resetPasswordAcknowledgementRequired = false;
 });
 loadOperators();
+document.getElementById('closeOperatorPrefixes').addEventListener('click', () => prefixesDialog.close());
+document.getElementById('operatorPrefixesForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  const error = document.getElementById('operatorPrefixesError');
+  error.textContent = '';
+  try {
+    await api('/v1/operators/prefixes', {
+      method:'PUT',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        username:editingOperator,
+        prefixes:document.getElementById('editOperatorPrefixes').value.split('\n').map(prefix => prefix.trim()).filter(Boolean)
+      })
+    });
+    prefixesDialog.close();
+    await loadOperators();
+  } catch (failure) {
+    error.textContent = failure.message;
+  }
+});
 </script>
 </body>
 </html>

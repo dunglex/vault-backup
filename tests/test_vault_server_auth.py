@@ -134,9 +134,16 @@ def main() -> None:
         status, create_result = server.client.json(
             "POST",
             f"{server.https_url}/v1/operators",
-            data={"username": "night-shift"},
+            data={"username": "night-shift", "prefixes": ["team-a"]},
         )
         assert_status(201, status, "create operator as admin")
+        for secret_path in ("team-a/auth-test", "team-b/auth-test"):
+            status, _ = server.client.json(
+                "PUT",
+                f"{server.https_url}/v1/secrets/{secret_path}",
+                data={"data": {"marker": secret_path}},
+            )
+            assert_status(200, status, f"seed operator scope test secret {secret_path}")
         temporary_password = create_result.get("initial_password")
         require(
             isinstance(temporary_password, str) and 12 <= len(temporary_password) <= 20
@@ -184,6 +191,13 @@ def main() -> None:
         status, operator_session = operator_client.json("GET", f"{server.https_url}/v1/session")
         assert_status(200, status, "read operator session after password change")
         require(operator_session["must_change_password"] is False, "clear first-login password requirement")
+        status, visible_secrets = operator_client.json("GET", f"{server.https_url}/v1/secrets")
+        assert_status(200, status, "list secrets within operator prefixes")
+        require(visible_secrets == ["team-a/auth-test"], "filter operator secret listing by prefix")
+        status, _ = operator_client.request(
+            "GET", f"{server.https_url}/v1/secrets/team-b/auth-test"
+        )
+        assert_status(403, status, "deny operator access outside assigned prefixes")
         status, reset_result = server.client.json(
             "POST",
             f"{server.https_url}/v1/operators/password",
@@ -251,6 +265,7 @@ def main() -> None:
                 "locked": False,
                 "mfa_enabled": False,
                 "mfa_configured": False,
+                "prefixes": ["team-a"],
             }],
             "operator status",
         )
@@ -316,7 +331,7 @@ def main() -> None:
         status, _ = server.client.json(
             "POST",
             f"{server.http_url}/v1/tokens",
-            data={"name": "insecure-token"},
+            data={"name": "insecure-token", "prefixes": ["kv/app"]},
             headers=server.cookie_header(),
         )
         assert_status(426, status, "require HTTPS when issuing tokens and private keys")
@@ -324,13 +339,13 @@ def main() -> None:
         status, _ = server.client.json(
             "POST",
             f"{server.https_url}/v1/tokens",
-            data={"name": "invalid-expiry", "expires_in_days": 366},
+            data={"name": "invalid-expiry", "expires_in_days": 366, "prefixes": ["kv/app"]},
         )
         assert_status(400, status, "reject token lifetime above one year")
         status, _ = server.client.json(
             "POST",
             f"{server.https_url}/v1/tokens",
-            data={"name": "invalid-expiry", "expires_in_days": 0},
+            data={"name": "invalid-expiry", "expires_in_days": 0, "prefixes": ["kv/app"]},
         )
         assert_status(400, status, "reject non-positive token lifetime")
 
@@ -370,7 +385,7 @@ def main() -> None:
         status, duplicate_name = server.client.json(
             "POST",
             f"{server.https_url}/v1/tokens",
-            data={"name": "backup-agent"},
+            data={"name": "backup-agent", "prefixes": ["kv/token"]},
         )
         assert_status(409, status, "reject duplicate API token name")
         require("already exists" in duplicate_name["error"], "explain duplicate API token name")
@@ -401,6 +416,21 @@ def main() -> None:
         assert_status(200, status, "authenticate with managed API token")
         status, _ = server.client.request("GET", f"{server.https_url}/api/v1/kv/data/token/test", headers=api_headers)
         assert_status(200, status, "read secret with managed API token")
+        status, _ = server.client.json(
+            "PUT",
+            f"{server.https_url}/v1/secrets/kv/private/auth-test",
+            data={"data": {"marker": "outside-token-scope"}},
+        )
+        assert_status(200, status, "seed API token scope boundary test secret")
+        status, _ = server.client.request(
+            "GET", f"{server.https_url}/api/v1/kv/data/private/auth-test", headers=api_headers
+        )
+        assert_status(403, status, "deny API token access outside assigned prefixes")
+        status, api_listing = server.client.json(
+            "LIST", f"{server.https_url}/api/v1/kv/metadata/", headers=api_headers
+        )
+        assert_status(200, status, "list API secrets within token prefixes")
+        require(api_listing == {"data": {"keys": ["token"]}}, "filter API listing by token prefix")
 
         _, settings = server.client.json("GET", f"{server.https_url}/v1/settings")
         require(
