@@ -407,6 +407,9 @@ def main() -> None:
                 "auto_block_login_bruteforce_ip": False,
                 "enforce_mfa": False,
                 "file_logging": False,
+                "automatic_server_backup": False,
+                "server_backup_cron": "0 0 2 * * *",
+                "server_backup_last_success": "",
             },
             "default security settings",
         )

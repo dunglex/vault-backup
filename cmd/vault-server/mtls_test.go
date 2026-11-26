@@ -67,7 +67,7 @@ func TestManagedCertificateUsesTokenExpiry(t *testing.T) {
 
 func TestMFAEnforcementSettingPersistsAndSupportsPartialUpdates(t *testing.T) {
 	s := newOperatorTestServer(t)
-	readSettings := func() map[string]bool {
+	readSettings := func() bool {
 		t.Helper()
 		response := httptest.NewRecorder()
 		s.getSettings(response, operatorRequestWithSession(
@@ -80,14 +80,16 @@ func TestMFAEnforcementSettingPersistsAndSupportsPartialUpdates(t *testing.T) {
 		if response.Code != http.StatusOK {
 			t.Fatalf("read settings status = %d, body %s", response.Code, response.Body.String())
 		}
-		var settings map[string]bool
+		var settings struct {
+			EnforceMFA bool `json:"enforce_mfa"`
+		}
 		if err := json.Unmarshal(response.Body.Bytes(), &settings); err != nil {
 			t.Fatal(err)
 		}
-		return settings
+		return settings.EnforceMFA
 	}
 
-	if settings := readSettings(); settings["enforce_mfa"] {
+	if settings := readSettings(); settings {
 		t.Fatal("MFA enforcement should be disabled by default")
 	}
 	enable := httptest.NewRecorder()
@@ -113,8 +115,70 @@ func TestMFAEnforcementSettingPersistsAndSupportsPartialUpdates(t *testing.T) {
 	if partialUpdate.Code != http.StatusOK || !strings.Contains(partialUpdate.Body.String(), `"enforce_mfa":true`) {
 		t.Fatalf("partial settings update = %d, body %s", partialUpdate.Code, partialUpdate.Body.String())
 	}
-	if settings := readSettings(); !settings["enforce_mfa"] {
+	if settings := readSettings(); !settings {
 		t.Fatal("partial settings update did not preserve MFA enforcement")
+	}
+}
+
+func TestAutomaticBackupSettingsAndCronValidation(t *testing.T) {
+	s := newOperatorTestServer(t)
+	if err := s.startBackupScheduler(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := s.stopBackupScheduler(); err != nil {
+			t.Errorf("stop backup scheduler: %v", err)
+		}
+	})
+
+	response := httptest.NewRecorder()
+	s.getSettings(response, operatorRequestWithSession(http.MethodGet, "/v1/settings", "", "admin-session", true))
+	if response.Code != http.StatusOK ||
+		!strings.Contains(response.Body.String(), `"automatic_server_backup":false`) ||
+		!strings.Contains(response.Body.String(), `"server_backup_cron":"0 0 2 * * *"`) {
+		t.Fatalf("read default backup settings = %d, body %s", response.Code, response.Body.String())
+	}
+
+	invalid := httptest.NewRecorder()
+	s.updateSettings(invalid, operatorRequestWithSession(
+		http.MethodPut,
+		"/v1/settings",
+		`{"automatic_server_backup":true,"server_backup_cron":"0 2 * * *"}`,
+		"admin-session",
+		true,
+	))
+	if invalid.Code != http.StatusBadRequest {
+		t.Fatalf("invalid backup cron status = %d, body %s", invalid.Code, invalid.Body.String())
+	}
+
+	enable := httptest.NewRecorder()
+	s.updateSettings(enable, operatorRequestWithSession(
+		http.MethodPut,
+		"/v1/settings",
+		`{"automatic_server_backup":true,"server_backup_cron":"0 0 0 1 1 *"}`,
+		"admin-session",
+		true,
+	))
+	if enable.Code != http.StatusOK || !strings.Contains(enable.Body.String(), `"automatic_server_backup":true`) {
+		t.Fatalf("enable scheduled backup = %d, body %s", enable.Code, enable.Body.String())
+	}
+	if jobs := s.backupCron.Jobs(); len(jobs) != 1 {
+		t.Fatalf("scheduled backup jobs = %d, want 1", len(jobs))
+	}
+
+	disable := httptest.NewRecorder()
+	s.updateSettings(disable, operatorRequestWithSession(
+		http.MethodPut,
+		"/v1/settings",
+		`{"automatic_server_backup":false}`,
+		"admin-session",
+		true,
+	))
+	if disable.Code != http.StatusOK || !strings.Contains(disable.Body.String(), `"automatic_server_backup":false`) {
+		t.Fatalf("disable scheduled backup = %d, body %s", disable.Code, disable.Body.String())
+	}
+	if jobs := s.backupCron.Jobs(); len(jobs) != 0 {
+		t.Fatalf("scheduled backup jobs after disable = %d, want 0", len(jobs))
 	}
 }
 

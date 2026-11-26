@@ -419,6 +419,7 @@ func TestHostOriginGuardChecksConfiguredDomains(t *testing.T) {
 		{name: "unconfigured host", adminName: "admin", path: "/v1/settings", host: "attacker.example", origin: "https://vault.example.com", wantCode: http.StatusForbidden},
 		{name: "unconfigured origin", adminName: "admin", path: "/v1/settings", host: "vault.example.com", origin: "https://attacker.example", wantCode: http.StatusForbidden},
 		{name: "health probe remains available", adminName: "admin", path: "/health", host: "attacker.example", wantCode: http.StatusNoContent},
+		{name: "liveness probe remains available", adminName: "admin", path: "/live", host: "attacker.example", wantCode: http.StatusNoContent},
 		{name: "setup remains accessible until admin creation", path: "/v1/setup", host: "attacker.example", origin: "https://attacker.example", wantCode: http.StatusNoContent},
 		{name: "other routes remain restricted during setup", path: "/v1/settings", host: "attacker.example", origin: "https://attacker.example", wantCode: http.StatusForbidden},
 	}

@@ -33,35 +33,6 @@ def main() -> None:
         require(audit_path.read_bytes().startswith(b"SQLite format 3\0"), "audit database is not plaintext")
         print("PASS: separate plaintext audit database")
 
-        archive = server.path / "vault-server.tar.gz"
-        run(
-            "./scripts/backup-vault-server.sh",
-            "--db",
-            server.path / "vault.db",
-            "--secrets-db",
-            server.path / "vault-secrets.db",
-            "--env-file",
-            "",
-            "--output",
-            archive,
-        )
-        with tarfile.open(archive, "r:gz") as tar:
-            names = tar.getnames()
-            require(
-                any(
-                    name.startswith("vault-server/database/audit-")
-                    and name.endswith(".db")
-                    for name in names
-                ),
-                "server backup omitted annual audit database",
-            )
-            require(
-                "vault-server/database/vault-secrets.db" in names
-                and "vault-server/database/vault-secrets.db.key" in names,
-                "server backup omitted encrypted secrets database or protected key",
-            )
-        print("PASS: server backup includes annual audit database")
-
         server.setup()
         server.login()
         status, years = server.client.json(
@@ -88,23 +59,62 @@ def main() -> None:
             f"{server.https_url}/v1/audit?year={time.gmtime().tm_year}&from={time.gmtime().tm_year - 1}-12-31",
         )
         assert_status(400, status, "reject date filter outside selected audit year")
+
+        status, settings = server.client.json(
+            "PUT",
+            f"{server.https_url}/v1/settings",
+            data={
+                "automatic_server_backup": True,
+                "server_backup_cron": "*/2 * * * * *",
+            },
+        )
+        assert_status(200, status, "enable scheduled server backups")
+        require(settings["automatic_server_backup"], "automatic backups were not enabled")
+        require(settings["server_backup_cron"] == "*/2 * * * * *", "cron schedule was not saved")
+        print("PASS: save six-field backup schedule")
+
+        backup_dir = server.path / "backups"
+        for _ in range(80):
+            archives = sorted(backup_dir.glob("vault-server-backup-*.tar.gz")) if backup_dir.exists() else []
+            if archives:
+                break
+            time.sleep(0.25)
+        else:
+            raise RuntimeError("scheduled server backup was not created")
+        archive = archives[-1]
+        require(mode(archive) == 0o600, "backup archive permissions")
+        with tarfile.open(archive, "r:gz") as tar:
+            names = tar.getnames()
+            require("vault-server/data/vault.db" in names, "server backup omitted main database")
+            require("vault-server/data/vault.db.key" in names, "server backup omitted protected database key")
+            require("vault-server/data/vault-secrets.db" in names, "server backup omitted secrets database")
+            require("vault-server/data/vault-secrets.db.key" in names, "server backup omitted secrets key")
+            require(
+                any(name.startswith("vault-server/data/audit-") and name.endswith(".db") for name in names),
+                "server backup omitted annual audit database",
+            )
+            require("vault-server/manifest.txt" in names, "server backup omitted SHA-256 manifest")
+        print("PASS: scheduler creates complete protected archive")
+
+        for _ in range(20):
+            status, health = server.client.json("GET", f"{server.https_url}/health")
+            if status == 200 and health["ok"]:
+                break
+            time.sleep(0.25)
+        else:
+            raise RuntimeError("server did not resume after scheduled backup")
+        print("PASS: server resumes after maintenance backup")
+        status, settings = server.client.json("GET", f"{server.https_url}/v1/settings")
+        assert_status(200, status, "read scheduled backup completion time")
+        require(settings["server_backup_last_success"], "backup completion time was not saved")
+        _, audit = server.client.json("GET", f"{server.https_url}/v1/audit")
+        require(
+            any(event["action"] == "server_backup" and event["outcome"] == "success" for event in audit["events"]),
+            "successful backup was not audited",
+        )
+        print("PASS: save backup completion time and audit success")
         server.stop()
 
-        run(
-            "./scripts/backup-vault-server.sh",
-            "--db",
-            server.path / "vault.db",
-            "--secrets-db",
-            server.path / "vault-secrets.db",
-            "--env-file",
-            "",
-            "--tls-cert",
-            server.cert,
-            "--tls-key",
-            server.key,
-            "--output",
-            archive,
-        )
         restore_dir = server.path / "restored-data"
         run(
             "./scripts/restore-vault-server.sh",
@@ -133,9 +143,9 @@ def main() -> None:
             [
                 str(server.server_binary),
                 "--tls-cert",
-                str(restore_dir / "tls/server.crt"),
+                str(restore_dir / "test-cert.pem"),
                 "--tls-key",
-                str(restore_dir / "tls/server.key"),
+                str(restore_dir / "test-key.pem"),
             ],
             cwd=server.path,
             env=restored_env,
@@ -158,15 +168,23 @@ def main() -> None:
             else:
                 raise RuntimeError("restored server did not become healthy")
 
-            status, _ = restored_client.json(
-                "POST",
-                f"{restored_url}/v1/auth/login",
-                data={"username": server.user, "password": server.password},
-            )
+            for _ in range(120):
+                status, _ = restored_client.json(
+                    "POST",
+                    f"{restored_url}/v1/auth/login",
+                    data={"username": server.user, "password": server.password},
+                )
+                if status != 503:
+                    break
+                time.sleep(0.25)
             assert_status(200, status, "log in to restored server")
-            status, secret = restored_client.json(
-                "GET", f"{restored_url}/v1/secrets/restore-test/database"
-            )
+            for _ in range(120):
+                status, secret = restored_client.json(
+                    "GET", f"{restored_url}/v1/secrets/restore-test/database"
+                )
+                if status != 503:
+                    break
+                time.sleep(0.25)
             assert_status(200, status, "read secret from restored database")
             require(
                 secret["data"] == {

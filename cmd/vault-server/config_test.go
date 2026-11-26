@@ -18,6 +18,8 @@ func TestLoadServerConfigAppliesEnvFileEnvironmentAndFlagPrecedence(t *testing.T
 		"VAULT_SERVER_HTTPS_ADDR=127.0.0.1:8100",
 		"VAULT_SERVER_HTTP_ADDR=127.0.0.1:8101",
 		"VAULT_SERVER_DB=" + filepath.Join(dir, "file.db"),
+		"VAULT_SERVER_DATA_DIR=" + filepath.Join(dir, "file-data"),
+		"VAULT_SERVER_BACKUP_DIR=" + filepath.Join(dir, "file-backups"),
 		"VAULT_SERVER_AUDIT_DB=" + filepath.Join(dir, "audit.db"),
 		"VAULT_SERVER_ALLOW_PLAINTEXT_DB=true",
 		"VAULT_SERVER_TRUSTED_PROXIES=10.10.0.0/16",
@@ -41,6 +43,8 @@ func TestLoadServerConfigAppliesEnvFileEnvironmentAndFlagPrecedence(t *testing.T
 		t.Fatalf("addresses = %q / %q", config.Addr, config.HTTPAddr)
 	}
 	if config.DBPath != filepath.Join(dir, "cli.db") ||
+		config.DataDir != filepath.Join(dir, "file-data") ||
+		config.BackupDir != filepath.Join(dir, "file-backups") ||
 		config.SecretsDBPath != filepath.Join(dir, "cli-secrets.db") ||
 		config.AuditDBPath != filepath.Join(dir, "audit.db") {
 		t.Fatalf("database paths = app:%q secrets:%q audit:%q", config.DBPath, config.SecretsDBPath, config.AuditDBPath)
@@ -83,6 +87,11 @@ func TestLoadServerConfigValidatesRequiredAndRelatedOptions(t *testing.T) {
 			want: "secrets database path must differ",
 		},
 		{
+			name: "backup directory reuses data path",
+			args: []string{"--env-file=", "--data-dir", "same", "--backup-dir", "same"},
+			want: "backup directory must differ",
+		},
+		{
 			name: "invalid trusted proxy",
 			args: []string{"--env-file=", "--trusted-proxies", "not-an-address"},
 			want: "invalid trusted proxy",
@@ -111,6 +120,8 @@ func unsetServerConfigEnvironment(t *testing.T) {
 		"VAULT_SERVER_HTTPS_ADDR",
 		"VAULT_SERVER_HTTP_ADDR",
 		"VAULT_SERVER_DB",
+		"VAULT_SERVER_DATA_DIR",
+		"VAULT_SERVER_BACKUP_DIR",
 		"VAULT_SERVER_SECRETS_DB",
 		"VAULT_SERVER_AUDIT_DB",
 		"VAULT_SERVER_TLS_CERT",

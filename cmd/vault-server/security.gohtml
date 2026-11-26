@@ -46,6 +46,14 @@
         Auto block login bruteforce IP
       </label>
       <p class="muted">When enabled, an IP address is permanently blocked after five failed logins within ten minutes. Successful logins reset that IP's failure sequence. Blocks remain stored if this option is disabled.</p>
+      <label class="setting-option">
+        <input id="automaticServerBackup" type="checkbox">
+        Enable scheduled server backups
+      </label>
+      <label for="serverBackupCron">Backup schedule (six-field cron, UTC)</label>
+      <input id="serverBackupCron" type="text" maxlength="128" value="0 0 2 * * *" autocomplete="off" spellcheck="false" aria-describedby="serverBackupCronDescription">
+      <p id="serverBackupCronDescription" class="muted" aria-live="polite">Every day at 02:00:00 UTC.</p>
+      <p class="muted">Format: second minute hour day month weekday (UTC). Default: 02:00 daily. Backups pause service and archive the data folder. Archives older than 30 days are removed after a successful backup. Last successful backup: <span id="lastServerBackup">None</span>.</p>
       <p><button id="viewBlockedIPs" class="button button-outline" type="button">View blocked IPs</button></p>
       <div class="row-actions">
         <button id="saveSettings" type="submit">Save settings</button>
@@ -71,6 +79,65 @@
 </main>
 <script>
 const errorBox = document.getElementById('error');
+const backupCron = document.getElementById('serverBackupCron');
+const backupCronDescription = document.getElementById('serverBackupCronDescription');
+const cronFields = [
+  {unit:'second', min:0, max:59},
+  {unit:'minute', min:0, max:59},
+  {unit:'hour', min:0, max:23},
+  {unit:'day of month', plural:'days of month', min:1, max:31},
+  {unit:'month', min:1, max:12, names:['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'], labels:['January','February','March','April','May','June','July','August','September','October','November','December']},
+  {unit:'day of week', plural:'days of week', min:0, max:6, names:['sun','mon','tue','wed','thu','fri','sat'], labels:['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday']}
+];
+function describeCronField(field, spec) {
+  let unrestricted = false;
+  const parts = field.toLowerCase().split(',').map(part => {
+    const match = /^(\*|\?|[a-z]+|\d+)(?:-([a-z]+|\d+))?(?:\/(\d+))?$/.exec(part);
+    if (!match) return null;
+    const value = token => {
+      if (/^\d+$/.test(token)) return Number(token);
+      const index = spec.names ? spec.names.indexOf(token) : -1;
+      return index < 0 ? NaN : index + spec.min;
+    };
+    const wildcard = match[1] === '*' || match[1] === '?';
+    if (wildcard && match[2]) return null;
+    const start = wildcard ? spec.min : value(match[1]);
+    const end = match[2] ? value(match[2]) : (wildcard || match[3] ? spec.max : start);
+    const step = match[3] ? Number(match[3]) : 1;
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || !Number.isSafeInteger(step) ||
+        start < spec.min || end > spec.max || start > end || step < 1) return null;
+    if (wildcard && step === 1) unrestricted = true;
+    const label = number => spec.labels ? spec.labels[number - spec.min] : number;
+    const plural = spec.plural || `${spec.unit}s`;
+    if (wildcard && step === 1) return `every ${spec.unit}`;
+    if (wildcard && step > 1) return `every ${step} ${plural}, starting at ${label(start)}`;
+    if (match[3] && step > 1) return `every ${step} ${plural} from ${label(start)} through ${label(end)}`;
+    if (start !== end) return `${plural} ${label(start)} through ${label(end)}`;
+    return `${spec.unit} ${label(start)}`;
+  });
+  if (parts.some(part => part === null)) return null;
+  return {text:parts.join(' or '), unrestricted};
+}
+function describeBackupCron(expression) {
+  const fields = expression.trim().split(/\s+/);
+  if (fields.length !== 6) return 'Enter a six-field cron expression to see its description.';
+  const descriptions = fields.map((field, index) => describeCronField(field, cronFields[index]));
+  if (descriptions.some(description => description === null)) {
+    return 'Description unavailable for this expression. The server validates the schedule when saved.';
+  }
+  const [second, minute, hour, day, month, weekday] = descriptions;
+  if (fields.slice(0, 3).every(field => /^\d+$/.test(field)) &&
+      fields.slice(3).every(field => field === '*' || field === '?')) {
+    const time = [fields[2], fields[1], fields[0]].map(value => String(Number(value)).padStart(2, '0')).join(':');
+    return `Every day at ${time} UTC.`;
+  }
+  const dayJoin = day.unrestricted || weekday.unrestricted ? ' and ' : ' or ';
+  return `Runs at ${second.text}, ${minute.text}, ${hour.text}; in ${month.text}; on ${day.text}${dayJoin}${weekday.text} (UTC).`;
+}
+function updateBackupCronDescription() {
+  backupCronDescription.textContent = describeBackupCron(backupCron.value);
+}
+backupCron.addEventListener('input', updateBackupCronDescription);
 async function api(url, options = {}) {
   options.credentials = 'same-origin';
   const response = await fetch(url, options);
@@ -88,6 +155,10 @@ async function loadSettings() {
     document.getElementById('autoBlockLoginBruteforceIP').checked = settings.auto_block_login_bruteforce_ip;
     document.getElementById('enforceMFA').checked = settings.enforce_mfa;
     document.getElementById('fileLogging').checked = settings.file_logging;
+    document.getElementById('automaticServerBackup').checked = settings.automatic_server_backup;
+    backupCron.value = settings.server_backup_cron;
+    updateBackupCronDescription();
+    document.getElementById('lastServerBackup').textContent = settings.server_backup_last_success || 'None';
   } catch (error) {
     errorBox.textContent = error.message;
   }
@@ -100,16 +171,19 @@ document.getElementById('settingsForm').addEventListener('submit', async event =
   saved.textContent = '';
   errorBox.textContent = '';
   try {
-    await api('/v1/settings', {
+    const updated = await api('/v1/settings', {
       method:'PUT',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({
         enforce_mtls:document.getElementById('enforceMTLS').checked,
         auto_block_login_bruteforce_ip:document.getElementById('autoBlockLoginBruteforceIP').checked,
         enforce_mfa:document.getElementById('enforceMFA').checked,
-        file_logging:document.getElementById('fileLogging').checked
+        file_logging:document.getElementById('fileLogging').checked,
+        automatic_server_backup:document.getElementById('automaticServerBackup').checked,
+        server_backup_cron:document.getElementById('serverBackupCron').value.trim()
       })
     });
+    document.getElementById('lastServerBackup').textContent = updated.server_backup_last_success || 'None';
     saved.textContent = 'Settings saved.';
   } catch (error) {
     errorBox.textContent = error.message;

@@ -20,8 +20,89 @@ func (s *server) middleware(handler http.Handler) http.Handler {
 	handler = s.mfaEnrollmentGuard(handler)               // Restrict accounts until required MFA is enrolled.
 	handler = s.hostOriginGuard(handler)                  // Allow only configured hosts and origins.
 	handler = withRequestTimeout(handler, requestTimeout) // Stop handlers that exceed the request time limit.
-	handler = s.securityHeaders(handler)                  // Add standard security headers to responses.
+	handler = s.maintenanceGate(handler)
+	handler = s.securityHeaders(handler) // Add standard security headers to responses.
 	return handler
+}
+
+func (s *server) maintenanceGate(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.maintenanceMu.Lock()
+		if s.requestsIdle == nil {
+			s.requestsIdle = closedSignal()
+		}
+		if s.maintenance {
+			maintenanceFailed := s.maintenanceFailed
+			s.maintenanceMu.Unlock()
+			w.Header().Set("Retry-After", "60")
+			w.Header().Set("Connection", "close")
+			if r.URL.Path == "/live" {
+				status := http.StatusOK
+				if maintenanceFailed {
+					status = http.StatusServiceUnavailable
+				}
+				writeJSON(w, status, map[string]bool{"ok": status == http.StatusOK})
+				return
+			}
+			if r.URL.Path == "/health" || r.URL.Path == "/api/health" {
+				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "maintenance": true})
+				return
+			}
+			if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/v1/") {
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "server is under maintenance"})
+				return
+			}
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			if err := pageTemplate.ExecuteTemplate(w, "maintenance.gohtml", nil); err != nil {
+				log.Printf("ERROR: could not render maintenance page: %v", err)
+			}
+			return
+		}
+		if s.activeRequests == 0 {
+			s.requestsIdle = make(chan struct{})
+		}
+		s.activeRequests++
+		s.maintenanceMu.Unlock()
+
+		defer func() {
+			s.maintenanceMu.Lock()
+			s.activeRequests--
+			if s.activeRequests == 0 {
+				close(s.requestsIdle)
+			}
+			s.maintenanceMu.Unlock()
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
+func closedSignal() chan struct{} {
+	idle := make(chan struct{})
+	close(idle)
+	return idle
+}
+
+func (s *server) beginMaintenance() {
+	s.maintenanceMu.Lock()
+	s.maintenance = true
+	s.maintenanceFailed = false
+	idle := s.requestsIdle
+	s.maintenanceMu.Unlock()
+	<-idle
+}
+
+func (s *server) endMaintenance() {
+	s.maintenanceMu.Lock()
+	s.maintenance = false
+	s.maintenanceFailed = false
+	s.maintenanceMu.Unlock()
+}
+
+func (s *server) failMaintenance() {
+	s.maintenanceMu.Lock()
+	s.maintenanceFailed = true
+	s.maintenanceMu.Unlock()
 }
 
 func (s *server) mustChangePasswordGuard(next http.Handler) http.Handler {
@@ -61,7 +142,7 @@ func allowedPasswordChangeRequest(r *http.Request) bool {
 
 func (s *server) mfaEnrollmentGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/health" || r.URL.Path == "/api/health" {
+		if r.URL.Path == "/health" || r.URL.Path == "/api/health" || r.URL.Path == "/live" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -142,7 +223,7 @@ func withRequestTimeout(next http.Handler, timeout time.Duration) http.Handler {
 
 func (s *server) hostOriginGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/health" || r.URL.Path == "/api/health" {
+		if r.URL.Path == "/health" || r.URL.Path == "/api/health" || r.URL.Path == "/live" {
 			next.ServeHTTP(w, r)
 			return
 		}

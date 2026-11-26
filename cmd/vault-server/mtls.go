@@ -306,11 +306,19 @@ func (s *server) getSettings(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read settings"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{
+	backupEnabled, backupCron, lastBackup, err := readServerBackupSettings(s.db)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read settings"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
 		"enforce_mtls":                   enforced,
 		"auto_block_login_bruteforce_ip": autoBlock,
 		"enforce_mfa":                    enforceMFA,
 		"file_logging":                   fileLogging,
+		"automatic_server_backup":        backupEnabled,
+		"server_backup_cron":             backupCron,
+		"server_backup_last_success":     lastBackup,
 	})
 }
 
@@ -323,17 +331,20 @@ func (s *server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var request struct {
-		EnforceMTLS                *bool `json:"enforce_mtls"`
-		AutoBlockLoginBruteforceIP *bool `json:"auto_block_login_bruteforce_ip"`
-		EnforceMFA                 *bool `json:"enforce_mfa"`
-		FileLogging                *bool `json:"file_logging"`
+		EnforceMTLS                *bool   `json:"enforce_mtls"`
+		AutoBlockLoginBruteforceIP *bool   `json:"auto_block_login_bruteforce_ip"`
+		EnforceMFA                 *bool   `json:"enforce_mfa"`
+		FileLogging                *bool   `json:"file_logging"`
+		AutomaticServerBackup      *bool   `json:"automatic_server_backup"`
+		ServerBackupCron           *string `json:"server_backup_cron"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid settings"})
 		return
 	}
 	if request.EnforceMTLS == nil && request.AutoBlockLoginBruteforceIP == nil &&
-		request.EnforceMFA == nil && request.FileLogging == nil {
+		request.EnforceMFA == nil && request.FileLogging == nil &&
+		request.AutomaticServerBackup == nil && request.ServerBackupCron == nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no settings provided"})
 		return
 	}
@@ -357,6 +368,11 @@ func (s *server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read settings"})
 		return
 	}
+	backupEnabled, backupCron, _, err := readServerBackupSettings(s.db)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read settings"})
+		return
+	}
 	fileLoggingWasEnabled := fileLogging
 	if request.EnforceMTLS != nil {
 		enforced = *request.EnforceMTLS
@@ -369,6 +385,28 @@ func (s *server) updateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if request.FileLogging != nil {
 		fileLogging = *request.FileLogging
+	}
+	if request.AutomaticServerBackup != nil {
+		backupEnabled = *request.AutomaticServerBackup
+	}
+	if request.ServerBackupCron != nil {
+		backupCron = strings.TrimSpace(*request.ServerBackupCron)
+	}
+	if len(backupCron) > 128 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "server backup cron expression is too long"})
+		return
+	}
+	if request.ServerBackupCron != nil || backupEnabled {
+		if err := validateServerBackupCron(backupCron); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+	}
+	if backupEnabled {
+		if err := validateBackupDatabaseScope(s.backupConfig); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
 	}
 	enableFileLogging := request.FileLogging != nil && *request.FileLogging && !fileLoggingWasEnabled
 	preparedFileLogging := false
@@ -436,11 +474,38 @@ func (s *server) updateSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if request.AutomaticServerBackup != nil {
+		if _, err := tx.Exec(
+			"INSERT INTO server_settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+			serverBackupEnabledSetting,
+			strconv.FormatBool(backupEnabled),
+		); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not save settings"})
+			return
+		}
+	}
+	if request.ServerBackupCron != nil {
+		if _, err := tx.Exec(
+			"INSERT INTO server_settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+			serverBackupCronSetting,
+			backupCron,
+		); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not save settings"})
+			return
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not save settings"})
 		return
 	}
 	fileLoggingSaved = preparedFileLogging
+	if request.AutomaticServerBackup != nil || request.ServerBackupCron != nil {
+		if err := s.configureBackupSchedule(backupEnabled, backupCron); err != nil {
+			log.Printf("ERROR: settings saved but automatic backup schedule could not be updated: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "settings were saved but the backup schedule could not be applied; restart the server to apply it"})
+			return
+		}
+	}
 	if request.FileLogging != nil && !*request.FileLogging && s.logWriter != nil {
 		if err := s.logWriter.DisableFileLogging(); err != nil {
 			log.Printf("ERROR: could not disable file logging cleanly: %v", err)
@@ -458,12 +523,32 @@ func (s *server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		detail += serverFileLoggingSetting + "=" + strconv.FormatBool(fileLogging)
 	}
+	if request.AutomaticServerBackup != nil {
+		if detail != "" {
+			detail += ","
+		}
+		detail += serverBackupEnabledSetting + "=" + strconv.FormatBool(backupEnabled)
+	}
+	if request.ServerBackupCron != nil {
+		if detail != "" {
+			detail += ","
+		}
+		detail += serverBackupCronSetting + "=" + backupCron
+	}
 	s.recordAuditEvent(r, "update_settings", "success", s.auditRequestActor(r, "web"), "web", "server-settings", detail)
-	writeJSON(w, http.StatusOK, map[string]bool{
+	_, _, lastBackup, err := readServerBackupSettings(s.db)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "settings were saved but could not be reloaded"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
 		"enforce_mtls":                   enforced,
 		"auto_block_login_bruteforce_ip": autoBlock,
 		"enforce_mfa":                    enforceMFA,
 		"file_logging":                   fileLogging,
+		"automatic_server_backup":        backupEnabled,
+		"server_backup_cron":             backupCron,
+		"server_backup_last_success":     lastBackup,
 	})
 }
 

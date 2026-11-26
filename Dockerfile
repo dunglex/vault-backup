@@ -28,12 +28,14 @@ COPY --from=builder --chown=vault:vault /app/bin/mkcert /usr/local/bin/mkcert
 COPY --from=builder --chown=vault:vault /app/scripts /app/scripts
 
 # Create a directory for Vault server data and set ownership
-RUN mkdir -p /data && chown -R vault:vault /data
-VOLUME /data
+RUN mkdir -p /data /backups && chown -R vault:vault /data /backups
+VOLUME ["/data", "/backups"]
 
 # Set default environment variables for Vault server
 ENV VAULT_SERVER_DB=/data/vault.db
 ENV VAULT_SERVER_SECRETS_DB=/data/vault-secrets.db
+ENV VAULT_SERVER_DATA_DIR=/data
+ENV VAULT_SERVER_BACKUP_DIR=/backups
 ENV VAULT_SERVER_HEALTHCHECK_URL=https://127.0.0.1:8200/health
 
 USER vault

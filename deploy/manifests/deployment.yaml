@@ -40,20 +40,24 @@ spec:
                 secretKeyRef:
                   name: vault-server-env
                   key: db-password
+            - name: VAULT_SERVER_DATA_DIR
+              value: /data
+            - name: VAULT_SERVER_BACKUP_DIR
+              value: /backups
           ports:
             - name: https
               containerPort: 8200
               protocol: TCP
           startupProbe:
             httpGet:
-              path: /health
+              path: /live
               port: https
               scheme: HTTPS
             periodSeconds: 5
             failureThreshold: 24
           livenessProbe:
             httpGet:
-              path: /health
+              path: /live
               port: https
               scheme: HTTPS
             periodSeconds: 30

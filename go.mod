@@ -4,12 +4,18 @@ go 1.26.5
 
 require (
 	github.com/CovenantSQL/go-sqlite3-encrypt v1.13.0
+	github.com/go-co-op/gocron/v2 v2.23.2
 	github.com/hashicorp/vault/api v1.23.0
 	github.com/spf13/pflag v1.1.0
 	github.com/spf13/viper v1.21.0
 	golang.org/x/crypto v0.59.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.63.0
+)
+
+require (
+	github.com/jonboulle/clockwork v0.5.0 // indirect
+	github.com/robfig/cron/v3 v3.0.1 // indirect
 )
 
 require (

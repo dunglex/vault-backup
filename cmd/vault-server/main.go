@@ -32,6 +32,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/go-co-op/gocron/v2"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -60,12 +61,23 @@ type server struct {
 	serverCerts   *serverCertificateManager
 	acmeAvailable bool
 	logWriter     *serverLogWriter
+	backupConfig  serverBackupConfig
+	backupCron    gocron.Scheduler
+	backupJob     gocron.Job
+	lastBackup    string
 
-	mu             sync.Mutex
-	sessions       map[string]sessionInfo
-	attempts       map[string][]time.Time
-	trustedProxies []*net.IPNet
-	loginDelay     func(context.Context) error
+	mu                sync.Mutex
+	backupMu          sync.Mutex
+	backupRunMu       sync.Mutex
+	maintenanceMu     sync.Mutex
+	maintenance       bool
+	maintenanceFailed bool
+	activeRequests    int
+	requestsIdle      chan struct{}
+	sessions          map[string]sessionInfo
+	attempts          map[string][]time.Time
+	trustedProxies    []*net.IPNet
+	loginDelay        func(context.Context) error
 }
 
 type sessionInfo struct {
@@ -142,6 +154,7 @@ func main() {
 	}
 
 	databaseDirs := []string{
+		config.DataDir,
 		filepath.Dir(config.DBPath),
 		filepath.Dir(config.SecretsDBPath),
 		filepath.Dir(config.AuditDBPath),
@@ -164,11 +177,20 @@ func main() {
 		log.Fatal(err)
 	}
 
+	var activeServer *server
 	db, _, err := openDatabaseWithOptions(config.DBPath, masterKey, config.AllowPlaintextDB)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer func() {
+		if activeServer != nil {
+			if activeServer.db != nil {
+				if err := activeServer.db.Close(); err != nil {
+					log.Printf("Could not close database cleanly: %v", err)
+				}
+			}
+			return
+		}
 		if err := db.Close(); err != nil {
 			log.Printf("Could not close database cleanly: %v", err)
 		}
@@ -178,6 +200,14 @@ func main() {
 		log.Fatal(err)
 	}
 	defer func() {
+		if activeServer != nil {
+			if activeServer.secretsDB != nil {
+				if err := activeServer.secretsDB.Close(); err != nil {
+					log.Printf("Could not close secrets database cleanly: %v", err)
+				}
+			}
+			return
+		}
 		if err := secretsDB.Close(); err != nil {
 			log.Printf("Could not close secrets database cleanly: %v", err)
 		}
@@ -187,6 +217,14 @@ func main() {
 		log.Fatal(err)
 	}
 	defer func() {
+		if activeServer != nil {
+			if activeServer.auditStore != nil {
+				if err := activeServer.auditStore.Close(); err != nil {
+					log.Printf("Could not close audit store cleanly: %v", err)
+				}
+			}
+			return
+		}
 		if err := auditStore.Close(); err != nil {
 			log.Printf("Could not close audit store cleanly: %v", err)
 		}
@@ -270,28 +308,41 @@ func main() {
 
 	// Web server initialization.
 	s := &server{
-		db:             db,
-		secretsDB:      secretsDB,
-		auditStore:     auditStore,
-		setupKey:       setupKey,
-		setupKeyPath:   setupKeyPath,
-		setupDeadline:  setupDeadline,
-		adminName:      adminName,
-		aead:           aead,
-		secretsAEAD:    secretsAEAD,
-		serverCerts:    serverCerts,
-		acmeAvailable:  config.HTTPAddr != "",
-		logWriter:      logWriter,
+		db:            db,
+		secretsDB:     secretsDB,
+		auditStore:    auditStore,
+		setupKey:      setupKey,
+		setupKeyPath:  setupKeyPath,
+		setupDeadline: setupDeadline,
+		adminName:     adminName,
+		aead:          aead,
+		secretsAEAD:   secretsAEAD,
+		serverCerts:   serverCerts,
+		acmeAvailable: config.HTTPAddr != "",
+		logWriter:     logWriter,
+		backupConfig: serverBackupConfig{
+			dataDir:        config.DataDir,
+			backupDir:      config.BackupDir,
+			dbPath:         config.DBPath,
+			secretsDBPath:  config.SecretsDBPath,
+			auditDBPath:    config.AuditDBPath,
+			masterKey:      masterKey,
+			secretsKey:     secretsMasterKey,
+			allowPlaintext: config.AllowPlaintextDB,
+		},
+		requestsIdle:   closedSignal(),
 		sessions:       map[string]sessionInfo{},
 		attempts:       map[string][]time.Time{},
 		trustedProxies: config.TrustedProxyRanges,
 	}
+	activeServer = s
 	// Load or create the managed client CA for mTLS.
 	if err := s.loadOrCreateManagedClientCA(); err != nil {
 		log.Fatal(err)
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.health)
+	mux.HandleFunc("GET /live", s.liveness)
 
 	// Serve static assets from embedded files.
 	mux.HandleFunc("GET /normalize.css", serveEmbeddedAsset("normalize.css", "text/css; charset=utf-8"))
@@ -440,6 +491,18 @@ func main() {
 			log.Fatal(err)
 		}
 	}
+	if err := s.startBackupScheduler(); err != nil {
+		_ = httpsListener.Close()
+		if httpListener != nil {
+			_ = httpListener.Close()
+		}
+		log.Fatal(err)
+	}
+	defer func() {
+		if err := s.stopBackupScheduler(); err != nil {
+			log.Printf("ERROR: could not stop backup scheduler cleanly: %v", err)
+		}
+	}()
 
 	if setupKey != "" {
 		fmt.Printf("Vault setup key: %s\n", setupKey)
@@ -608,6 +671,10 @@ func (s *server) health(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]bool{"ok": false})
 		return
 	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *server) liveness(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 

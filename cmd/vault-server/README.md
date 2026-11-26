@@ -85,6 +85,8 @@ VAULT_SERVER_HTTP_ADDR=
 VAULT_SERVER_DB=/var/lib/vault/vault.db
 VAULT_SERVER_SECRETS_DB=/var/lib/vault/vault-secrets.db
 VAULT_SERVER_AUDIT_DB=/var/lib/vault/audit.db
+VAULT_SERVER_DATA_DIR=/var/lib/vault
+VAULT_SERVER_BACKUP_DIR=/var/lib/vault/backups
 VAULT_SERVER_TLS_CERT=/etc/vault/tls/server.crt
 VAULT_SERVER_TLS_KEY=/etc/vault/tls/server.key
 VAULT_SERVER_TRUSTED_PROXIES=10.0.0.0/8
@@ -148,21 +150,18 @@ On `SIGINT` or `SIGTERM`, the server stops accepting new connections, drains act
 
 ## Back up server state
 
-Create a sensitive filesystem tarball containing both encrypted databases, their protected keys, TLS files, and optional `.env`:
-
-```bash
-./scripts/backup-vault-server.sh \
-  --db /var/lib/vault/vault.db \
-  --secrets-db /var/lib/vault/vault-secrets.db \
-  --env-file /etc/vault/server.env \
-  --tls-cert /etc/vault/tls/server.crt \
-  --tls-key /etc/vault/tls/server.key \
-  --mtls-ca-cert /etc/vault/tls/client-ca.crt \
-  --output /secure/backups/vault-server.tar.gz
-```
-
-The archive is created with mode `0600` and includes SHA-256 checksums in `vault-server/manifest.txt`. Stop or quiesce the server before backup for the most consistent database snapshot.
-The main database, protected key, and all yearly audit databases are included.
+Administrators can enable scheduled backups from the Security page. The
+six-field cron expression uses UTC and defaults to `0 0 2 * * *` (daily at
+02:00). The Security page describes the entered schedule as it changes; the
+server validates it when settings are saved. Each run serves a maintenance page,
+waits for active requests to drain,
+closes the application, secrets, and audit database handles, archives the
+configured data directory, then reopens the databases. Archives are gzip tar
+files with SHA-256 manifests, mode `0600`, and are stored in the configured
+backup directory. Files older than 30 days are removed after a successful
+backup. Data and backup directories can be set with `--data-dir` /
+`VAULT_SERVER_DATA_DIR` and `--backup-dir` / `VAULT_SERVER_BACKUP_DIR`.
+Files stored outside the data directory must be backed up separately.
 
 Restore a backup into a clean `/data` directory:
 

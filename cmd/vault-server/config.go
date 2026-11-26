@@ -20,6 +20,8 @@ type serverConfig struct {
 	Addr               string
 	HTTPAddr           string
 	DBPath             string
+	DataDir            string
+	BackupDir          string
 	SecretsDBPath      string
 	AuditDBPath        string
 	TLSCertPath        string
@@ -51,6 +53,8 @@ func loadServerConfig(args []string) (serverConfig, error) {
 	flags.StringVar(&config.Addr, "https-addr", envDefault("VAULT_SERVER_HTTPS_ADDR", "127.0.0.1:8200"), "HTTPS server address")
 	flags.StringVar(&config.HTTPAddr, "http-addr", envDefault("VAULT_SERVER_HTTP_ADDR", "127.0.0.1:8201"), "HTTP server address (disabled by default)")
 	flags.StringVar(&config.DBPath, "db", envDefault("VAULT_SERVER_DB", "vault.db"), "path to database file")
+	flags.StringVar(&config.DataDir, "data-dir", envDefault("VAULT_SERVER_DATA_DIR", ""), "directory containing server state files")
+	flags.StringVar(&config.BackupDir, "backup-dir", envDefault("VAULT_SERVER_BACKUP_DIR", ""), "directory for scheduled server backups")
 	flags.StringVar(&config.SecretsDBPath, "secrets-db", envDefault("VAULT_SERVER_SECRETS_DB", ""), "path to encrypted secrets database")
 	flags.StringVar(&config.AuditDBPath, "audit-db", envDefault("VAULT_SERVER_AUDIT_DB", ""), "path to plaintext audit database file (default: alongside main database)")
 	flags.StringVar(&config.TLSCertPath, "tls-cert", envDefault("VAULT_SERVER_TLS_CERT", ""), "path to TLS certificate PEM")
@@ -70,6 +74,8 @@ func loadServerConfig(args []string) (serverConfig, error) {
 	config.EnvFilePath = strings.TrimSpace(config.EnvFilePath)
 	config.HTTPAddr = strings.TrimSpace(config.HTTPAddr)
 	config.SecretsDBPath = strings.TrimSpace(config.SecretsDBPath)
+	config.DataDir = strings.TrimSpace(config.DataDir)
+	config.BackupDir = strings.TrimSpace(config.BackupDir)
 	config.TLSCertPath = strings.TrimSpace(config.TLSCertPath)
 	config.TLSKeyPath = strings.TrimSpace(config.TLSKeyPath)
 	config.SetupKey = os.Getenv("VAULT_SERVER_SETUP_KEY")
@@ -86,6 +92,19 @@ func loadServerConfig(args []string) (serverConfig, error) {
 		return serverConfig{}, fmt.Errorf("resolve database path: %w", err)
 	}
 	config.DBPath = filepath.Clean(resolvedDB)
+	if config.DataDir == "" {
+		config.DataDir = filepath.Dir(config.DBPath)
+	} else if config.DataDir, err = absoluteCleanPath(config.DataDir); err != nil {
+		return serverConfig{}, fmt.Errorf("resolve data directory: %w", err)
+	}
+	if config.BackupDir == "" {
+		config.BackupDir = filepath.Join(config.DataDir, "backups")
+	} else if config.BackupDir, err = absoluteCleanPath(config.BackupDir); err != nil {
+		return serverConfig{}, fmt.Errorf("resolve backup directory: %w", err)
+	}
+	if filepath.Clean(config.BackupDir) == filepath.Clean(config.DataDir) {
+		return serverConfig{}, fmt.Errorf("backup directory must differ from the server data directory")
+	}
 	if config.SecretsDBPath == "" {
 		config.SecretsDBPath = defaultSecretsDatabasePath(config.DBPath)
 	} else if config.SecretsDBPath, err = absoluteCleanPath(config.SecretsDBPath); err != nil {

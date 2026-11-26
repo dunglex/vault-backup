@@ -25,21 +25,17 @@ The deployment uses two persistent volumes:
   separate encrypted secrets database, its key, and server state.
 - `vault-server-backups` is mounted at `/backups` and can store backup archives.
 
-Generate a backup inside the running pod with:
+An administrator can enable scheduled backups on the Security page and set a
+six-field cron schedule in UTC. During each run, the server shows a maintenance
+page, drains requests, closes its database connections, archives `/data`, and
+stores the protected archive in `/backups`. Archives older than 30 days are
+removed after a successful run. Keep the backup PVC separate from the data PVC.
 
-```bash
-kubectl -n vault-backup exec deploy/vault-server -- \
-  /app/scripts/backup-vault-server.sh \
-  --db /data/vault.db \
-  --secrets-db /data/vault-secrets.db \
-  --audit-db /data/audit.db \
-  --output /backups/vault-server-backup.tar.gz
-```
-
-Stop or quiesce the pod before creating a consistent SQLite backup. The
+The maintenance window pauses requests until database handles are reopened. The
 separate backup volume protects archives from changes to the live data volume,
 but it is not an off-cluster copy; replicate or snapshot it according to the
-cluster's disaster-recovery policy.
+cluster's disaster-recovery policy. During maintenance, readiness returns 503
+while liveness and startup probes remain healthy unless database recovery fails.
 
 Apply the application:
 
