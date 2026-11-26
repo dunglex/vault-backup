@@ -169,6 +169,10 @@ textarea {
   margin-bottom: 0;
 }
 
+.settings-submit-actions {
+  margin-top: 1.2rem;
+}
+
 .totp-setup-actions {
   justify-content: flex-start;
   margin-top: 1.2rem;

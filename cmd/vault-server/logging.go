@@ -98,6 +98,9 @@ func (w *serverLogWriter) rotateLocked() error {
 	if w.file != nil && w.fileDate == today {
 		return nil
 	}
+	if err := os.MkdirAll(filepath.Dir(w.basePath), 0700); err != nil {
+		return err
+	}
 	path := w.basePath + "-" + today + ".log"
 	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {

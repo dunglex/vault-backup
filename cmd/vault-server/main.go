@@ -142,7 +142,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	logWriter := newServerLogWriter(os.Stdout, filepath.Join(filepath.Dir(config.DBPath), "vault-server"))
+	if err := os.MkdirAll(filepath.Join("data", "logs"), 0700); err != nil {
+		log.Fatal(err)
+	}
+	logWriter := newServerLogWriter(os.Stdout, filepath.Join("data", "logs", "vault-server"))
 	log.SetOutput(logWriter)
 	defer func() {
 		if err := logWriter.DisableFileLogging(); err != nil {

@@ -80,6 +80,31 @@ func TestServerLogWriterDuplicatesToDailyFilesAndCleansOldLogs(t *testing.T) {
 	}
 }
 
+func TestServerLogWriterCreatesLogDirectory(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "logs")
+	writer := newServerLogWriter(&bytes.Buffer{}, filepath.Join(dir, "vault-server"))
+	writer.now = func() time.Time {
+		return time.Date(2026, time.January, 8, 12, 0, 0, 0, time.UTC)
+	}
+
+	if err := writer.EnableFileLogging(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := writer.DisableFileLogging(); err != nil {
+			t.Errorf("disable file logging: %v", err)
+		}
+	})
+
+	info, err := os.Stat(filepath.Join(dir, "vault-server-2026-01-08.log"))
+	if err != nil {
+		t.Fatalf("log file was not created: %v", err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Fatalf("log file permissions = %04o, want 0600", info.Mode().Perm())
+	}
+}
+
 func TestAccessLoggingUsesRequestPathAndOmitsQueryString(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/{mount}/data/{path...}", func(w http.ResponseWriter, r *http.Request) {
