@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -16,6 +17,33 @@ import (
 
 	"vault-backup/internal/operator"
 )
+
+func TestEnableOperatorsExtensionInitializesEncryptedDatabase(t *testing.T) {
+	dir := t.TempDir()
+	operatorDBPath := filepath.Join(dir, "vault-operators.db")
+	s := &server{
+		dbPassword:     "test-database-password",
+		operatorDBPath: operatorDBPath,
+	}
+
+	if err := s.enableOperatorsExtension(); err != nil {
+		t.Fatalf("enable operators extension: %v", err)
+	}
+	t.Cleanup(func() {
+		if s.operatorDB != nil {
+			_ = s.operatorDB.Close()
+		}
+	})
+	if s.operatorDB == nil || s.operatorHandler == nil {
+		t.Fatal("operators extension was not initialized")
+	}
+	if _, err := os.Stat(operatorDBPath); err != nil {
+		t.Fatalf("operator database not created: %v", err)
+	}
+	if _, err := os.Stat(operatorDBPath + ".key"); err != nil {
+		t.Fatalf("operator key not created: %v", err)
+	}
+}
 
 func newOperatorTestServer(t *testing.T) *server {
 	t.Helper()

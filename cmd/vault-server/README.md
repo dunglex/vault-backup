@@ -24,14 +24,17 @@ The startup script uses `tests/data/vault.db`, `tests/data/vault.db.key`, and ge
 
 An unconfigured server allows initial administrator setup for 20 minutes. The setup window is stored in the database, so restarting the server does not reset it. After expiry, the setup page returns `423 Locked` until an administrator resets the unconfigured server's database state.
 
-First-run setup has four phases: validate the setup key, optionally configure
-domains and the server certificate, create the Admin account, and continue to
-the login page. Skipping domain configuration keeps the current domain and
-certificate settings.
+First-run setup has five phases: validate the setup key, optionally configure
+domains and the server certificate, create the Admin account, select optional
+app extensions, and continue to the login page. Skipping domain configuration
+keeps the current domain and certificate settings. When Operators is selected,
+setup initializes its encrypted operator database at the default
+`*-operators.db` path beside the main database; an explicitly configured
+`--operator-db` or `VAULT_SERVER_OPERATOR_DB` database remains in use.
 
 The initial account has the **Admin** role. The default installation is
-administrator-only: operator routes and accounts are disabled unless an
-operator database is configured with `--operator-db` or
+administrator-only: operator routes and accounts are disabled unless Operators
+is enabled during setup or an operator database is configured with `--operator-db` or
 `VAULT_SERVER_OPERATOR_DB`. The configured database is encrypted and uses its
 own protected key file. Admins can then create, lock, unlock, reset two-factor
 authentication for, and remove Operator accounts from `/operators.html`.

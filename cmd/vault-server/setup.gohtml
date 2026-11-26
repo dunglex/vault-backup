@@ -43,11 +43,25 @@
       <label>Admin username<input name="username" autocomplete="username" required></label>
       <label>Password<input name="password" type="password" autocomplete="new-password" minlength="12" required></label>
       <label>Confirm password<input name="password_confirmation" type="password" autocomplete="new-password" minlength="12" required></label>
-      <button type="submit">Create admin account</button>
+      <button type="submit">Continue to extensions</button>
     </form>
   </section>
 
-  <section id="phase4" role="status" hidden>
+  <section id="phase4" hidden>
+    <h2>App extensions</h2>
+    <p>Choose optional features for this Vault Server.</p>
+    <form id="extensionsForm">
+      <label class="setting-option">
+        <input id="enableOperators" name="enable_operators" type="checkbox">
+        Enable Operators
+      </label>
+      <p class="muted">Create and manage operator accounts with restricted secret path access.</p>
+      <button type="submit">Enable selected extensions</button>
+      <button id="skipExtensions" type="button" class="button button-outline">Skip for now</button>
+    </form>
+  </section>
+
+  <section id="phase5" role="status" hidden>
     <h2>Setup complete</h2>
     <p>Redirecting to login…</p>
     <p><a id="loginLink" href="/login.html">Continue to login</a></p>
@@ -56,7 +70,8 @@
 <script>
 const setupKey = document.getElementById('setupKey');
 const errorBox = document.getElementById('setupError');
-const phases = [1, 2, 3, 4].map(number => document.getElementById(`phase${number}`));
+const phases = [1, 2, 3, 4, 5].map(number => document.getElementById(`phase${number}`));
+let pendingAdmin = null;
 
 function showPhase(number) {
   phases.forEach((phase, index) => {
@@ -112,16 +127,31 @@ document.getElementById('adminForm').addEventListener('submit', async event => {
     errorBox.textContent = 'Passwords do not match';
     return;
   }
-  values.setup_key = setupKey.value;
+  pendingAdmin = values;
+  showPhase(4);
+});
+
+async function completeSetup(enableOperators) {
+  if (!pendingAdmin) return;
+  pendingAdmin.setup_key = setupKey.value;
+  pendingAdmin.enable_operators = enableOperators;
   try {
-    const result = await postJSON('/v1/setup', values);
+    const result = await postJSON('/v1/setup', pendingAdmin);
     document.getElementById('loginLink').href = result.redirect_url;
-    showPhase(4);
+    showPhase(5);
     window.setTimeout(() => location.assign(result.redirect_url), 1500);
   } catch (error) {
     errorBox.textContent = error.message;
   }
+}
+
+document.getElementById('extensionsForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  errorBox.textContent = '';
+  await completeSetup(document.getElementById('enableOperators').checked);
 });
+
+document.getElementById('skipExtensions').addEventListener('click', () => completeSetup(false));
 </script>
 </body>
 </html>

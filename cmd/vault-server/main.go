@@ -50,25 +50,28 @@ const (
 )
 
 type server struct {
-	db              *sql.DB
-	secretsDB       *sql.DB
-	operatorDB      *sql.DB
-	operatorHandler *operator.Handler
-	auditStore      *auditStore
-	setupKey        string
-	setupKeyPath    string
-	setupDeadline   time.Time
-	adminName       string
-	aead            cipher.AEAD
-	secretsAEAD     cipher.AEAD
-	clientCA        *managedClientCA
-	serverCerts     *serverCertificateManager
-	acmeAvailable   bool
-	logWriter       *serverLogWriter
-	backupConfig    serverBackupConfig
-	backupCron      gocron.Scheduler
-	backupJob       gocron.Job
-	lastBackup      string
+	db                *sql.DB
+	secretsDB         *sql.DB
+	operatorDB        *sql.DB
+	operatorHandler   *operator.Handler
+	auditStore        *auditStore
+	dbPassword        string
+	operatorDBPath    string
+	operatorMasterKey []byte
+	setupKey          string
+	setupKeyPath      string
+	setupDeadline     time.Time
+	adminName         string
+	aead              cipher.AEAD
+	secretsAEAD       cipher.AEAD
+	clientCA          *managedClientCA
+	serverCerts       *serverCertificateManager
+	acmeAvailable     bool
+	logWriter         *serverLogWriter
+	backupConfig      serverBackupConfig
+	backupCron        gocron.Scheduler
+	backupJob         gocron.Job
+	lastBackup        string
 
 	mu                sync.Mutex
 	backupMu          sync.Mutex
@@ -114,6 +117,7 @@ type setupAdminRequest struct {
 	Username             string `json:"username"`
 	Password             string `json:"password"`
 	PasswordConfirmation string `json:"password_confirmation"`
+	EnableOperators      bool   `json:"enable_operators"`
 }
 
 type secretRequest struct {
@@ -346,6 +350,10 @@ func main() {
 			log.Fatal(err)
 		}
 	}
+	operatorDBPath := config.OperatorDBPath
+	if operatorDBPath == "" {
+		operatorDBPath = defaultOperatorDatabasePath(config.DBPath)
+	}
 
 	aead, err := newDatabaseAEAD(masterKey)
 	if err != nil {
@@ -358,19 +366,21 @@ func main() {
 
 	// Web server initialization.
 	s := &server{
-		db:            db,
-		secretsDB:     secretsDB,
-		operatorDB:    operatorDB,
-		auditStore:    auditStore,
-		setupKey:      setupKey,
-		setupKeyPath:  setupKeyPath,
-		setupDeadline: setupDeadline,
-		adminName:     adminName,
-		aead:          aead,
-		secretsAEAD:   secretsAEAD,
-		serverCerts:   serverCerts,
-		acmeAvailable: config.HTTPAddr != "",
-		logWriter:     logWriter,
+		db:             db,
+		secretsDB:      secretsDB,
+		operatorDB:     operatorDB,
+		auditStore:     auditStore,
+		dbPassword:     config.DBPassword,
+		operatorDBPath: operatorDBPath,
+		setupKey:       setupKey,
+		setupKeyPath:   setupKeyPath,
+		setupDeadline:  setupDeadline,
+		adminName:      adminName,
+		aead:           aead,
+		secretsAEAD:    secretsAEAD,
+		serverCerts:    serverCerts,
+		acmeAvailable:  config.HTTPAddr != "",
+		logWriter:      logWriter,
 		backupConfig: serverBackupConfig{
 			dataDir:        config.DataDir,
 			backupDir:      config.BackupDir,
@@ -390,6 +400,7 @@ func main() {
 	}
 	if s.operatorDB != nil {
 		s.operatorHandler = s.newOperatorHandler()
+		s.operatorMasterKey = operatorMasterKey
 	}
 	activeServer = s
 	// Load or create the managed client CA for mTLS.
@@ -431,9 +442,7 @@ func main() {
 	mux.HandleFunc("GET /settings", redirectSecurityPage)
 	mux.HandleFunc("GET /settings.html", redirectSecurityPage)
 	for _, path := range []string{"/operators", "/operators.html"} {
-		if s.operatorDB != nil {
-			mux.HandleFunc("GET "+path, s.serveOperators)
-		}
+		mux.HandleFunc("GET "+path, s.serveOperators)
 	}
 	for _, path := range []string{"/token", "/token.html"} {
 		mux.HandleFunc("GET "+path, func(w http.ResponseWriter, r *http.Request) {
@@ -479,16 +488,14 @@ func main() {
 	mux.HandleFunc("GET /v1/settings/blocked-login-ips", s.listBlockedLoginIPs)
 	mux.HandleFunc("GET /v1/settings/server-backups", s.listServerBackups)
 	mux.HandleFunc("DELETE /v1/settings/blocked-login-ips/{ip}", s.unblockLoginIP)
-	if s.operatorDB != nil {
-		mux.HandleFunc("GET /v1/operators", s.listOperators)
-		mux.HandleFunc("GET /v1/operators/details", s.listOperatorDetails)
-		mux.HandleFunc("POST /v1/operators", s.createOperator)
-		mux.HandleFunc("DELETE /v1/operators", s.deleteOperator)
-		mux.HandleFunc("POST /v1/operators/password", s.resetOperatorPassword)
-		mux.HandleFunc("PATCH /v1/operators/lock", s.setOperatorLock)
-		mux.HandleFunc("DELETE /v1/operators/totp", s.removeOperatorTOTP)
-		mux.HandleFunc("PUT /v1/operators/prefixes", s.updateOperatorSecretPrefixes)
-	}
+	mux.HandleFunc("GET /v1/operators", s.listOperators)
+	mux.HandleFunc("GET /v1/operators/details", s.listOperatorDetails)
+	mux.HandleFunc("POST /v1/operators", s.createOperator)
+	mux.HandleFunc("DELETE /v1/operators", s.deleteOperator)
+	mux.HandleFunc("POST /v1/operators/password", s.resetOperatorPassword)
+	mux.HandleFunc("PATCH /v1/operators/lock", s.setOperatorLock)
+	mux.HandleFunc("DELETE /v1/operators/totp", s.removeOperatorTOTP)
+	mux.HandleFunc("PUT /v1/operators/prefixes", s.updateOperatorSecretPrefixes)
 	mux.HandleFunc("PUT /v1/tokens/{id}/prefixes", s.updateAPITokenSecretPrefixes)
 	mux.HandleFunc("GET /v1/account/totp", s.getAccountTOTP)
 	mux.HandleFunc("POST /v1/account/totp/setup", s.setupAccountTOTP)
@@ -899,6 +906,13 @@ func (s *server) setup(w http.ResponseWriter, r *http.Request) {
 		}
 		if exists {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "an account with that username already exists"})
+			return
+		}
+	}
+	if req.EnableOperators {
+		if err := s.enableOperatorsExtension(); err != nil {
+			log.Printf("ERROR: could not enable operators extension: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not enable operators extension"})
 			return
 		}
 	}

@@ -2,10 +2,42 @@ package main
 
 import (
 	"net/http"
+	"os"
 	"time"
 
 	"vault-backup/internal/operator"
 )
+
+func (s *server) enableOperatorsExtension() error {
+	if s.operatorDB != nil {
+		return nil
+	}
+	if s.operatorDBPath == "" {
+		return os.ErrInvalid
+	}
+	masterKey, err := loadOrCreateKey(s.operatorDBPath+".key", s.dbPassword)
+	if err != nil {
+		return err
+	}
+	db, _, err := openDatabaseWithOptions(s.operatorDBPath, masterKey, false)
+	if err != nil {
+		return err
+	}
+	if err := operator.Initialize(db); err != nil {
+		_ = db.Close()
+		return err
+	}
+	if err := os.Chmod(s.operatorDBPath, 0600); err != nil {
+		_ = db.Close()
+		return err
+	}
+	s.operatorDB = db
+	s.operatorMasterKey = masterKey
+	s.operatorHandler = s.newOperatorHandler()
+	s.backupConfig.operatorDBPath = s.operatorDBPath
+	s.backupConfig.operatorKey = masterKey
+	return nil
+}
 
 func (s *server) newOperatorHandler() *operator.Handler {
 	return operator.NewHandler(s.operatorDB, operator.Dependencies{

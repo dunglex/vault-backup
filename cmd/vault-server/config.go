@@ -167,6 +167,12 @@ func defaultSecretsDatabasePath(appDBPath string) string {
 	return filepath.Join(filepath.Dir(appDBPath), name+"-secrets"+extension)
 }
 
+func defaultOperatorDatabasePath(appDBPath string) string {
+	extension := filepath.Ext(appDBPath)
+	name := strings.TrimSuffix(filepath.Base(appDBPath), extension)
+	return filepath.Join(filepath.Dir(appDBPath), name+"-operators"+extension)
+}
+
 func absoluteCleanPath(path string) (string, error) {
 	resolved, err := filepath.Abs(path)
 	if err != nil {
