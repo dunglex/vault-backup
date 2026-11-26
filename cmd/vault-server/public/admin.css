@@ -487,6 +487,50 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+.audit-filter-disclosure {
+  position: relative;
+}
+
+.audit-filter-disclosure > summary {
+  align-items: center;
+  background: var(--primary);
+  border: 0.1rem solid var(--primary);
+  border-radius: 0.4rem;
+  color: #fff;
+  cursor: pointer;
+  display: flex;
+  font-weight: 600;
+  height: 3.8rem;
+  justify-content: space-between;
+  list-style: none;
+  margin-bottom: 1.2rem;
+  padding: 0 1.2rem;
+  width: 14rem;
+}
+
+.audit-filter-disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+
+.audit-filter-disclosure > summary::after {
+  content: "+";
+  font-size: 2rem;
+  font-weight: 400;
+}
+
+.audit-filter-disclosure[open] > summary::after {
+  content: "-";
+}
+
+.audit-filter-disclosure > summary:focus-visible {
+  outline: 0.2rem solid var(--primary);
+  outline-offset: 0.2rem;
+}
+
+.audit-filter-disclosure:not([open]) > summary {
+  margin-bottom: 0;
+}
+
 .filters {
   align-items: end;
   background: var(--surface-muted);
@@ -506,12 +550,14 @@ textarea {
 
 .filters input,
 .filters select {
+  box-sizing: border-box;
   margin: 0.4rem 0 0;
   width: 100%;
 }
 
 .filters button {
   align-self: end;
+  box-sizing: border-box;
   margin-bottom: 0;
   width: 100%;
 }
@@ -772,6 +818,25 @@ pre {
 
   .filters {
     grid-template-columns: 1fr;
+  }
+
+  .audit-filter-disclosure .filters {
+    background: var(--surface);
+    box-shadow: var(--shadow);
+    display: none;
+    grid-template-columns: 1fr;
+    left: 0;
+    margin: 0;
+    max-height: calc(100vh - 12rem);
+    overflow-y: auto;
+    position: absolute;
+    right: 0;
+    top: calc(100% + 0.4rem);
+    z-index: 20;
+  }
+
+  .audit-filter-disclosure[open] .filters {
+    display: grid;
   }
 
   .secret-path-combine {

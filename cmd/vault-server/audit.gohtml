@@ -31,17 +31,20 @@
   </header>
   <div id="error" class="notice" role="alert"></div>
   <section class="panel">
-    <div class="filters">
-      <label>Year<select id="year"></select></label>
-      <label>Search<input id="q" placeholder="Actor, resource, or detail"></label>
-      <label>Actor<input id="actor" placeholder="Exact actor"></label>
-      <label>Action<select id="action"><option value="">All</option><option>login</option><option>login_blocked</option><option>block_login_ip</option><option>unblock_login_ip</option><option>start_mfa_setup</option><option>enable_mfa</option><option>disable_mfa</option><option>regenerate_mfa_recovery_codes</option><option>list</option><option>read</option><option>create</option><option>update</option><option>delete</option><option>create_token</option><option>update_token_scopes</option><option>revoke_token</option><option>update_operator_scopes</option><option>issue_certificate</option><option>rotate_certificate</option><option>update_settings</option><option>server_backup</option></select></label>
-      <label>Outcome<select id="outcome"><option value="">All</option><option>started</option><option>success</option><option>failure</option></select></label>
-      <label>Source<select id="source"><option value="">All</option><option>web</option><option>api</option></select></label>
-      <label>From<input id="from" type="date"></label>
-      <label>To<input id="to" type="date"></label>
-      <button id="filter">Filter</button>
-    </div>
+    <details id="auditFilters" class="audit-filter-disclosure" open>
+      <summary>Filters</summary>
+      <div class="filters">
+        <label>Year<select id="year"></select></label>
+        <label>Search<input id="q" placeholder="Actor, resource, or detail"></label>
+        <label>Actor<input id="actor" placeholder="Exact actor"></label>
+        <label>Action<select id="action"><option value="">All</option><option>login</option><option>login_blocked</option><option>block_login_ip</option><option>unblock_login_ip</option><option>start_mfa_setup</option><option>enable_mfa</option><option>disable_mfa</option><option>regenerate_mfa_recovery_codes</option><option>list</option><option>read</option><option>create</option><option>update</option><option>delete</option><option>create_token</option><option>update_token_scopes</option><option>revoke_token</option><option>update_operator_scopes</option><option>issue_certificate</option><option>rotate_certificate</option><option>update_settings</option><option>server_backup</option></select></label>
+        <label>Outcome<select id="outcome"><option value="">All</option><option>started</option><option>success</option><option>failure</option></select></label>
+        <label>Source<select id="source"><option value="">All</option><option>web</option><option>api</option></select></label>
+        <label>From<input id="from" type="date"></label>
+        <label>To<input id="to" type="date"></label>
+        <button id="filter">Filter</button>
+      </div>
+    </details>
     <div class="table-wrap">
       <table>
         <thead><tr><th>Time (UTC)</th><th>Actor</th><th>Action</th><th>Outcome</th><th>Source</th><th>Client IP</th><th>Resource / detail</th></tr></thead>
@@ -56,6 +59,11 @@ const errorBox = document.getElementById('error');
 let offset = 0;
 const limit = 100;
 const yearSelect = document.getElementById('year');
+const auditFilters = document.getElementById('auditFilters');
+const auditFilterSummary = auditFilters.querySelector('summary');
+const mobileAuditFilters = window.matchMedia('(max-width: 52rem)');
+
+if (mobileAuditFilters.matches) auditFilters.open = false;
 
 async function api(url, options = {}) {
   options.credentials = 'same-origin';
@@ -135,12 +143,27 @@ async function loadYears() {
   }
 }
 
-document.getElementById('filter').onclick = () => { offset = 0; refresh(); };
+document.getElementById('filter').onclick = () => {
+  offset = 0;
+  refresh();
+  if (mobileAuditFilters.matches) auditFilters.open = false;
+};
 document.getElementById('previous').onclick = () => { offset = Math.max(0, offset - limit); refresh(); };
 document.getElementById('next').onclick = () => { offset += limit; refresh(); };
 yearSelect.onchange = () => { offset = 0; updateDateBounds(); refresh(); };
 document.addEventListener('keydown', event => {
-  if (event.key === 'Enter') { offset = 0; refresh(); }
+  if (event.key === 'Escape' && mobileAuditFilters.matches && auditFilters.open) {
+    auditFilters.open = false;
+    auditFilterSummary.focus();
+  } else if (event.key === 'Enter' && event.target !== auditFilterSummary) {
+    offset = 0;
+    refresh();
+  }
+});
+document.addEventListener('click', event => {
+  if (mobileAuditFilters.matches && auditFilters.open && !auditFilters.contains(event.target)) {
+    auditFilters.open = false;
+  }
 });
 loadYears();
 </script>
