@@ -56,15 +56,26 @@
     <p id="mfaEnforcedStatus" class="muted" hidden>Your administrator requires MFA. Two-factor authentication cannot be disabled while enforcement is on.</p>
     <p id="recoveryCodeCount" class="muted"></p>
     <button id="openRecoveryCodesDialog" class="button button-outline" type="button">Show backup recovery codes</button>
+    <button id="openDisableTOTPDialog" class="button button-outline" type="button">Disable two-factor authentication</button>
+  </section>
+  <dialog id="disableTOTPDialog" class="admin-dialog" aria-labelledby="disableTOTPTitle">
+    <div class="admin-dialog-heading">
+      <h2 id="disableTOTPTitle">Disable two-factor authentication</h2>
+      <button id="closeDisableTOTPDialog" class="button button-outline" type="button" aria-label="Close dialog">Close</button>
+    </div>
+    <p class="muted">Confirm your password and authenticator or recovery code to disable two-factor sign-in.</p>
+    <div id="disableDialogError" class="notice" role="alert"></div>
     <form id="disableForm">
-      <h3>Disable two-factor authentication</h3>
       <label for="disablePassword">Current password</label>
       <input id="disablePassword" type="password" autocomplete="current-password" required>
       <label for="disableCode">Authenticator or recovery code</label>
       <input id="disableCode" autocomplete="one-time-code" required>
-      <button id="disableTOTP" class="button button-outline" type="submit">Disable two-factor authentication</button>
+      <div class="row-actions admin-dialog-actions">
+        <button id="cancelDisableTOTP" class="button button-outline" type="button">Cancel</button>
+        <button id="disableTOTP" type="submit">Disable 2FA</button>
+      </div>
     </form>
-  </section>
+  </dialog>
   <dialog id="recoveryCodesDialog" class="admin-dialog" aria-labelledby="recoveryCodesTitle">
     <div class="admin-dialog-heading">
       <h2 id="recoveryCodesTitle">Backup recovery codes</h2>
@@ -129,6 +140,8 @@ const setupDialogError = document.getElementById('setupDialogError');
 const passwordDialog = document.getElementById('passwordDialog');
 const passwordDialogError = document.getElementById('passwordDialogError');
 const recoveryCodesDialog = document.getElementById('recoveryCodesDialog');
+const disableTOTPDialog = document.getElementById('disableTOTPDialog');
+const disableDialogError = document.getElementById('disableDialogError');
 let mfaSetupRequired = new URLSearchParams(location.search).get('mfa') === 'required';
 let passwordChangeRequired = new URLSearchParams(location.search).get('password') === 'required';
 let pendingTOTPProvisioningURI = '';
@@ -166,7 +179,7 @@ async function loadTOTP() {
     document.getElementById('totpSetupPanel').hidden = state.enabled;
     document.getElementById('totpEnabledPanel').hidden = !state.enabled;
     document.getElementById('mfaEnforcedStatus').hidden = !state.enforced;
-    document.getElementById('disableForm').hidden = state.enforced;
+    document.getElementById('openDisableTOTPDialog').hidden = state.enforced;
     document.getElementById('mfaEnforcementNotice').hidden = !mfaSetupRequired || state.enabled;
     if (mfaSetupRequired) {
       document.getElementById('totpDescription').textContent = 'Your administrator requires MFA. Sign-in requires your password and a current authenticator code or an unused recovery code.';
@@ -261,8 +274,7 @@ document.getElementById('enableForm').addEventListener('submit', async event => 
 });
 document.getElementById('disableForm').addEventListener('submit', async event => {
   event.preventDefault();
-  if (!window.confirm('Disable two-factor authentication for this account?')) return;
-  errorBox.textContent = '';
+  disableDialogError.textContent = '';
   const button = document.getElementById('disableTOTP');
   button.disabled = true;
   try {
@@ -275,12 +287,24 @@ document.getElementById('disableForm').addEventListener('submit', async event =>
       })
     });
     event.target.reset();
+    disableTOTPDialog.close();
     await loadTOTP();
   } catch (error) {
-    errorBox.textContent = error.message;
+    disableDialogError.textContent = error.message;
   } finally {
     button.disabled = false;
   }
+});
+document.getElementById('openDisableTOTPDialog').addEventListener('click', () => {
+  disableDialogError.textContent = '';
+  disableTOTPDialog.showModal();
+  document.getElementById('disablePassword').focus();
+});
+document.getElementById('closeDisableTOTPDialog').addEventListener('click', () => disableTOTPDialog.close());
+document.getElementById('cancelDisableTOTP').addEventListener('click', () => disableTOTPDialog.close());
+disableTOTPDialog.addEventListener('close', () => {
+  document.getElementById('disableForm').reset();
+  disableDialogError.textContent = '';
 });
 document.getElementById('dismissRecoveryCodes').addEventListener('click', () => {
   recoveryCodesDialog.close();

@@ -109,10 +109,11 @@ def main() -> None:
         require(settings["server_backup_last_success"], "backup completion time was not saved")
         _, audit = server.client.json("GET", f"{server.https_url}/v1/audit")
         require(
-            any(event["action"] == "server_backup" and event["outcome"] == "success" for event in audit["events"]),
-            "successful backup was not audited",
+            any(event["action"] == "server_backup" and event["outcome"] == "started" for event in audit["events"])
+            and any(event["action"] == "server_backup" and event["outcome"] == "success" for event in audit["events"]),
+            "backup start and success were not audited",
         )
-        print("PASS: save backup completion time and audit success")
+        print("PASS: save backup completion time and audit start/success")
         server.stop()
 
         restore_dir = server.path / "restored-data"

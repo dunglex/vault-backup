@@ -228,6 +228,7 @@ func (s *server) performScheduledBackup() {
 		return
 	}
 	log.Printf("Starting scheduled server backup maintenance")
+	s.recordServerBackupAudit("started", "maintenance_started")
 	s.beginMaintenance()
 	reopened := false
 	defer func() {

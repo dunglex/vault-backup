@@ -49,9 +49,12 @@ def main() -> None:
         require(
             b"Two-factor authentication" in account_page
             and b'<dialog id="totpSetupDialog"' in account_page
+            and b'<dialog id="disableTOTPDialog"' in account_page
+            and b'id="openDisableTOTPDialog"' in account_page
+            and b"window.confirm('Disable two-factor authentication" not in account_page
             and b'id="setupPassword"' not in account_page
             and b'id="totpQRCode"' in account_page,
-            "optional TOTP setup dialog",
+            "TOTP setup and disable dialogs",
         )
         require(b'id="logout"' in account_page, "keep Logout on the account page")
         status, qr_library = server.client.request("GET", f"{server.https_url}/qrcode.js")
