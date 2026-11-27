@@ -21,7 +21,7 @@ type Dependencies struct {
 	Metadata         func(time.Time) (Metadata, error)
 	CloseDatabases   func() error
 	ReopenDatabases  func() error
-	BeginMaintenance func()
+	BeginMaintenance func(*http.Request)
 	EndMaintenance   func()
 	FailMaintenance  func()
 	SaveSuccess      func(time.Time) error
@@ -391,7 +391,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	defer h.runMu.Unlock()
 	h.audit(r, "started", "")
 	if h.deps.BeginMaintenance != nil {
-		h.deps.BeginMaintenance()
+		h.deps.BeginMaintenance(r)
 		defer h.deps.EndMaintenance()
 	}
 	createdAt := time.Now().UTC()
@@ -477,7 +477,7 @@ func (h *Handler) Restore(w http.ResponseWriter, r *http.Request) {
 	}
 	defer h.runMu.Unlock()
 	if h.deps.BeginMaintenance != nil {
-		h.deps.BeginMaintenance()
+		h.deps.BeginMaintenance(r)
 		defer h.deps.EndMaintenance()
 	}
 	if h.deps.CloseDatabases != nil {
@@ -601,7 +601,7 @@ func (h *Handler) performScheduled() {
 	defer h.runMu.Unlock()
 	h.audit(nil, "started", "")
 	if h.deps.BeginMaintenance != nil {
-		h.deps.BeginMaintenance()
+		h.deps.BeginMaintenance(nil)
 		defer h.deps.EndMaintenance()
 	}
 	createdAt := time.Now().UTC()

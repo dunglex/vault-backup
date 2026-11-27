@@ -101,7 +101,7 @@ func loadServerConfig(args []string) (serverConfig, error) {
 		return serverConfig{}, fmt.Errorf("resolve data directory: %w", err)
 	}
 	if config.BackupDir == "" {
-		config.BackupDir = filepath.Join(config.DataDir, "backups")
+		config.BackupDir = filepath.Join(filepath.Dir(config.DataDir), "backup")
 	} else if config.BackupDir, err = absoluteCleanPath(config.BackupDir); err != nil {
 		return serverConfig{}, fmt.Errorf("resolve backup directory: %w", err)
 	}

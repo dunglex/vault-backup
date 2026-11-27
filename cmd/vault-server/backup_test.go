@@ -264,7 +264,7 @@ func TestMaintenanceGateDrainsRequestsAndServesMaintenancePage(t *testing.T) {
 
 	maintenanceDone := make(chan struct{})
 	go func() {
-		s.beginMaintenance()
+		s.beginMaintenance(nil)
 		close(maintenanceDone)
 	}()
 	for {
@@ -311,6 +311,30 @@ func TestMaintenanceGateDrainsRequestsAndServesMaintenancePage(t *testing.T) {
 		t.Fatalf("failed maintenance liveness status = %d, want 503", live.Code)
 	}
 	s.endMaintenance()
+}
+
+func TestBeginMaintenanceExcludesInitiatingRequest(t *testing.T) {
+	s := &server{requestsIdle: closedSignal()}
+	handler := s.maintenanceGate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.beginMaintenance(r)
+		s.endMaintenance()
+		w.WriteHeader(http.StatusOK)
+	}))
+	response := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/backup", nil))
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("maintenance waited for its initiating request to finish")
+	}
+	if response.Code != http.StatusOK {
+		t.Fatalf("initiating request status = %d, want %d", response.Code, http.StatusOK)
+	}
 }
 
 func TestValidateServerBackupCronRequiresSixFields(t *testing.T) {

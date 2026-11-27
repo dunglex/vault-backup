@@ -122,6 +122,18 @@ func TestLoadServerConfigReportsHelpRequest(t *testing.T) {
 	}
 }
 
+func TestLoadServerConfigDefaultsBackupBesideData(t *testing.T) {
+	unsetServerConfigEnvironment(t)
+	t.Setenv("VAULT_SERVER_DB_PASSWORD", "valid-password")
+	config, err := loadServerConfig([]string{"--env-file=", "--data-dir", "/data"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.BackupDir != filepath.Join(string(filepath.Separator), "backup") {
+		t.Fatalf("default backup directory = %q, want /backup", config.BackupDir)
+	}
+}
+
 func unsetServerConfigEnvironment(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{

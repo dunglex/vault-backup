@@ -23,12 +23,12 @@ The deployment uses two persistent volumes:
 
 - `vault-server-data` stores the live database, key, yearly audit databases,
   separate encrypted secrets database, its key, and server state.
-- `vault-server-backups` is mounted at `/backups` and can store backup archives.
+- `vault-server-backups` is mounted at `/backup` and can store backup archives.
 
 An administrator can enable scheduled backups on the Security page and set a
 six-field cron schedule in UTC. During each run, the server shows a maintenance
 page, drains requests, closes its database connections, archives `/data`, and
-stores the protected archive in `/backups`. Archives older than 30 days are
+stores the protected archive in `/backup`. Archives older than 30 days are
 removed after a successful run. Keep the backup PVC separate from the data PVC.
 
 The maintenance window pauses requests until database handles are reopened. The

@@ -73,7 +73,7 @@ def main() -> None:
         require(settings["server_backup_cron"] == "*/2 * * * * *", "cron schedule was not saved")
         print("PASS: save six-field backup schedule")
 
-        backup_dir = server.path / "backups"
+        backup_dir = server.path / "backup"
         for _ in range(80):
             archives = sorted(backup_dir.glob("vault-server-backup-*.tar.gz")) if backup_dir.exists() else []
             if archives:
@@ -137,6 +137,10 @@ def main() -> None:
             "backup start and success were not audited",
         )
         print("PASS: save backup completion time and audit start/success")
+
+        status, backup = server.client.json("POST", f"{server.https_url}/v1/backup")
+        assert_status(201, status, "create a manual server backup")
+        require(backup["name"], "manual backup response omitted archive name")
         server.stop()
 
 

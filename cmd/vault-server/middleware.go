@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"strings"
@@ -11,6 +12,12 @@ const (
 	requestTimeout     = 30 * time.Second
 	serverWriteTimeout = requestTimeout + 5*time.Second
 )
+
+type activeRequestContextKey struct{}
+
+type activeRequest struct {
+	counted bool
+}
 
 func (s *server) middleware(handler http.Handler) http.Handler {
 	handler = http.MaxBytesHandler(handler, 1<<20)        // Limit incoming request bodies to 1 MiB.
@@ -63,18 +70,26 @@ func (s *server) maintenanceGate(next http.Handler) http.Handler {
 			s.requestsIdle = make(chan struct{})
 		}
 		s.activeRequests++
+		requestState := &activeRequest{counted: true}
 		s.maintenanceMu.Unlock()
 
-		defer func() {
-			s.maintenanceMu.Lock()
-			s.activeRequests--
-			if s.activeRequests == 0 {
-				close(s.requestsIdle)
-			}
-			s.maintenanceMu.Unlock()
-		}()
-		next.ServeHTTP(w, r)
+		defer s.finishActiveRequest(requestState)
+		ctx := context.WithValue(r.Context(), activeRequestContextKey{}, requestState)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+func (s *server) finishActiveRequest(requestState *activeRequest) {
+	s.maintenanceMu.Lock()
+	defer s.maintenanceMu.Unlock()
+	if !requestState.counted {
+		return
+	}
+	requestState.counted = false
+	s.activeRequests--
+	if s.activeRequests == 0 {
+		close(s.requestsIdle)
+	}
 }
 
 func closedSignal() chan struct{} {
@@ -83,10 +98,20 @@ func closedSignal() chan struct{} {
 	return idle
 }
 
-func (s *server) beginMaintenance() {
+func (s *server) beginMaintenance(r *http.Request) {
 	s.maintenanceMu.Lock()
 	s.maintenance = true
 	s.maintenanceFailed = false
+	if r != nil {
+		requestState, ok := r.Context().Value(activeRequestContextKey{}).(*activeRequest)
+		if ok && requestState.counted {
+			requestState.counted = false
+			s.activeRequests--
+			if s.activeRequests == 0 {
+				close(s.requestsIdle)
+			}
+		}
+	}
 	idle := s.requestsIdle
 	s.maintenanceMu.Unlock()
 	<-idle

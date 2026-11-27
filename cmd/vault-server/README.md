@@ -122,7 +122,7 @@ VAULT_SERVER_AUDIT_DB=/var/lib/vault/audit.db
 # This path can also be named team.db if it will hold future team data.
 # VAULT_SERVER_OPERATOR_DB=/var/lib/vault/operator.db
 VAULT_SERVER_DATA_DIR=/var/lib/vault
-VAULT_SERVER_BACKUP_DIR=/var/lib/vault/backups
+VAULT_SERVER_BACKUP_DIR=/backup
 VAULT_SERVER_TLS_CERT=/etc/vault/tls/server.crt
 VAULT_SERVER_TLS_KEY=/etc/vault/tls/server.key
 VAULT_SERVER_TRUSTED_PROXIES=10.0.0.0/8
@@ -200,7 +200,9 @@ configured data directory, then reopens the databases. Archives are gzip tar
 files with SHA-256 manifests, mode `0600`, and are stored in the configured
 backup directory. Files older than 30 days are removed after a successful
 backup. Data and backup directories can be set with `--data-dir` /
-`VAULT_SERVER_DATA_DIR` and `--backup-dir` / `VAULT_SERVER_BACKUP_DIR`.
+`VAULT_SERVER_DATA_DIR` and `--backup-dir` / `VAULT_SERVER_BACKUP_DIR`. If the
+backup directory is omitted, it defaults to a sibling of the data directory
+(for example, `/backup` when the data directory is `/data`).
 Files stored outside the data directory must be backed up separately.
 
 The restore refuses to overwrite a non-empty destination unless `--replace` is specified. It verifies SHA-256 checksums before installing files with restricted permissions.

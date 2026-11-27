@@ -43,7 +43,7 @@ spec:
             - name: VAULT_SERVER_DATA_DIR
               value: /data
             - name: VAULT_SERVER_BACKUP_DIR
-              value: /backups
+              value: /backup
           ports:
             - name: https
               containerPort: 8200
@@ -93,7 +93,7 @@ spec:
             - name: data
               mountPath: /data
             - name: backups
-              mountPath: /backups
+              mountPath: /backup
             - name: tls
               mountPath: /var/run/vault/tls
               readOnly: true
