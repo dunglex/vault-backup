@@ -104,7 +104,30 @@ def main() -> None:
         else:
             raise RuntimeError("server did not resume after scheduled backup")
         print("PASS: server resumes after maintenance backup")
-        status, settings = server.client.json("GET", f"{server.https_url}/v1/backup/settings")
+
+        for _ in range(80):
+            status, _ = server.client.json(
+                "PUT",
+                f"{server.https_url}/v1/backup/settings",
+                data={"automatic_server_backup": False},
+            )
+            if status == 200:
+                break
+            if status != 503:
+                assert_status(200, status, "disable rapid scheduled backups")
+            time.sleep(0.25)
+        else:
+            raise RuntimeError("could not disable rapid scheduled backups")
+
+        for _ in range(80):
+            status, settings = server.client.json("GET", f"{server.https_url}/v1/backup/settings")
+            if status == 200:
+                break
+            if status != 503:
+                assert_status(200, status, "read scheduled backup completion time")
+            time.sleep(0.25)
+        else:
+            raise RuntimeError("could not read backup settings after maintenance")
         assert_status(200, status, "read scheduled backup completion time")
         require(settings["server_backup_last_success"], "backup completion time was not saved")
         _, audit = server.client.json("GET", f"{server.https_url}/v1/audit")

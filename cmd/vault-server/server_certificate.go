@@ -23,8 +23,9 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/net/idna"
 	internalacme "vault-backup/internal/acme"
+
+	"golang.org/x/net/idna"
 )
 
 const (
@@ -577,12 +578,4 @@ func markGeneratedServerCertificate(db *sql.DB, certPath, keyPath string) error 
 		return fmt.Errorf("commit generated TLS certificate settings: %w", err)
 	}
 	return nil
-}
-
-func domainSet(domains []string) map[string]struct{} {
-	set := make(map[string]struct{}, len(domains))
-	for _, domain := range domains {
-		set[domain] = struct{}{}
-	}
-	return set
 }

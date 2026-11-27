@@ -13,8 +13,6 @@ import (
 	"vault-backup/internal/operator"
 )
 
-const maxSecretPrefixes = operator.MaxSecretPrefixes
-
 type secretPrefixAccess struct {
 	unrestricted bool
 	prefixes     []string
@@ -43,10 +41,6 @@ func (access secretPrefixAccess) operatorAccess() operator.SecretAccess {
 
 func (access secretPrefixAccess) allows(path string) bool {
 	return access.operatorAccess().Allows(path)
-}
-
-func (access secretPrefixAccess) intersects(path string) bool {
-	return access.operatorAccess().Intersects(path)
 }
 
 func (access secretPrefixAccess) contains(candidate string) bool {

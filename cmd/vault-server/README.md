@@ -255,6 +255,7 @@ PUT    /v1/backup/settings            (backup extension required)
 GET    /v1/backup                     (backup extension required)
 POST   /v1/backup                     (backup extension required)
 POST   /v1/backup/restore             (backup extension required)
+POST   /v1/backup/s3/test             (backup extension required)
 GET    /v1/operators                 (operator database required)
 GET    /v1/operators/details         (operator database required)
 POST   /v1/operators                 (operator database required)
@@ -275,6 +276,12 @@ Server backup archives include a `vault-server/metadata.json` entry with their
 creation time and operator, secret, and API token counts. The admin-only
 `GET /v1/backup` endpoint lists these summaries; archives
 created before metadata was added are listed with counts shown as unavailable.
+When the Backup extension is enabled, `/backup.html` can configure optional
+S3 copies. S3 settings include endpoint, region, bucket, key prefix, access
+key ID, secret access key, optional session token, and path-style addressing.
+S3 copy is disabled by default. After a local archive is created successfully,
+the server uploads it to the configured bucket and object key prefix.
+`POST /v1/backup/s3/test` verifies the saved or submitted S3 configuration.
 
 Create a token:
 

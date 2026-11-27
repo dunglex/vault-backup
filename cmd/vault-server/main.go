@@ -72,6 +72,7 @@ type server struct {
 	backupConfig      serverBackupConfig
 	backupCron        gocron.Scheduler
 	backupJob         gocron.Job
+	backupHandler     *backup.Handler
 	lastBackup        string
 	backupEnabled     bool
 
@@ -410,6 +411,7 @@ func main() {
 		s.operatorHandler = s.newOperatorHandler()
 		s.operatorMasterKey = operatorMasterKey
 	}
+	s.backupHandler = s.newServerBackupHandler()
 	activeServer = s
 	// Load or create the managed client CA for mTLS.
 	if err := s.loadOrCreateManagedClientCA(); err != nil {
@@ -503,6 +505,7 @@ func main() {
 	mux.HandleFunc("POST /v1/backup/restore", s.restoreServerBackup)
 	mux.HandleFunc("GET /v1/backup/settings", s.getBackupSettings)
 	mux.HandleFunc("PUT /v1/backup/settings", s.updateBackupSettings)
+	mux.HandleFunc("POST /v1/backup/s3/test", s.testS3Connection)
 	mux.HandleFunc("GET /v1/operators", s.listOperators)
 	mux.HandleFunc("GET /v1/operators/details", s.listOperatorDetails)
 	mux.HandleFunc("POST /v1/operators", s.createOperator)
@@ -1427,11 +1430,6 @@ func (s *server) authorizedAPI(r *http.Request) bool {
 func (s *server) authorizedToken(token string) bool {
 	_, ok := s.sessionForToken(token)
 	return ok
-}
-
-func (s *server) authorizedAPIToken(token string) bool {
-	var tokenID int64
-	return s.lookupActiveAPIToken(token, &tokenID) == nil
 }
 
 func (s *server) logout(w http.ResponseWriter, r *http.Request) {

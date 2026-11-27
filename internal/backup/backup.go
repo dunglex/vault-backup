@@ -18,12 +18,21 @@ import (
 )
 
 const (
-	EnabledSetting     = "backup_extension_enabled"
-	AutomaticSetting   = "automatic_server_backup"
-	CronSetting        = "server_backup_cron"
-	LastSuccessSetting = "server_backup_last_success"
-	DefaultCron        = "0 0 2 * * *"
-	Retention          = 30 * 24 * time.Hour
+	EnabledSetting        = "backup_extension_enabled"
+	AutomaticSetting      = "automatic_server_backup"
+	CronSetting           = "server_backup_cron"
+	LastSuccessSetting    = "server_backup_last_success"
+	S3EnabledSetting      = "s3_backup_enabled"
+	S3EndpointSetting     = "s3_backup_endpoint"
+	S3RegionSetting       = "s3_backup_region"
+	S3BucketSetting       = "s3_backup_bucket"
+	S3PrefixSetting       = "s3_backup_prefix"
+	S3AccessKeySetting    = "s3_backup_access_key_id"
+	S3SecretKeySetting    = "s3_backup_secret_access_key"
+	S3SessionTokenSetting = "s3_backup_session_token"
+	S3PathStyleSetting    = "s3_backup_path_style"
+	DefaultCron           = "0 0 2 * * *"
+	Retention             = 30 * 24 * time.Hour
 )
 
 type Config struct {
@@ -100,6 +109,36 @@ func ReadSettings(db *sql.DB) (bool, string, string, error) {
 		return false, "", "", fmt.Errorf("read last server backup time: %w", err)
 	}
 	return enabled, cronExpression, lastSuccess, nil
+}
+
+func ReadS3Config(db *sql.DB) (S3Config, error) {
+	config := S3Config{}
+	values := map[string]*string{
+		S3EndpointSetting:     &config.Endpoint,
+		S3RegionSetting:       &config.Region,
+		S3BucketSetting:       &config.Bucket,
+		S3PrefixSetting:       &config.Prefix,
+		S3AccessKeySetting:    &config.AccessKeyID,
+		S3SecretKeySetting:    &config.SecretAccessKey,
+		S3SessionTokenSetting: &config.SessionToken,
+		S3PathStyleSetting:    new(string),
+		S3EnabledSetting:      new(string),
+	}
+	for key, destination := range values {
+		var value string
+		err := db.QueryRow("SELECT value FROM server_settings WHERE key = ?", key).Scan(&value)
+		if err != nil && err != sql.ErrNoRows {
+			return S3Config{}, fmt.Errorf("read %s: %w", key, err)
+		}
+		if err == nil {
+			*destination = value
+		}
+	}
+	config.Enabled = values[S3EnabledSetting] != nil && *values[S3EnabledSetting] == "true"
+	if pathStyleValue := *values[S3PathStyleSetting]; pathStyleValue == "true" {
+		config.ForcePathStyle = true
+	}
+	return config, nil
 }
 
 func ValidateCron(expression string) error {

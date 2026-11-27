@@ -39,6 +39,39 @@
     </form>
   </section>
   <section class="panel">
+    <h2 class="section-label">S3 copy</h2>
+    <form id="s3SettingsForm">
+      <label class="setting-option">
+        <input id="s3Enabled" type="checkbox">
+        Copy each created backup to S3
+      </label>
+      <p class="muted">Disabled by default. Backups are first created locally, then uploaded after the server databases reopen.</p>
+      <label for="s3Endpoint">S3 endpoint (optional)</label>
+      <input id="s3Endpoint" type="url" maxlength="512" placeholder="https://s3.amazonaws.com">
+      <label for="s3Region">Region</label>
+      <input id="s3Region" maxlength="128" placeholder="us-east-1">
+      <label for="s3Bucket">Bucket</label>
+      <input id="s3Bucket" maxlength="255" required>
+      <label for="s3Prefix">Object key prefix (optional)</label>
+      <input id="s3Prefix" maxlength="512" placeholder="vault-server/backups">
+      <label for="s3AccessKeyId">Access key ID</label>
+      <input id="s3AccessKeyId" maxlength="512" autocomplete="off">
+      <label for="s3SecretAccessKey">Secret access key</label>
+      <input id="s3SecretAccessKey" type="password" maxlength="512" autocomplete="new-password" placeholder="Leave blank to keep the saved key">
+      <label for="s3SessionToken">Session token (optional)</label>
+      <input id="s3SessionToken" type="password" maxlength="4096" autocomplete="off">
+      <label class="setting-option">
+        <input id="s3PathStyle" type="checkbox">
+        Use path-style bucket URLs
+      </label>
+      <div class="row-actions">
+        <button type="submit">Save S3 settings</button>
+        <button id="testS3Connection" class="button button-outline" type="button">Test S3 connection</button>
+        <span id="s3Saved" class="success" role="status"></span>
+      </div>
+    </form>
+  </section>
+  <section class="panel">
     <div class="token-page-header">
       <h2 class="section-label">Server backups</h2>
       <button id="createServerBackup" type="button">Create backup now</button>
@@ -74,6 +107,17 @@ async function loadSettings() {
   document.getElementById('automaticServerBackup').checked = settings.automatic_server_backup;
   document.getElementById('serverBackupCron').value = settings.server_backup_cron;
   document.getElementById('lastServerBackup').textContent = settings.server_backup_last_success || 'None';
+  document.getElementById('s3Enabled').checked = settings.s3_enabled;
+  document.getElementById('s3Endpoint').value = settings.s3_endpoint || '';
+  document.getElementById('s3Region').value = settings.s3_region || '';
+  document.getElementById('s3Bucket').value = settings.s3_bucket || '';
+  document.getElementById('s3Prefix').value = settings.s3_prefix || '';
+  document.getElementById('s3AccessKeyId').value = settings.s3_access_key_id || '';
+  document.getElementById('s3SecretAccessKey').value = '';
+  document.getElementById('s3SecretAccessKey').placeholder = settings.s3_secret_configured ? 'Leave blank to keep the saved key' : 'Secret access key';
+  document.getElementById('s3SessionToken').value = '';
+  document.getElementById('s3SessionToken').placeholder = settings.s3_session_token_configured ? 'Leave blank to keep the saved token' : 'Session token';
+  document.getElementById('s3PathStyle').checked = settings.s3_path_style;
 }
 async function refreshBackups() {
   const body = document.getElementById('backups');
@@ -98,6 +142,36 @@ async function refreshBackups() {
   }
   document.getElementById('backupsEmpty').hidden = result.backups.length !== 0;
 }
+function s3Payload() {
+  const payload = {
+    s3_enabled:document.getElementById('s3Enabled').checked,
+    s3_endpoint:document.getElementById('s3Endpoint').value.trim(),
+    s3_region:document.getElementById('s3Region').value.trim(),
+    s3_bucket:document.getElementById('s3Bucket').value.trim(),
+    s3_prefix:document.getElementById('s3Prefix').value.trim(),
+    s3_access_key_id:document.getElementById('s3AccessKeyId').value.trim(),
+    s3_path_style:document.getElementById('s3PathStyle').checked
+  };
+  const secret = document.getElementById('s3SecretAccessKey').value;
+  const sessionToken = document.getElementById('s3SessionToken').value;
+  if (secret !== '') payload.s3_secret_access_key = secret;
+  if (sessionToken !== '') payload.s3_session_token = sessionToken;
+  return payload;
+}
+document.getElementById('s3SettingsForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  try {
+    await api('/v1/backup/settings', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(s3Payload())});
+    document.getElementById('s3Saved').textContent = 'Saved';
+  } catch (error) { errorBox.textContent = error.message; }
+});
+document.getElementById('testS3Connection').addEventListener('click', async () => {
+  document.getElementById('s3Saved').textContent = '';
+  try {
+    await api('/v1/backup/s3/test', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(s3Payload())});
+    document.getElementById('s3Saved').textContent = 'Connection successful';
+  } catch (error) { errorBox.textContent = error.message; }
+});
 document.getElementById('backupSettingsForm').addEventListener('submit', async event => {
   event.preventDefault();
   try {
