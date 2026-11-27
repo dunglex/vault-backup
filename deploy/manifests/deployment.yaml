@@ -27,6 +27,7 @@ spec:
         - name: vault-server
           image: registry.vn.eit.zone/hr-digi/vault-server:d8e6974
           imagePullPolicy: IfNotPresent
+          workingDir: /data
           args:
             - --https-addr=0.0.0.0:8200
             - --db=/data/vault.db

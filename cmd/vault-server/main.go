@@ -183,10 +183,10 @@ func main() {
 	}
 	for _, dir := range databaseDirs {
 		if err := os.MkdirAll(dir, 0700); err != nil {
-			log.Fatal(err)
+			log.Printf("Could not create directory cleanly: %v", err)
 		}
 		if err := os.Chmod(dir, 0700); err != nil {
-			log.Fatal(err)
+			log.Printf("Could not set directory permissions cleanly: %v", err)
 		}
 	}
 
@@ -280,7 +280,7 @@ func main() {
 	}()
 
 	if err := os.Chmod(config.DBPath, 0600); err != nil && !os.IsNotExist(err) {
-		log.Fatal(err)
+		log.Printf("Could not set database file permissions cleanly: %v", err)
 	}
 
 	if err := initializeDatabase(db); err != nil {
@@ -307,14 +307,14 @@ func main() {
 		log.Fatal(err)
 	}
 	if err := os.Chmod(config.DBPath, 0600); err != nil {
-		log.Fatal(err)
+		log.Printf("Could not set database file permissions cleanly: %v", err)
 	}
 	if err := os.Chmod(config.SecretsDBPath, 0600); err != nil {
-		log.Fatal(err)
+		log.Printf("Could not set secrets database file permissions cleanly: %v", err)
 	}
 	if config.OperatorDBPath != "" {
 		if err := os.Chmod(config.OperatorDBPath, 0600); err != nil {
-			log.Fatal(err)
+			log.Printf("Could not set operator database file permissions cleanly: %v", err)
 		}
 	}
 	serverCerts, err := newServerCertificateManager(
@@ -329,7 +329,7 @@ func main() {
 		log.Fatal(err)
 	}
 	if err := os.Chmod(config.DBPath, 0600); err != nil {
-		log.Fatal(err)
+		log.Printf("Could not set database file permissions cleanly: %v", err)
 	}
 
 	var adminName string
@@ -2180,6 +2180,7 @@ func (s *server) deleteSecret(w http.ResponseWriter, r *http.Request) {
 	}
 	version, found, err := s.softDeleteCurrentSecret(path)
 	if err != nil {
+		s.recordAuditEvent(r, "delete", "failure", s.auditRequestActor(r, source), source, path, "storage_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not delete secret"})
 		return
 	}
@@ -2192,13 +2193,12 @@ func (s *server) deleteSecret(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) listSecrets(w http.ResponseWriter, r *http.Request) {
-	source := "web"
 	access, ok := s.webSecretAccessForRequest(w, r)
 	if !ok {
 		return
 	}
 	if access.empty() {
-		s.recordAuditEvent(r, "list", "failure", s.auditRequestActor(r, source), source, "*", "scope_denied")
+		s.recordAuditEvent(r, "list", "failure", s.auditRequestActor(r, "web"), "web", "*", "scope_denied")
 		denySecretScope(w)
 		return
 	}
@@ -2221,7 +2221,7 @@ func (s *server) listSecrets(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not list secrets"})
 		return
 	}
-	s.recordAuditEvent(r, "list", "success", s.auditRequestActor(r, source), source, "*", "")
+	s.recordAuditEvent(r, "list", "success", s.auditRequestActor(r, "web"), "web", "*", "")
 	writeJSON(w, http.StatusOK, paths)
 }
 

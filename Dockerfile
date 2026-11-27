@@ -37,7 +37,7 @@ ENV VAULT_SERVER_HEALTHCHECK_URL=https://127.0.0.1:8200/health
 
 USER vault
 
-WORKDIR /app
+WORKDIR /data
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD curl --fail --silent --show-error --insecure "$VAULT_SERVER_HEALTHCHECK_URL" >/dev/null || exit 1
 
