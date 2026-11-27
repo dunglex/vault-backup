@@ -6,12 +6,32 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"vault-backup/internal/operator"
 )
 
 const operatorExtensionEnabledSetting = "operator_extension_enabled"
+const operatorAuditSetting = "allow_operator_audit"
+
+func (s *server) operatorAuditEnabled() (bool, error) {
+	if s.operatorDB == nil {
+		return false, nil
+	}
+	value, err := readServerSetting(s.db, operatorAuditSetting)
+	if err != nil {
+		return false, err
+	}
+	if value == "" {
+		return false, nil
+	}
+	enabled, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, fmt.Errorf("invalid %s setting: %w", operatorAuditSetting, err)
+	}
+	return enabled, nil
+}
 
 func resolveOperatorDatabasePath(db *sql.DB, config serverConfig) (string, bool, error) {
 	if config.OperatorDBPath != "" {

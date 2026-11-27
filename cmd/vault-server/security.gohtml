@@ -51,6 +51,13 @@
         Also write access and error logs to files
       </label>
       <p class="muted">Logs are always written to standard output. When enabled, they are also written to daily log files beside the database and retained for seven days.</p>
+      {{if .HasOperators}}
+      <label class="setting-option">
+        <input id="allowOperatorAudit" type="checkbox">
+        Allow Operator to audit
+      </label>
+      <p class="muted">When enabled, Operators can view audit events within their assigned engines. This is disabled by default.</p>
+      {{end}}
       <label class="setting-option">
         <input id="autoBlockLoginBruteforceIP" type="checkbox">
         Auto block login bruteforce IP
@@ -103,6 +110,7 @@ async function loadSettings() {
     document.getElementById('autoBlockLoginBruteforceIP').checked = settings.auto_block_login_bruteforce_ip;
     document.getElementById('enforceMFA').checked = settings.enforce_mfa;
     document.getElementById('fileLogging').checked = settings.file_logging;
+    {{if .HasOperators}}document.getElementById('allowOperatorAudit').checked = settings.allow_operator_audit;{{end}}
   } catch (error) {
     errorBox.textContent = error.message;
   }
@@ -115,15 +123,17 @@ document.getElementById('settingsForm').addEventListener('submit', async event =
   saved.textContent = '';
   errorBox.textContent = '';
   try {
+    const settingsPayload = {
+      enforce_mtls:document.getElementById('enforceMTLS').checked,
+      auto_block_login_bruteforce_ip:document.getElementById('autoBlockLoginBruteforceIP').checked,
+      enforce_mfa:document.getElementById('enforceMFA').checked,
+      file_logging:document.getElementById('fileLogging').checked
+    };
+    {{if .HasOperators}}settingsPayload.allow_operator_audit = document.getElementById('allowOperatorAudit').checked;{{end}}
     const updated = await api('/v1/settings', {
       method:'PUT',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({
-        enforce_mtls:document.getElementById('enforceMTLS').checked,
-        auto_block_login_bruteforce_ip:document.getElementById('autoBlockLoginBruteforceIP').checked,
-        enforce_mfa:document.getElementById('enforceMFA').checked,
-        file_logging:document.getElementById('fileLogging').checked
-      })
+      body:JSON.stringify(settingsPayload)
     });
     saved.textContent = 'Settings saved.';
   } catch (error) {

@@ -2452,6 +2452,9 @@ func secretGroup(path string) string {
 }
 
 func (s *server) listAuditEvents(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperatorAudit(w, r) {
+		return
+	}
 	access, ok := s.webSecretAccessForRequest(w, r)
 	if !ok {
 		return
@@ -2632,6 +2635,9 @@ func auditResourceScopeFilter(access secretMountAccess, actor string) (string, [
 }
 
 func (s *server) listAuditYears(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperatorAudit(w, r) {
+		return
+	}
 	access, ok := s.webSecretAccessForRequest(w, r)
 	if !ok {
 		return
@@ -2662,6 +2668,28 @@ func (s *server) listAuditYears(w http.ResponseWriter, r *http.Request) {
 		years = visibleYears
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"years": years})
+}
+
+func (s *server) requireOperatorAudit(w http.ResponseWriter, r *http.Request) bool {
+	session, ok := s.sessionFromRequest(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return false
+	}
+	if session.role != "operator" {
+		return true
+	}
+	enabled, err := s.operatorAuditEnabled()
+	if err != nil {
+		log.Printf("ERROR: could not read operator audit setting: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not verify audit access"})
+		return false
+	}
+	if !enabled {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "operator audit access is disabled"})
+		return false
+	}
+	return true
 }
 
 func parseAuditDate(value string) (time.Time, bool) {
@@ -2861,10 +2889,25 @@ func (s *server) serveProtectedPage(w http.ResponseWriter, r *http.Request, name
 		s.renderPage(w, "401.gohtml", http.StatusUnauthorized, nil)
 		return
 	}
+	allowOperatorAudit := false
+	if session.role == "operator" {
+		var err error
+		allowOperatorAudit, err = s.operatorAuditEnabled()
+		if err != nil {
+			log.Printf("ERROR: could not read operator audit setting: %v", err)
+			http.Error(w, "could not verify audit access", http.StatusInternalServerError)
+			return
+		}
+		if name == "audit.gohtml" && !allowOperatorAudit {
+			http.Error(w, "operator audit access is disabled", http.StatusForbidden)
+			return
+		}
+	}
 	data := map[string]bool{
-		"IsAdmin":      session.role == "admin",
-		"HasOperators": s.operatorDB != nil,
-		"HasBackup":    s.backupEnabled,
+		"IsAdmin":            session.role == "admin",
+		"HasOperators":       s.operatorDB != nil,
+		"HasBackup":          s.backupEnabled,
+		"AllowOperatorAudit": allowOperatorAudit,
 	}
 	if name == "token.gohtml" {
 		enforced, err := s.mtlsSettings()

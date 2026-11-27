@@ -306,11 +306,17 @@ func (s *server) getSettings(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read settings"})
 		return
 	}
+	operatorAudit, err := s.operatorAuditEnabled()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read settings"})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"enforce_mtls":                   enforced,
 		"auto_block_login_bruteforce_ip": autoBlock,
 		"enforce_mfa":                    enforceMFA,
 		"file_logging":                   fileLogging,
+		"allow_operator_audit":           operatorAudit,
 	})
 }
 
@@ -327,13 +333,18 @@ func (s *server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		AutoBlockLoginBruteforceIP *bool `json:"auto_block_login_bruteforce_ip"`
 		EnforceMFA                 *bool `json:"enforce_mfa"`
 		FileLogging                *bool `json:"file_logging"`
+		AllowOperatorAudit         *bool `json:"allow_operator_audit"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid settings"})
 		return
 	}
+	if request.AllowOperatorAudit != nil && s.operatorDB == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "operator extension is not enabled"})
+		return
+	}
 	if request.EnforceMTLS == nil && request.AutoBlockLoginBruteforceIP == nil &&
-		request.EnforceMFA == nil && request.FileLogging == nil {
+		request.EnforceMFA == nil && request.FileLogging == nil && request.AllowOperatorAudit == nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no settings provided"})
 		return
 	}
@@ -357,6 +368,11 @@ func (s *server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read settings"})
 		return
 	}
+	operatorAudit, err := s.operatorAuditEnabled()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read settings"})
+		return
+	}
 	fileLoggingWasEnabled := fileLogging
 	if request.EnforceMTLS != nil {
 		enforced = *request.EnforceMTLS
@@ -369,6 +385,9 @@ func (s *server) updateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if request.FileLogging != nil {
 		fileLogging = *request.FileLogging
+	}
+	if request.AllowOperatorAudit != nil {
+		operatorAudit = *request.AllowOperatorAudit
 	}
 	enableFileLogging := request.FileLogging != nil && *request.FileLogging && !fileLoggingWasEnabled
 	preparedFileLogging := false
@@ -436,6 +455,16 @@ func (s *server) updateSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if request.AllowOperatorAudit != nil {
+		if _, err := tx.Exec(
+			"INSERT INTO server_settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+			operatorAuditSetting,
+			strconv.FormatBool(operatorAudit),
+		); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not save settings"})
+			return
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not save settings"})
 		return
@@ -458,12 +487,19 @@ func (s *server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		detail += serverFileLoggingSetting + "=" + strconv.FormatBool(fileLogging)
 	}
+	if request.AllowOperatorAudit != nil {
+		if detail != "" {
+			detail += ","
+		}
+		detail += operatorAuditSetting + "=" + strconv.FormatBool(operatorAudit)
+	}
 	s.recordAuditEvent(r, "update_settings", "success", s.auditRequestActor(r, "web"), "web", "server-settings", detail)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"enforce_mtls":                   enforced,
 		"auto_block_login_bruteforce_ip": autoBlock,
 		"enforce_mfa":                    enforceMFA,
 		"file_logging":                   fileLogging,
+		"allow_operator_audit":           operatorAudit,
 	})
 }
 

@@ -46,11 +46,14 @@ authentication for, and remove Operator accounts from `/operators.html`.
 Locking an Operator blocks login and revokes their active web sessions.
 Resetting two-factor authentication clears their TOTP setup and recovery codes
 and revokes active sessions; when MFA enforcement is enabled, the Operator must
-enroll again before continuing. Operators can manage secrets, API tokens, and
-audit events within their assigned engines. Their audit views include only
-resources within those engines, plus their own web secret-list events. Admins
-retain unrestricted audit access. Filtering uses the Operator's current engine
-grants at query time; audit records do not duplicate role or account-scope data.
+enroll again before continuing. Operators can manage secrets and API tokens
+within their assigned engines. An Admin can enable **Allow Operator to audit**
+under Security to also permit scoped audit access; it is disabled by default
+and the setting is shown only when the Operators extension is enabled. Operator
+audit views include only resources within their assigned engines, plus their
+own web secret-list events. Admins retain unrestricted audit access. Filtering
+uses the Operator's current engine grants at query time; audit records do not
+duplicate role or account-scope data.
 Operators cannot access `/security.html`,
 `/v1/settings`, `/operators.html`, or operator-management endpoints.
 Admin accounts retain unrestricted web access. Admins assign one or more
@@ -516,7 +519,7 @@ Each successful write creates a monotonically increasing version; prior versions
 
 ## Audit log
 
-Authenticated administrators can open `/audits.html` to search and filter successful and failed login events, secret list/read/create/update/delete activity from both the web panel and managed-token `/api/...` endpoints, and managed API token creation/revocation. Token audit events contain token record IDs, never raw token values. API token identities are recorded as truncated SHA-256 fingerprints. Filters cover text, actor, source, action, outcome, and date range. The backing `/v1/audit` endpoint uses the web session cookie and is limited to 500 events per response.
+Authenticated administrators can open `/audits.html` to search and filter successful and failed login events, secret list/read/create/update/delete activity from both the web panel and managed-token `/api/...` endpoints, and managed API token creation/revocation. Operators can use the same page only when **Allow Operator to audit** is enabled, and results are limited to their assigned engines. Token audit events contain token record IDs, never raw token values. API token identities are recorded as truncated SHA-256 fingerprints. Filters cover text, actor, source, action, outcome, and date range. The backing `/v1/audit` endpoint uses the web session cookie and is limited to 500 events per response.
 
 ## Test
 
