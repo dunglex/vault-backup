@@ -167,6 +167,20 @@ textarea {
   grid-template-columns: minmax(24rem, 30rem) minmax(0, 1fr);
 }
 
+.secret-editor-layout {
+  grid-template-columns: minmax(0, 1fr) minmax(24rem, 30rem);
+}
+
+.secret-editor-layout > aside {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.secret-editor-layout > section {
+  grid-column: 1;
+  grid-row: 1;
+}
+
 .secret-path-combine {
   display: grid;
   gap: 0.8rem;
@@ -893,6 +907,22 @@ pre {
 
   .operator-actions button {
     flex: 1 1 12rem;
+  }
+}
+
+@media (max-width: 68rem) {
+  .secret-editor-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .secret-editor-layout > aside {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .secret-editor-layout > section {
+    grid-column: 1;
+    grid-row: 1;
   }
 }
 
