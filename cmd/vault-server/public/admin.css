@@ -180,6 +180,36 @@ textarea {
   min-width: 0;
 }
 
+.secret-editor-heading {
+  align-items: center;
+  display: flex;
+  gap: 1rem;
+  margin-bottom: 1.2rem;
+}
+
+.secret-editor-path {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.secret-editor-path input {
+  margin-bottom: 0;
+}
+
+.secret-path-combine.secret-editor-path {
+  margin-bottom: 0;
+}
+
+.secret-version-controls {
+  flex: 0 1 18rem;
+  min-width: 14rem;
+}
+
+.secret-version-controls select {
+  margin-bottom: 0;
+  width: 100%;
+}
+
 .admin-dialog select[multiple] {
   background-image: none;
   height: auto;
@@ -236,6 +266,10 @@ textarea {
 .notice:empty {
   margin-bottom: 0;
   min-height: 0;
+}
+
+.notice-info {
+  color: var(--muted);
 }
 
 .muted {
@@ -841,6 +875,17 @@ pre {
 
   .secret-path-combine {
     grid-template-columns: 1fr;
+  }
+
+  .secret-editor-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .secret-version-controls {
+    flex: 0 1 auto;
+    min-width: 0;
+    width: 100%;
   }
 
   .pager {

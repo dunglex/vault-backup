@@ -185,13 +185,98 @@ func initializeDatabase(db *sql.DB) error {
 }
 
 func initializeSecretsDatabase(db *sql.DB) error {
-	if _, err := db.Exec(`
-		CREATE TABLE IF NOT EXISTS secrets (
-			path TEXT PRIMARY KEY,
-			data TEXT NOT NULL,
-			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-		);
+	var exists int
+	if err := db.QueryRow(
+		"SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'secrets'",
+	).Scan(&exists); err != nil {
+		return fmt.Errorf("check secrets table: %w", err)
+	}
+	if exists == 0 {
+		return createVersionedSecretsSchema(db)
+	}
+
+	columns, err := tableColumns(db, "secrets")
+	if err != nil {
+		return fmt.Errorf("inspect secrets table: %w", err)
+	}
+	if columns["current_version"] {
+		if _, err := db.Exec(secretVersionsTableSchema); err != nil {
+			return fmt.Errorf("initialize secret versions table: %w", err)
+		}
+		return nil
+	}
+	if !columns["path"] || !columns["data"] {
+		return fmt.Errorf("unsupported secrets table schema")
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin secrets migration: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec("ALTER TABLE secrets RENAME TO secrets_legacy"); err != nil {
+		return fmt.Errorf("rename legacy secrets table: %w", err)
+	}
+	if _, err := tx.Exec(versionedSecretsTableSchema); err != nil {
+		return fmt.Errorf("create versioned secrets table: %w", err)
+	}
+	if _, err := tx.Exec(secretVersionsTableSchema); err != nil {
+		return fmt.Errorf("create secret versions table: %w", err)
+	}
+	timestamp := "CAST(strftime('%s', 'now') AS INTEGER)"
+	if columns["updated_at"] {
+		timestamp = "COALESCE(CAST(strftime('%s', updated_at) AS INTEGER), " + timestamp + ")"
+	}
+	if _, err := tx.Exec(`
+		INSERT INTO secrets(path, current_version, created_at, updated_at)
+		SELECT path, 1, ` + timestamp + `, ` + timestamp + `
+		FROM secrets_legacy
 	`); err != nil {
+		return fmt.Errorf("migrate secret metadata: %w", err)
+	}
+	if _, err := tx.Exec(`
+		INSERT INTO secret_versions(path, version, data, created_at)
+		SELECT path, 1, data, ` + timestamp + `
+		FROM secrets_legacy
+	`); err != nil {
+		return fmt.Errorf("migrate secret values: %w", err)
+	}
+	if _, err := tx.Exec("DROP TABLE secrets_legacy"); err != nil {
+		return fmt.Errorf("remove legacy secrets table: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit secrets migration: %w", err)
+	}
+	return nil
+}
+
+const versionedSecretsTableSchema = `
+	CREATE TABLE IF NOT EXISTS secrets (
+		path TEXT PRIMARY KEY,
+		current_version INTEGER NOT NULL,
+		created_at INTEGER NOT NULL,
+		updated_at INTEGER NOT NULL
+	);
+`
+
+const secretVersionsTableSchema = `
+	CREATE TABLE IF NOT EXISTS secret_versions (
+		path TEXT NOT NULL,
+		version INTEGER NOT NULL CHECK (version > 0),
+		data TEXT,
+		created_at INTEGER NOT NULL,
+		created_by TEXT,
+		deleted_at INTEGER,
+		destroyed_at INTEGER,
+		PRIMARY KEY (path, version),
+		FOREIGN KEY (path) REFERENCES secrets(path) ON DELETE CASCADE
+	);
+	CREATE INDEX IF NOT EXISTS idx_secret_versions_created_at
+		ON secret_versions(created_at);
+`
+
+func createVersionedSecretsSchema(db *sql.DB) error {
+	if _, err := db.Exec(versionedSecretsTableSchema + secretVersionsTableSchema); err != nil {
 		return fmt.Errorf("initialize secrets database: %w", err)
 	}
 	return nil

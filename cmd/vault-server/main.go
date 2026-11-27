@@ -125,7 +125,10 @@ type setupAdminRequest struct {
 }
 
 type secretRequest struct {
-	Data map[string]any `json:"data"`
+	Data    map[string]any `json:"data"`
+	Options struct {
+		CAS *int64 `json:"cas"`
+	} `json:"options"`
 }
 
 type httpErrorLogWriter struct {
@@ -532,7 +535,9 @@ func main() {
 	mux.HandleFunc("GET /api/v1/{mount}/data/{path...}", s.getKVSecret)
 	mux.HandleFunc("PUT /api/v1/{mount}/data/{path...}", s.putKVSecret)
 	mux.HandleFunc("DELETE /api/v1/{mount}/data/{path...}", s.deleteKVSecret)
+	mux.HandleFunc("GET /api/v1/{mount}/metadata/{path...}", s.getKVMetadata)
 	mux.HandleFunc("LIST /api/v1/{mount}/metadata/{path...}", s.listKVMetadata)
+	mux.HandleFunc("POST /api/v1/{mount}/{operation}/{path...}", s.changeKVVersionState)
 
 	mux.HandleFunc("/", s.serveHome)
 
@@ -1732,26 +1737,52 @@ func (s *server) getKVSecret(w http.ResponseWriter, r *http.Request) {
 		denySecretScope(w)
 		return
 	}
-	var encrypted string
-	if err := s.secretsDB.QueryRow("SELECT data FROM secrets WHERE path = ?", path).Scan(&encrypted); err != nil {
-		s.recordAuditEvent(r, "read", "failure", s.auditRequestActor(r, source), source, path, "not_found")
-		writeJSON(w, http.StatusNotFound, map[string]any{"errors": []string{"secret not found"}})
+	var requestedVersion *int64
+	if versionValue := r.URL.Query().Get("version"); versionValue != "" {
+		version, err := strconv.ParseInt(versionValue, 10, 64)
+		if err != nil || version < 1 {
+			s.recordAuditEvent(r, "read", "failure", s.auditRequestActor(r, source), source, path, "invalid_version")
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "version must be a positive integer"})
+			return
+		}
+		requestedVersion = &version
+	}
+	versionRecord, err := s.readSecretVersion(path, requestedVersion)
+	if err != nil {
+		version := versionRecord.Version
+		if version == 0 && requestedVersion != nil {
+			version = *requestedVersion
+		}
+		if err == sql.ErrNoRows || errors.Is(err, errSecretDeleted) || errors.Is(err, errSecretDestroyed) {
+			s.recordAuditEvent(r, "read", "failure", s.auditRequestActor(r, source), source, path, auditVersionDetail("not_found", version))
+			writeJSON(w, http.StatusNotFound, map[string]any{"errors": []string{"secret not found"}})
+		} else {
+			s.recordAuditEvent(r, "read", "failure", s.auditRequestActor(r, source), source, path, auditVersionDetail("storage_error", version))
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read secret"})
+		}
 		return
 	}
-	plaintext, err := s.decryptSecret(encrypted)
+	plaintext, err := s.decryptSecret(versionRecord.Data.String)
 	if err != nil {
-		s.recordAuditEvent(r, "read", "failure", s.auditRequestActor(r, source), source, path, "storage_error")
+		s.recordAuditEvent(r, "read", "failure", s.auditRequestActor(r, source), source, path, auditVersionDetail("storage_error", versionRecord.Version))
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "invalid stored secret"})
 		return
 	}
 	var data map[string]any
 	if err := json.Unmarshal(plaintext, &data); err != nil {
-		s.recordAuditEvent(r, "read", "failure", s.auditRequestActor(r, source), source, path, "storage_error")
+		s.recordAuditEvent(r, "read", "failure", s.auditRequestActor(r, source), source, path, auditVersionDetail("storage_error", versionRecord.Version))
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "invalid stored secret"})
 		return
 	}
-	s.recordAuditEvent(r, "read", "success", s.auditRequestActor(r, source), source, path, "")
-	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"data": data}})
+	s.recordAuditEvent(r, "read", "success", s.auditRequestActor(r, source), source, path, auditVersionDetail("", versionRecord.Version))
+	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{
+		"data": data,
+		"metadata": map[string]any{
+			"version":      versionRecord.Version,
+			"created_time": time.Unix(versionRecord.CreatedAt, 0).UTC().Format(time.RFC3339),
+			"destroyed":    versionRecord.DestroyedAt.Valid,
+		},
+	}})
 }
 
 func (s *server) putKVSecret(w http.ResponseWriter, r *http.Request) {
@@ -1778,20 +1809,23 @@ func (s *server) putKVSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	action := "create"
-	var exists int
-	if err := s.secretsDB.QueryRow("SELECT 1 FROM secrets WHERE path = ?", path).Scan(&exists); err == nil {
+	var currentVersion int64
+	if err := s.secretsDB.QueryRow("SELECT current_version FROM secrets WHERE path = ?", path).Scan(&currentVersion); err == nil {
 		action = "update"
 	} else if err != sql.ErrNoRows {
 		s.recordAuditEvent(r, action, "failure", s.auditRequestActor(r, source), source, path, "storage_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not store secret"})
 		return
 	}
-	var req struct {
-		Data map[string]any `json:"data"`
-	}
+	var req secretRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Data == nil {
 		s.recordAuditEvent(r, action, "failure", s.auditRequestActor(r, source), source, path, "invalid_request")
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid secret data"})
+		return
+	}
+	if req.Options.CAS != nil && *req.Options.CAS < 0 {
+		s.recordAuditEvent(r, action, "failure", s.auditRequestActor(r, source), source, path, "invalid_request")
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "compare-and-set version must not be negative"})
 		return
 	}
 	plaintext, err := json.Marshal(req.Data)
@@ -1806,14 +1840,29 @@ func (s *server) putKVSecret(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not store secret"})
 		return
 	}
-	if _, err := s.secretsDB.Exec(`INSERT INTO secrets(path, data, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
-		ON CONFLICT(path) DO UPDATE SET data = excluded.data, updated_at = CURRENT_TIMESTAMP`, path, encrypted); err != nil {
+	version, created, err := s.writeSecretVersion(path, encrypted, s.auditRequestActor(r, source), req.Options.CAS)
+	if err != nil {
+		if errors.Is(err, errSecretCASMismatch) {
+			detail := "cas_mismatch"
+			if req.Options.CAS != nil {
+				detail += fmt.Sprintf(";expected_version=%d", *req.Options.CAS)
+			}
+			if currentVersion > 0 {
+				detail += fmt.Sprintf(";current_version=%d", currentVersion)
+			}
+			s.recordAuditEvent(r, action, "failure", s.auditRequestActor(r, source), source, path, detail)
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "secret version changed; read the latest version and retry"})
+			return
+		}
 		s.recordAuditEvent(r, action, "failure", s.auditRequestActor(r, source), source, path, "storage_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not store secret"})
 		return
 	}
-	s.recordAuditEvent(r, action, "success", s.auditRequestActor(r, source), source, path, "")
-	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"version": 1}})
+	if created {
+		action = "create"
+	}
+	s.recordAuditEvent(r, action, "success", s.auditRequestActor(r, source), source, path, auditVersionDetail("", version))
+	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"version": version}})
 }
 
 func (s *server) deleteKVSecret(w http.ResponseWriter, r *http.Request) {
@@ -1839,12 +1888,17 @@ func (s *server) deleteKVSecret(w http.ResponseWriter, r *http.Request) {
 		denySecretScope(w)
 		return
 	}
-	if _, err := s.secretsDB.Exec("DELETE FROM secrets WHERE path = ?", path); err != nil {
+	version, found, err := s.softDeleteCurrentSecret(path)
+	if err != nil {
 		s.recordAuditEvent(r, "delete", "failure", s.auditRequestActor(r, source), source, path, "storage_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not delete secret"})
 		return
 	}
-	s.recordAuditEvent(r, "delete", "success", s.auditRequestActor(r, source), source, path, "")
+	detail := "no_current_version"
+	if found {
+		detail = auditVersionDetail("", version)
+	}
+	s.recordAuditEvent(r, "delete", "success", s.auditRequestActor(r, source), source, path, detail)
 	writeJSON(w, http.StatusNoContent, nil)
 }
 
@@ -1962,23 +2016,69 @@ func (s *server) getSecret(w http.ResponseWriter, r *http.Request) {
 		denySecretScope(w)
 		return
 	}
-	var encrypted string
-	if err := s.secretsDB.QueryRow("SELECT data FROM secrets WHERE path = ?", path).Scan(&encrypted); err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "secret not found"})
+	if r.URL.Query().Get("metadata") == "true" {
+		current, versions, err := s.secretVersionSummaries(path)
+		if err != nil {
+			detail := "storage_error"
+			status := http.StatusInternalServerError
+			message := "could not read secret versions"
+			if err == sql.ErrNoRows {
+				detail = "not_found"
+				status = http.StatusNotFound
+				message = "secret not found"
+			}
+			s.recordAuditEvent(r, "read_metadata", "failure", s.auditRequestActor(r, source), source, path, detail)
+			writeJSON(w, status, map[string]string{"error": message})
+			return
+		}
+		s.recordAuditEvent(
+			r, "read_metadata", "success", s.auditRequestActor(r, source), source, path,
+			fmt.Sprintf("current_version=%d", current),
+		)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"current_version": current,
+			"versions":        versions,
+		})
 		return
 	}
-	plaintext, err := s.decryptSecret(encrypted)
+	var requestedVersion *int64
+	if versionValue := r.URL.Query().Get("version"); versionValue != "" {
+		version, err := strconv.ParseInt(versionValue, 10, 64)
+		if err != nil || version < 1 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "version must be a positive integer"})
+			return
+		}
+		requestedVersion = &version
+	}
+	versionRecord, err := s.readSecretVersion(path, requestedVersion)
 	if err != nil {
+		version := versionRecord.Version
+		if version == 0 && requestedVersion != nil {
+			version = *requestedVersion
+		}
+		if err == sql.ErrNoRows || errors.Is(err, errSecretDeleted) || errors.Is(err, errSecretDestroyed) {
+			s.recordAuditEvent(r, "read", "failure", s.auditRequestActor(r, source), source, path, auditVersionDetail("not_found", version))
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "secret not found"})
+		} else {
+			s.recordAuditEvent(r, "read", "failure", s.auditRequestActor(r, source), source, path, auditVersionDetail("storage_error", version))
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read secret"})
+		}
+		return
+	}
+	plaintext, err := s.decryptSecret(versionRecord.Data.String)
+	if err != nil {
+		s.recordAuditEvent(r, "read", "failure", s.auditRequestActor(r, source), source, path, auditVersionDetail("storage_error", versionRecord.Version))
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "invalid stored secret"})
 		return
 	}
 	var data map[string]any
 	if err := json.Unmarshal(plaintext, &data); err != nil {
+		s.recordAuditEvent(r, "read", "failure", s.auditRequestActor(r, source), source, path, auditVersionDetail("storage_error", versionRecord.Version))
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "invalid stored secret"})
 		return
 	}
-	s.recordAuditEvent(r, "read", "success", s.auditRequestActor(r, source), source, path, "")
-	writeJSON(w, http.StatusOK, map[string]any{"data": data})
+	s.recordAuditEvent(r, "read", "success", s.auditRequestActor(r, source), source, path, auditVersionDetail("", versionRecord.Version))
+	writeJSON(w, http.StatusOK, map[string]any{"data": data, "version": versionRecord.Version})
 }
 
 func (s *server) putSecret(w http.ResponseWriter, r *http.Request) {
@@ -2002,8 +2102,8 @@ func (s *server) putSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	action := "create"
-	var exists int
-	if err := s.secretsDB.QueryRow("SELECT 1 FROM secrets WHERE path = ?", path).Scan(&exists); err == nil {
+	var currentVersion int64
+	if err := s.secretsDB.QueryRow("SELECT current_version FROM secrets WHERE path = ?", path).Scan(&currentVersion); err == nil {
 		action = "update"
 	} else if err != sql.ErrNoRows {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not store secret"})
@@ -2013,6 +2113,11 @@ func (s *server) putSecret(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Data == nil {
 		s.recordAuditEvent(r, action, "failure", s.auditRequestActor(r, source), source, path, "invalid_request")
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid secret data"})
+		return
+	}
+	if req.Options.CAS != nil && *req.Options.CAS < 0 {
+		s.recordAuditEvent(r, action, "failure", s.auditRequestActor(r, source), source, path, "invalid_request")
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "compare-and-set version must not be negative"})
 		return
 	}
 	plaintext, err := json.Marshal(req.Data)
@@ -2025,13 +2130,28 @@ func (s *server) putSecret(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not store secret"})
 		return
 	}
-	if _, err := s.secretsDB.Exec(`INSERT INTO secrets(path, data, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
-		ON CONFLICT(path) DO UPDATE SET data = excluded.data, updated_at = CURRENT_TIMESTAMP`, path, encrypted); err != nil {
+	version, created, err := s.writeSecretVersion(path, encrypted, s.auditRequestActor(r, source), req.Options.CAS)
+	if err != nil {
+		if errors.Is(err, errSecretCASMismatch) {
+			detail := "cas_mismatch"
+			if req.Options.CAS != nil {
+				detail += fmt.Sprintf(";expected_version=%d", *req.Options.CAS)
+			}
+			if currentVersion > 0 {
+				detail += fmt.Sprintf(";current_version=%d", currentVersion)
+			}
+			s.recordAuditEvent(r, action, "failure", s.auditRequestActor(r, source), source, path, detail)
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "secret version changed; read the latest version and retry"})
+			return
+		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not store secret"})
 		return
 	}
-	s.recordAuditEvent(r, action, "success", s.auditRequestActor(r, source), source, path, "")
-	writeJSON(w, http.StatusOK, map[string]string{"path": path})
+	if created {
+		action = "create"
+	}
+	s.recordAuditEvent(r, action, "success", s.auditRequestActor(r, source), source, path, auditVersionDetail("", version))
+	writeJSON(w, http.StatusOK, map[string]any{"path": path, "version": version})
 }
 
 func (s *server) deleteSecret(w http.ResponseWriter, r *http.Request) {
@@ -2054,11 +2174,16 @@ func (s *server) deleteSecret(w http.ResponseWriter, r *http.Request) {
 		denySecretScope(w)
 		return
 	}
-	if _, err := s.secretsDB.Exec("DELETE FROM secrets WHERE path = ?", path); err != nil {
+	version, found, err := s.softDeleteCurrentSecret(path)
+	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not delete secret"})
 		return
 	}
-	s.recordAuditEvent(r, "delete", "success", s.auditRequestActor(r, source), source, path, "")
+	detail := "no_current_version"
+	if found {
+		detail = auditVersionDetail("", version)
+	}
+	s.recordAuditEvent(r, "delete", "success", s.auditRequestActor(r, source), source, path, detail)
 	writeJSON(w, http.StatusOK, map[string]string{"path": path})
 }
 

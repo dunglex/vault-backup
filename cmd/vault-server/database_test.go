@@ -300,9 +300,9 @@ func TestPageTemplatesRenderStandalonePages(t *testing.T) {
 		markers []string
 	}{
 		{"index.gohtml", []string{"http-equiv=\"refresh\"", "/secrets.html"}},
-		{"setup.gohtml", []string{"<title>Initial setup - Vault Server</title>", `<h1 class="brand setup-title">Enter setup key</h1>`, `id="phase1"`, `id="phase2"`, `id="phase3"`, `id="phase4"`, `id="phase5"`, `id="setupKeyForm"`, `id="skipDomains"`, `id="extensionsForm"`, `id="enableOperators"`, `id="enableBackup"`, `id="skipExtensions"`, `id="loginLink"`, `name="password_confirmation"`, `name="main_domain"`, `name="alias_domains"`, `name="certificate_mode"`, `value="acme"`, "/v1/setup/validate-key", "/v1/setup/domains", "/v1/setup", "location.assign(result.redirect_url)"}},
+		{"setup.gohtml", []string{"<title>Initial setup - Vault Server</title>", `id="phase1"`, `id="phase2"`, `id="phase3"`, `id="phase4"`, `id="phase5"`, `id="setupKeyForm"`, `id="skipDomains"`, `id="extensionsForm"`, `id="enableOperators"`, `id="enableBackup"`, `id="skipExtensions"`, `id="loginLink"`, `name="password_confirmation"`, `name="main_domain"`, `name="alias_domains"`, `name="certificate_mode"`, `value="acme"`, "/v1/setup/validate-key", "/v1/setup/domains", "/v1/setup", "location.assign(result.redirect_url)"}},
 		{"login.gohtml", []string{`id="loginForm"`, `id="totpChallenge"`, `id="loginSpinner"`, `id="loginButtonLabel"`, "Signing in...", "Failed sign-in attempts are recorded with your IP address.", "Repeated failed attempts may result in this IP being blocked from signing in.", "/v1/auth/login"}},
-		{"secret.gohtml", []string{`id="paths"`, `id="secretPath"`, `id="secretBreadcrumb"`, `id="secretBreadcrumbItems"`, "renderBreadcrumb", `id="convert-format"`, `id="convert-case"`, "parseDotenv", "validateEditorData", "Duplicate dotenv key", ".slice(0, 5)", "location.assign('/secrets.html?group='"}},
+		{"secret.gohtml", []string{`id="paths"`, `id="secretPath"`, `class="secret-editor-heading"`, `id="secretBreadcrumb"`, `id="secretBreadcrumbItems"`, `id="versionControls"`, `id="versionSelect"`, "(current)", "loadSecretVersion", "showInfo", "renderBreadcrumb", `id="convert-format"`, `id="convert-case"`, "parseDotenv", "validateEditorData", "Duplicate dotenv key", ".slice(0, 5)", "location.assign('/secrets.html?group='"}},
 		{"secrets.gohtml", []string{`id="secret-groups"`, `id="secret-list"`, "/v1/secrets-browser", `get('group')`}},
 		{"token.gohtml", []string{`id="tokens"`, `id="openCreateToken"`, `id="createTokenDialog"`, `id="createToken"`, `id="closeCreateToken"`, `id="finishCreateToken"`, `id="tokenPrefixes"`, `<select id="tokenLifetimeDays" name="expires_in_days" required>`, `<option value="30" selected>30 days</option>`, `<option value="60">60 days</option>`, `<option value="90">90 days</option>`, `<option value="180">180 days</option>`, `<option value="365">365 days</option>`, `id="editTokenPrefixes"`, `id="tokenCopyPanel"`, `id="copyToken"`, "downloadClientCert", "downloadClientKey", "token-actions", "Sample vault-backup command", `id="sampleCommand"`, "window.confirm", "addEventListener('beforeunload'", "async function refreshTokens()"}},
 		{"security.gohtml", []string{`id="settingsForm"`, `id="enforceMTLS"`, `id="autoBlockLoginBruteforceIP"`, `id="fileLogging"`, `id="viewBlockedIPs"`, `id="blockedIPsDialog"`}},
@@ -333,6 +333,18 @@ func TestPageTemplatesRenderStandalonePages(t *testing.T) {
 			for _, marker := range test.markers {
 				if !strings.Contains(output.String(), marker) {
 					t.Errorf("rendered %s does not contain %q", test.name, marker)
+				}
+			}
+			if test.name == "secret.gohtml" {
+				for _, title := range []string{
+					`id="editorTitle"`,
+					`id="currentVersion"`,
+					`<label for="secretPath">`,
+					`<label for="versionSelect">`,
+				} {
+					if strings.Contains(output.String(), title) {
+						t.Errorf("secret editor still renders title %q", title)
+					}
 				}
 			}
 			if test.name == "setup.gohtml" &&
@@ -588,7 +600,7 @@ func TestBrowseSecretsGroupsAndPaginates(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	if _, err := db.Exec("CREATE TABLE secrets (path TEXT PRIMARY KEY)"); err != nil {
+	if err := initializeSecretsDatabase(db); err != nil {
 		t.Fatal(err)
 	}
 	paths := []string{
@@ -599,9 +611,7 @@ func TestBrowseSecretsGroupsAndPaginates(t *testing.T) {
 		"other",
 	}
 	for _, path := range paths {
-		if _, err := db.Exec("INSERT INTO secrets(path) VALUES (?)", path); err != nil {
-			t.Fatal(err)
-		}
+		insertTestSecretRecord(t, db, path, "unused")
 	}
 
 	s := &server{
@@ -645,7 +655,7 @@ func TestBrowseSecretsUsesAllowedPageSizes(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	if _, err := db.Exec("CREATE TABLE secrets (path TEXT PRIMARY KEY)"); err != nil {
+	if err := initializeSecretsDatabase(db); err != nil {
 		t.Fatal(err)
 	}
 	s := &server{

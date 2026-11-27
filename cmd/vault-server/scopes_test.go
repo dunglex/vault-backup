@@ -53,18 +53,8 @@ func TestAPITokenScopesRestrictCRUDAndFilterList(t *testing.T) {
 	}
 	const token = "scope-test-token"
 	insertScopedAPIToken(t, s, token, []string{"team-a", "shared/build"}, "")
-	if _, err := s.secretsDB.Exec(
-		"INSERT INTO secrets(path, data) VALUES (?, ?)",
-		"team-b/hidden", "unused",
-	); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.secretsDB.Exec(
-		"INSERT INTO secrets(path, data) VALUES (?, ?)",
-		"shared/build/visible", "unused",
-	); err != nil {
-		t.Fatal(err)
-	}
+	insertTestSecretRecord(t, s.secretsDB, "team-b/hidden", "unused")
+	insertTestSecretRecord(t, s.secretsDB, "shared/build/visible", "unused")
 
 	write := httptest.NewRecorder()
 	s.putKVSecret(write, apiScopeRequest(
@@ -129,12 +119,8 @@ func TestOperatorScopesRestrictWebSecretsAndLegacyEmptyScopesDeny(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.secretsDB.Exec(
-		"INSERT INTO secrets(path, data) VALUES ('team-a/database', ?), ('team-b/database', ?)",
-		encrypted, encrypted,
-	); err != nil {
-		t.Fatal(err)
-	}
+	insertTestSecretRecord(t, s.secretsDB, "team-a/database", encrypted)
+	insertTestSecretRecord(t, s.secretsDB, "team-b/database", encrypted)
 	if _, err := s.operatorDB.Exec(
 		"INSERT INTO accounts(username, password_hash, role) VALUES ('legacy-operator', 'hash', 'operator')",
 	); err != nil {

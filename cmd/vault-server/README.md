@@ -1,6 +1,6 @@
 # vault-server
 
-`vault-server` is a SQLite-backed Vault-compatible server. HTTPS is the default transport. Application data and secret values are stored in separate SQLCipher databases, each with its own random key protected by the configured database password. Existing plaintext SQLite application databases are rejected unless explicitly allowed with the plaintext opt-in; that mode is insecure. This version does not migrate secrets from an older application database that still contains a `secrets` table.
+`vault-server` is a SQLite-backed Vault-compatible server. HTTPS is the default transport. Application data and secret values are stored in separate SQLCipher databases, each with its own random key protected by the configured database password. Existing plaintext SQLite application databases are rejected unless explicitly allowed with the plaintext opt-in; that mode is insecure. This version does not migrate secrets from an older application database that still contains a `secrets` table. Existing single-value secrets databases are migrated to version 1 at startup.
 
 ## Requirements
 
@@ -460,12 +460,34 @@ External API endpoints use `/api` and token authentication:
 curl --cacert /path/to/ca.pem \
   -H 'X-Vault-Token: MANAGED_API_TOKEN' \
   https://localhost:8200/api/v1/kv/data/app/database
+
+# Write a new immutable version; CAS 0 means the path must not exist
+curl --cacert /path/to/ca.pem \
+  -H 'X-Vault-Token: MANAGED_API_TOKEN' \
+  -H 'Content-Type: application/json' \
+  -X PUT -d '{"data":{"username":"app","password":"secret"},"options":{"cas":0}}' \
+  https://localhost:8200/api/v1/kv/data/app/database
+
+# Read a specific version and inspect version metadata
+curl --cacert /path/to/ca.pem -H 'X-Vault-Token: MANAGED_API_TOKEN' \
+  'https://localhost:8200/api/v1/kv/data/app/database?version=1'
+curl --cacert /path/to/ca.pem -H 'X-Vault-Token: MANAGED_API_TOKEN' \
+  https://localhost:8200/api/v1/kv/metadata/app/database
+
+# Soft-delete, restore, or permanently destroy selected versions
+curl --cacert /path/to/ca.pem -H 'X-Vault-Token: MANAGED_API_TOKEN' \
+  -X DELETE https://localhost:8200/api/v1/kv/data/app/database
+curl --cacert /path/to/ca.pem -H 'X-Vault-Token: MANAGED_API_TOKEN' \
+  -H 'Content-Type: application/json' -X POST -d '{"versions":[1]}' \
+  https://localhost:8200/api/v1/kv/undelete/app/database
 ```
 
 Web routes such as `/`, `/v1/setup`, `/v1/auth/login`, and `/v1/secrets/...` use an HttpOnly session cookie.
 
-Open `/secrets.html` to browse secrets grouped by their first two path segments. Each group is paginated independently, and selecting a secret opens it in the editor at `/secret.html`. The editor breadcrumb links back to each ancestor path; nested prefixes open a filtered secret list.
+Open `/secrets.html` to browse secrets grouped by their first two path segments. Each group is paginated independently, and selecting a secret opens it in the editor at `/secret.html`. The editor shows the current version and a version selector; older versions are read-only, while selecting the current version enables editing. The editor breadcrumb links back to each ancestor path; nested prefixes open a filtered secret list.
 Secret path segments are 1–127 characters and may contain only ASCII letters, digits, and hyphens. Underscores and dots are rejected. Full paths remain unique by the primary database key.
+
+Each successful write creates a monotonically increasing version; prior versions are retained. The API accepts `options.cas` on writes (`0` means create-only; a positive value must match the current version) and accepts `?version=N` on reads. `DELETE /data/{path}` soft-deletes the current version. Use `POST /delete/{path}`, `POST /undelete/{path}`, and `POST /destroy/{path}` with `{"versions":[N,...]}` to manage selected versions. Destroying a version clears its ciphertext from the active database and cannot be undone through the API; this operation requires a token created by an active administrator. Database backups or SQLite WAL files created before destruction may still contain the prior encrypted data. Version metadata is available from `GET /metadata/{path}`. These endpoints use the same path scopes as secret reads and writes.
 
 ## Audit log
 

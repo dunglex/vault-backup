@@ -201,17 +201,34 @@ func (s *server) secretPathIntersects(access secretPrefixAccess, path string) (b
 
 func (s *server) visibleSecretPaths(access secretPrefixAccess) (*sql.Rows, error) {
 	if access.unrestricted {
-		return s.secretsDB.Query("SELECT path FROM secrets ORDER BY path")
+		return s.secretsDB.Query(`
+			SELECT path
+			FROM secrets
+			WHERE EXISTS (
+				SELECT 1 FROM secret_versions v
+				WHERE v.path = secrets.path
+				  AND v.version = secrets.current_version
+				  AND v.deleted_at IS NULL
+				  AND v.destroyed_at IS NULL
+			)
+			ORDER BY path`)
 	}
 	return s.secretsDB.Query(`
 		SELECT path
 		FROM secrets
 		WHERE EXISTS (
-			SELECT 1
-			FROM json_each(?) AS prefix
-			WHERE secrets.path = prefix.value
-			   OR substr(secrets.path, 1, length(prefix.value) + 1) = prefix.value || '/'
-		)
+				SELECT 1 FROM secret_versions v
+				WHERE v.path = secrets.path
+				  AND v.version = secrets.current_version
+				  AND v.deleted_at IS NULL
+				  AND v.destroyed_at IS NULL
+			)
+		  AND EXISTS (
+				SELECT 1
+				FROM json_each(?) AS prefix
+				WHERE secrets.path = prefix.value
+				   OR substr(secrets.path, 1, length(prefix.value) + 1) = prefix.value || '/'
+		  )
 		ORDER BY path`,
 		access.encoded,
 	)
