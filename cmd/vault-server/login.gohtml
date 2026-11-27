@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="/normalize.css">
   <link rel="stylesheet" href="/miligram.css">
   <link rel="stylesheet" href="/admin.css">
+  <link rel="stylesheet" href="/notyf.css">
   <style>
     .login-spinner {
       display: inline-block;
@@ -47,6 +48,8 @@
       </button>
     </form>
 </main>
+<script src="/notyf.js"></script>
+<script src="/notifications.js"></script>
 <script src="/api-loading.js"></script>
 <script>
 const form = document.getElementById('loginForm');
@@ -60,6 +63,7 @@ const loginButtonLabel = document.getElementById('loginButtonLabel');
 form.addEventListener('submit', async event => {
   event.preventDefault();
   if (submitButton.disabled) return;
+  errorBox.setAttribute('role', 'alert');
   errorBox.textContent = '';
   submitButton.disabled = true;
   submitButton.setAttribute('aria-busy', 'true');
@@ -78,6 +82,7 @@ form.addEventListener('submit', async event => {
     if (body.requires_totp) {
       totpChallenge.hidden = false;
       totpCode.disabled = false;
+      errorBox.setAttribute('role', 'status');
       errorBox.textContent = 'Enter a current authenticator code or an unused recovery code.';
       totpCode.focus();
       return;

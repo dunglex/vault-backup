@@ -294,6 +294,58 @@ func TestAuthenticatedPagesShareAccountSecurityNavigation(t *testing.T) {
 	}
 }
 
+func TestNotyfAssetsAreWiredIntoInteractivePages(t *testing.T) {
+	pages := []string{
+		"account.gohtml",
+		"audit.gohtml",
+		"login.gohtml",
+		"secret.gohtml",
+		"secrets.gohtml",
+		"security.gohtml",
+		"setup.gohtml",
+		"token.gohtml",
+	}
+	for _, name := range pages {
+		content, err := embeddedFiles.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		html := string(content)
+		for _, marker := range []string{
+			`href="/notyf.css"`,
+			`src="/notyf.js"`,
+			`src="/notifications.js"`,
+		} {
+			if !strings.Contains(html, marker) {
+				t.Errorf("%s is missing %s", name, marker)
+			}
+		}
+	}
+
+	for _, asset := range []struct {
+		name        string
+		contentType string
+		marker      string
+	}{
+		{"notyf.css", "text/css; charset=utf-8", ".notyf {"},
+		{"notyf.js", "text/javascript; charset=utf-8", "window.Notyf = exports.Notyf"},
+		{"notifications.js", "text/javascript; charset=utf-8", "window.vaultNotify"},
+	} {
+		response := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, "/"+asset.name, nil)
+		serveEmbeddedAsset(asset.name, asset.contentType).ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Errorf("%s status = %d, want %d", asset.name, response.Code, http.StatusOK)
+		}
+		if got := response.Header().Get("Content-Type"); got != asset.contentType {
+			t.Errorf("%s content type = %q, want %q", asset.name, got, asset.contentType)
+		}
+		if !strings.Contains(response.Body.String(), asset.marker) {
+			t.Errorf("%s does not contain expected marker %q", asset.name, asset.marker)
+		}
+	}
+}
+
 func TestPageTemplatesRenderStandalonePages(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -302,7 +354,7 @@ func TestPageTemplatesRenderStandalonePages(t *testing.T) {
 		{"index.gohtml", []string{"http-equiv=\"refresh\"", "/secrets.html"}},
 		{"setup.gohtml", []string{"<title>Initial setup - Vault Server</title>", `id="phase1"`, `id="phase2"`, `id="phase3"`, `id="phase4"`, `id="phase5"`, `id="setupKeyForm"`, `id="skipDomains"`, `id="extensionsForm"`, `id="enableOperators"`, `id="enableBackup"`, `id="skipExtensions"`, `id="loginLink"`, `name="password_confirmation"`, `name="main_domain"`, `name="alias_domains"`, `name="certificate_mode"`, `value="acme"`, "/v1/setup/validate-key", "/v1/setup/domains", "/v1/setup", "location.assign(result.redirect_url)"}},
 		{"login.gohtml", []string{`id="loginForm"`, `id="totpChallenge"`, `id="loginSpinner"`, `id="loginButtonLabel"`, "Signing in...", "Failed sign-in attempts are recorded with your IP address.", "Repeated failed attempts may result in this IP being blocked from signing in.", "/v1/auth/login"}},
-		{"secret.gohtml", []string{`id="paths"`, `id="secretPath"`, `class="secret-editor-heading"`, `id="secretBreadcrumb"`, `id="secretBreadcrumbItems"`, `id="versionControls"`, `id="versionSelect"`, "(current)", "loadSecretVersion", "showInfo", "renderBreadcrumb", `id="convert-format"`, `id="convert-case"`, "parseDotenv", "validateEditorData", "Duplicate dotenv key", ".slice(0, 5)", "location.assign('/secrets.html?group='"}},
+		{"secret.gohtml", []string{`id="paths"`, `id="secretPath"`, `class="secret-editor-heading"`, `id="secretBreadcrumb"`, `id="secretBreadcrumbItems"`, `id="versionControls"`, `id="versionSelect"`, "(current)", "loadSecretVersion", "window.vaultNotify.error", "window.vaultNotify.info", "window.vaultNotify.success", "renderBreadcrumb", `id="convert-format"`, `id="convert-case"`, "parseDotenv", "validateEditorData", "Duplicate dotenv key", ".slice(0, 5)", "location.assign('/secrets.html?group='"}},
 		{"secrets.gohtml", []string{`id="secret-groups"`, `id="secret-list"`, "/v1/secrets-browser", `get('group')`}},
 		{"token.gohtml", []string{`id="tokens"`, `id="openCreateToken"`, `id="createTokenDialog"`, `id="createToken"`, `id="closeCreateToken"`, `id="finishCreateToken"`, `id="tokenPrefixes"`, `<select id="tokenLifetimeDays" name="expires_in_days" required>`, `<option value="30" selected>30 days</option>`, `<option value="60">60 days</option>`, `<option value="90">90 days</option>`, `<option value="180">180 days</option>`, `<option value="365">365 days</option>`, `id="editTokenPrefixes"`, `id="tokenCopyPanel"`, `id="copyToken"`, "downloadClientCert", "downloadClientKey", "token-actions", "Sample vault-backup command", `id="sampleCommand"`, "window.confirm", "addEventListener('beforeunload'", "async function refreshTokens()"}},
 		{"security.gohtml", []string{`id="settingsForm"`, `id="enforceMTLS"`, `id="autoBlockLoginBruteforceIP"`, `id="fileLogging"`, `id="viewBlockedIPs"`, `id="blockedIPsDialog"`}},
@@ -310,7 +362,7 @@ func TestPageTemplatesRenderStandalonePages(t *testing.T) {
 		{"audit.gohtml", []string{`id="events"`, `href="/audits.html"`, "/v1/audit", "create_token", "update_token_scopes", "update_operator_scopes", "revoke_token", "issue_certificate", "rotate_certificate", "update_settings", "block_login_ip", "unblock_login_ip", "server_backup", ">started</option>", "async function refresh()"}},
 		{"401.gohtml", []string{"401", "Go to login"}},
 		{"404.gohtml", []string{"404", "Page not found"}},
-		{"lock.gohtml", []string{"423", "Setup locked"}},
+		{"lock.gohtml", []string{"423", "Setup locked", "<style>", ".status-page", ".status-card", "var(--danger)"}},
 	}
 
 	for _, test := range tests {
@@ -335,7 +387,13 @@ func TestPageTemplatesRenderStandalonePages(t *testing.T) {
 					t.Errorf("rendered %s does not contain %q", test.name, marker)
 				}
 			}
+			if test.name == "lock.gohtml" && strings.Contains(output.String(), `href="/admin.css"`) {
+				t.Error("lock page should use its page-local styles instead of admin.css")
+			}
 			if test.name == "secret.gohtml" {
+				if strings.Contains(output.String(), `id="error"`) {
+					t.Error("secret editor should display messages through Notyf, not an inline error box")
+				}
 				for _, title := range []string{
 					`id="editorTitle"`,
 					`id="currentVersion"`,

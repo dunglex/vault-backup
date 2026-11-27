@@ -428,6 +428,9 @@ func main() {
 	mux.HandleFunc("GET /normalize.css", serveEmbeddedAsset("normalize.css", "text/css; charset=utf-8"))
 	mux.HandleFunc("GET /miligram.css", serveEmbeddedAsset("miligram.css", "text/css; charset=utf-8"))
 	mux.HandleFunc("GET /admin.css", serveEmbeddedAsset("admin.css", "text/css; charset=utf-8"))
+	mux.HandleFunc("GET /notyf.css", serveEmbeddedAsset("notyf.css", "text/css; charset=utf-8"))
+	mux.HandleFunc("GET /notyf.js", serveEmbeddedAsset("notyf.js", "text/javascript; charset=utf-8"))
+	mux.HandleFunc("GET /notifications.js", serveEmbeddedAsset("notifications.js", "text/javascript; charset=utf-8"))
 	mux.HandleFunc("GET /api-loading.js", serveEmbeddedAsset("api-loading.js", "text/javascript; charset=utf-8"))
 	mux.HandleFunc("GET /qrcode.js", serveEmbeddedAsset("qrcode.js", "text/javascript; charset=utf-8"))
 

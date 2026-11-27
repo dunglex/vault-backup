@@ -7,7 +7,57 @@
   <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300italic,700,700italic">
   <link rel="stylesheet" href="/normalize.css">
   <link rel="stylesheet" href="/miligram.css">
-  <link rel="stylesheet" href="/admin.css">
+  <style>
+    :root {
+      --background: #f7f9fc;
+      --surface: #ffffff;
+      --border: #d9e0ea;
+      --text: #263238;
+      --muted: #66727f;
+      --danger: #b83250;
+      --shadow: 0 0.8rem 2.4rem rgba(29, 38, 55, 0.08);
+    }
+
+    body {
+      background: var(--background);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    .status-page {
+      align-items: center;
+      display: flex;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 2.4rem 1.6rem;
+    }
+
+    .panel {
+      background: var(--surface);
+      border: 0.1rem solid var(--border);
+      border-radius: 0.6rem;
+      box-shadow: var(--shadow);
+      padding: 2.4rem;
+    }
+
+    .status-card {
+      max-width: 56rem;
+      text-align: center;
+      width: 100%;
+    }
+
+    .status-code {
+      color: var(--danger);
+      font-size: 7.2rem;
+      font-weight: 700;
+      line-height: 1;
+      margin-bottom: 1.6rem;
+    }
+
+    .muted {
+      color: var(--muted);
+    }
+  </style>
 </head>
 <body class="status-page">
 <main class="panel status-card">

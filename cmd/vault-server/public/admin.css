@@ -309,12 +309,6 @@ textarea {
   margin-bottom: 1.6rem;
 }
 
-.status-code.danger {
-  background: none;
-  border: 0;
-  color: var(--danger);
-}
-
 #paths,
 #tokens {
   list-style: none;
