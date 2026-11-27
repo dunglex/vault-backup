@@ -102,6 +102,10 @@ func (s *server) newOperatorHandler() *operator.Handler {
 		RevokeTokens:   s.revokeOperatorTokens,
 		RevokeSessions: s.removeOperatorSessionsFromCache,
 		ValidPath:      validSecretPath,
+		ValidMount:     validSecretMount,
+		MountExists: func(mount string) (bool, error) {
+			return s.mountExists(mount, false)
+		},
 	})
 }
 
@@ -158,9 +162,9 @@ func (s *server) listOperatorDetails(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *server) updateOperatorSecretPrefixes(w http.ResponseWriter, r *http.Request) {
+func (s *server) updateOperatorSecretMounts(w http.ResponseWriter, r *http.Request) {
 	if handler := s.operatorHandlerOrUnavailable(w); handler != nil {
-		handler.UpdateSecretPrefixes(w, r)
+		handler.UpdateSecretMounts(w, r)
 	}
 }
 

@@ -1,8 +1,11 @@
 package main
 
 import (
+	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -50,7 +53,51 @@ func TestFormatVaultErrorPreservesOtherErrors(t *testing.T) {
 	}
 }
 
-func TestFormatVaultAPIErrorExplainsUnauthorizedToken(t *testing.T) {
+func TestFormatVaultErrorExplainsClientCertificateHandshakeFailure(t *testing.T) {
+	for _, alert := range []string{
+		"tls: bad certificate",
+		"tls: unknown certificate authority",
+		"tls: expired certificate",
+		"tls: certificate required",
+	} {
+		err := &url.Error{
+			Op:  "Get",
+			URL: "https://vault.example",
+			Err: &net.OpError{Op: "remote error", Err: errors.New(alert)},
+		}
+		got := formatVaultError(err)
+		for _, expected := range []string{
+			"rejected the client certificate",
+			"TLS handshake",
+			"trusted by the Vault server",
+		} {
+			if !strings.Contains(got, expected) {
+				t.Errorf("formatVaultError(%q) = %q, want it to contain %q", alert, got, expected)
+			}
+		}
+		if strings.Contains(got, "remote error:") || strings.Contains(got, "tls:") {
+			t.Errorf("formatVaultError(%q) exposed the raw TLS alert: %q", alert, got)
+		}
+	}
+}
+
+func TestFormatVaultErrorPreservesUnrelatedTLSFailures(t *testing.T) {
+	err := &url.Error{
+		Op:  "Get",
+		URL: "https://vault.example",
+		Err: &net.OpError{Op: "remote error", Err: errors.New("tls: protocol version not supported")},
+	}
+
+	got := formatVaultError(err)
+	if !strings.Contains(got, "protocol version not supported") {
+		t.Fatalf("formatVaultError() = %q, want the protocol error preserved", got)
+	}
+	if strings.Contains(got, "rejected the client certificate") {
+		t.Fatalf("formatVaultError() misclassified an unrelated TLS failure: %q", got)
+	}
+}
+
+func TestFormatVaultAPIErrorExplainsUnauthorizedCredentials(t *testing.T) {
 	err := &vault.ResponseError{StatusCode: http.StatusUnauthorized}
 
 	got := formatVaultAPIError(err)
@@ -59,6 +106,8 @@ func TestFormatVaultAPIErrorExplainsUnauthorizedToken(t *testing.T) {
 		"managed API token",
 		"expired",
 		"revoked",
+		"client certificate",
+		"mTLS",
 	} {
 		if !strings.Contains(got, expected) {
 			t.Errorf("formatVaultAPIError() = %q, want it to contain %q", got, expected)
@@ -69,14 +118,17 @@ func TestFormatVaultAPIErrorExplainsUnauthorizedToken(t *testing.T) {
 	}
 }
 
-func TestFormatVaultAPIErrorSuggestsCertificateChecksForForbidden(t *testing.T) {
+func TestFormatVaultAPIErrorExplainsForbiddenAuthorization(t *testing.T) {
 	err := &vault.ResponseError{StatusCode: http.StatusForbidden}
 
 	got := formatVaultAPIError(err)
-	for _, expected := range []string{"403 Forbidden", "mTLS", "client certificate"} {
+	for _, expected := range []string{"403 Forbidden", "authenticated token", "permission"} {
 		if !strings.Contains(got, expected) {
 			t.Errorf("formatVaultAPIError() = %q, want it to contain %q", got, expected)
 		}
+	}
+	if strings.Contains(got, "client certificate") || strings.Contains(got, "mTLS") {
+		t.Errorf("403 explanation incorrectly suggests an authentication problem: %q", got)
 	}
 }
 

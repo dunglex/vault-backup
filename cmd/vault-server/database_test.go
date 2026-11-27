@@ -67,7 +67,8 @@ func TestInitializeDatabaseRemovesLegacyUniqueTokenNameConstraint(t *testing.T) 
 			token_hash TEXT NOT NULL UNIQUE,
 			created_at INTEGER NOT NULL,
 			expires_at INTEGER NOT NULL,
-			revoked_at INTEGER
+			revoked_at INTEGER,
+			secret_prefixes TEXT NOT NULL DEFAULT '[]'
 		);
 		CREATE TABLE server_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 		INSERT INTO server_settings(key, value) VALUES ('auto_rotate_certificates', 'true');
@@ -100,12 +101,12 @@ func TestInitializeDatabaseRemovesLegacyUniqueTokenNameConstraint(t *testing.T) 
 	if count != 0 {
 		t.Fatal("legacy automatic certificate rotation setting was not removed")
 	}
-	var prefixes string
-	if err := db.QueryRow("SELECT secret_prefixes FROM api_tokens WHERE token_hash = 'first-hash'").Scan(&prefixes); err != nil {
+	var mounts string
+	if err := db.QueryRow("SELECT secret_mounts FROM api_tokens WHERE token_hash = 'first-hash'").Scan(&mounts); err != nil {
 		t.Fatal(err)
 	}
-	if prefixes != "[]" {
-		t.Fatalf("migrated token prefixes = %q, want empty scope", prefixes)
+	if mounts != "[]" {
+		t.Fatalf("migrated token mounts = %q, want empty scope", mounts)
 	}
 }
 
@@ -121,6 +122,7 @@ func TestInitializeDatabaseMigratesExistingAccountsToAdmin(t *testing.T) {
 		CREATE TABLE accounts (
 			username TEXT PRIMARY KEY,
 			password_hash TEXT NOT NULL,
+			secret_prefixes TEXT NOT NULL DEFAULT '[]',
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		);
 		INSERT INTO accounts(username, password_hash) VALUES ('existing-admin', 'hash');
@@ -138,12 +140,12 @@ func TestInitializeDatabaseMigratesExistingAccountsToAdmin(t *testing.T) {
 	if role != "admin" {
 		t.Fatalf("migrated account role = %q, want admin", role)
 	}
-	var prefixes string
-	if err := db.QueryRow("SELECT secret_prefixes FROM accounts WHERE username = 'existing-admin'").Scan(&prefixes); err != nil {
+	var mounts string
+	if err := db.QueryRow("SELECT secret_mounts FROM accounts WHERE username = 'existing-admin'").Scan(&mounts); err != nil {
 		t.Fatal(err)
 	}
-	if prefixes != "[]" {
-		t.Fatalf("migrated account prefixes = %q, want empty scope", prefixes)
+	if mounts != "[]" {
+		t.Fatalf("migrated account mounts = %q, want empty scope", mounts)
 	}
 	var locked int
 	if err := db.QueryRow("SELECT locked FROM accounts WHERE username = 'existing-admin'").Scan(&locked); err != nil {
@@ -354,12 +356,12 @@ func TestPageTemplatesRenderStandalonePages(t *testing.T) {
 		{"index.gohtml", []string{"http-equiv=\"refresh\"", "/secrets.html"}},
 		{"setup.gohtml", []string{"<title>Initial setup - Vault Server</title>", `id="phase1"`, `id="phase2"`, `id="phase3"`, `id="phase4"`, `id="phase5"`, `id="setupKeyForm"`, `id="skipDomains"`, `id="extensionsForm"`, `id="enableOperators"`, `id="enableBackup"`, `id="skipExtensions"`, `id="loginLink"`, `name="password_confirmation"`, `name="main_domain"`, `name="alias_domains"`, `name="certificate_mode"`, `value="acme"`, "/v1/setup/validate-key", "/v1/setup/domains", "/v1/setup", "location.assign(result.redirect_url)"}},
 		{"login.gohtml", []string{`id="loginForm"`, `id="totpChallenge"`, `id="loginSpinner"`, `id="loginButtonLabel"`, "Signing in...", "Failed sign-in attempts are recorded with your IP address.", "Repeated failed attempts may result in this IP being blocked from signing in.", "/v1/auth/login"}},
-		{"secret.gohtml", []string{`id="paths"`, `id="secretPath"`, "secret-editor-layout", `class="secret-editor-heading"`, `id="secretBreadcrumb"`, `id="secretBreadcrumbItems"`, `id="versionControls"`, `id="versionSelect"`, "(current)", "loadSecretVersion", "window.vaultNotify.error", "window.vaultNotify.info", "window.vaultNotify.success", "renderBreadcrumb", `id="convert-format"`, `id="convert-case"`, "parseDotenv", "validateEditorData", "Duplicate dotenv key", ".slice(0, 5)", "location.assign('/secrets.html?group='"}},
-		{"secrets.gohtml", []string{`id="secret-groups"`, `id="secret-list"`, "/v1/secrets-browser", `get('group')`}},
-		{"token.gohtml", []string{`id="tokens"`, `id="openCreateToken"`, `id="createTokenDialog"`, `id="createToken"`, `id="closeCreateToken"`, `id="finishCreateToken"`, `id="tokenPrefixes"`, `<select id="tokenLifetimeDays" name="expires_in_days" required>`, `<option value="30" selected>30 days</option>`, `<option value="60">60 days</option>`, `<option value="90">90 days</option>`, `<option value="180">180 days</option>`, `<option value="365">365 days</option>`, `id="editTokenPrefixes"`, `id="tokenCopyPanel"`, `id="copyToken"`, "downloadClientCert", "downloadClientKey", "token-actions", "Sample vault-backup command", `id="sampleCommand"`, "window.confirm", "addEventListener('beforeunload'", "async function refreshTokens()"}},
+		{"secret.gohtml", []string{`id="paths"`, `id="secretPath"`, "secret-editor-layout", `class="secret-editor-heading"`, `id="secretBreadcrumb"`, `id="secretBreadcrumbItems"`, `id="versionControls"`, `id="versionSelect"`, "(current)", "loadSecretVersion", "window.vaultNotify.error", "window.vaultNotify.info", "window.vaultNotify.success", "renderBreadcrumb", `id="convert-format"`, `id="convert-case"`, "parseDotenv", "validateEditorData", "Duplicate dotenv key", ".slice(0, 5)", "location.assign('/secrets.html?mount='"}},
+		{"secrets.gohtml", []string{`id="secret-summary"`, `id="secret-list"`, "/v1/secrets-browser", "all:'true'"}},
+		{"token.gohtml", []string{`id="tokens"`, `id="openCreateToken"`, `id="createTokenDialog"`, `id="createToken"`, `id="closeCreateToken"`, `id="finishCreateToken"`, `id="tokenMounts"`, `<select id="tokenLifetimeDays" name="expires_in_days" required>`, `<option value="30" selected>30 days</option>`, `<option value="60">60 days</option>`, `<option value="90">90 days</option>`, `<option value="180">180 days</option>`, `<option value="365">365 days</option>`, `id="editTokenMounts"`, `id="tokenCopyPanel"`, `id="copyToken"`, "downloadClientCert", "downloadClientKey", "token-actions", "Sample vault-backup command", `id="sampleCommand"`, "window.confirm", "addEventListener('beforeunload'", "async function refreshTokens()"}},
 		{"security.gohtml", []string{`id="settingsForm"`, `id="enforceMTLS"`, `id="autoBlockLoginBruteforceIP"`, `id="fileLogging"`, `id="viewBlockedIPs"`, `id="blockedIPsDialog"`}},
 		{"account.gohtml", []string{`id="totpSetupPanel"`, `id="openTOTPSetup"`, `>Setup 2FA</button>`, `<dialog id="totpSetupDialog"`, `id="closeTOTPSetup"`, `id="setupTOTP"`, `id="totpQRCode"`, `id="enableForm"`, `id="totpEnabledPanel"`, `id="openRecoveryCodesDialog"`, `<dialog id="recoveryCodesDialog"`, `id="regenerateRecoveryCodesForm"`, `<dialog id="disableTOTPDialog"`, `id="openDisableTOTPDialog"`, `<dialog id="passwordDialog"`, `id="passwordForm"`, `id="currentPassword"`, `id="newPassword"`, `id="repeatNewPassword"`, "/v1/account/totp/recovery-codes", "/v1/account/password", "/qrcode.js", "/v1/account/totp"}},
-		{"audit.gohtml", []string{`id="events"`, `href="/audits.html"`, "/v1/audit", "create_token", "update_token_scopes", "update_operator_scopes", "revoke_token", "issue_certificate", "rotate_certificate", "update_settings", "block_login_ip", "unblock_login_ip", "server_backup", ">started</option>", "async function refresh()"}},
+		{"audit.gohtml", []string{`id="events"`, `href="/audits.html"`, "/v1/audit", "create_token", "update_token_mounts", "update_operator_mounts", "revoke_token", "issue_certificate", "rotate_certificate", "update_settings", "block_login_ip", "unblock_login_ip", "server_backup", ">started</option>", "async function refresh()"}},
 		{"401.gohtml", []string{"401", "Go to login"}},
 		{"404.gohtml", []string{"404", "Page not found"}},
 		{"lock.gohtml", []string{"423", "Setup locked", "<style>", ".status-page", ".status-card", "var(--danger)"}},
@@ -420,31 +422,6 @@ func TestPageTemplatesRenderStandalonePages(t *testing.T) {
 				t.Error("navigator includes quotes in the redirect URL")
 			}
 		})
-	}
-}
-
-func TestSecretBrowserGroupButtonKeepsClickedSelection(t *testing.T) {
-	var output bytes.Buffer
-	if err := pageTemplate.ExecuteTemplate(&output, "secrets.gohtml", map[string]bool{"IsAdmin": true}); err != nil {
-		t.Fatal(err)
-	}
-
-	page := output.String()
-	start := strings.Index(page, "button.onclick = () => {")
-	if start < 0 {
-		t.Fatal("secret group click handler not found")
-	}
-	handler := page[start:]
-	end := strings.Index(handler, "\n    };")
-	if end < 0 {
-		t.Fatal("secret group click handler end not found")
-	}
-	handler = handler[:end]
-	if !strings.Contains(handler, "selectedGroup = group.name;") {
-		t.Fatal("group click handler does not select the clicked group")
-	}
-	if strings.Contains(handler, "new URLSearchParams") {
-		t.Fatal("group click handler unexpectedly overwrites the clicked group from the URL")
 	}
 }
 
@@ -662,11 +639,11 @@ func TestBrowseSecretsGroupsAndPaginates(t *testing.T) {
 		t.Fatal(err)
 	}
 	paths := []string{
-		"dummy/app/secret1",
-		"dummy/app/secret2",
-		"dummy/app/z-nested/secret3",
-		"production/database",
-		"other",
+		"kv/dummy/app/secret1",
+		"kv/dummy/app/secret2",
+		"kv/dummy/app/z-nested/secret3",
+		"kv/production/database",
+		"kv/other",
 	}
 	for _, path := range paths {
 		insertTestSecretRecord(t, db, path, "unused")
@@ -704,6 +681,16 @@ func TestBrowseSecretsGroupsAndPaginates(t *testing.T) {
 		!strings.Contains(nestedResponse.Body.String(), `"group":"dummy/app/z-nested"`) ||
 		!strings.Contains(nestedResponse.Body.String(), `"paths":["dummy/app/z-nested/secret3"]`) {
 		t.Fatalf("nested browse response = status %d, body %s", nestedResponse.Code, nestedResponse.Body.String())
+	}
+	allRequest := httptest.NewRequest(http.MethodGet, "/v1/secrets-browser?all=true&limit=10&offset=1", nil)
+	allRequest.AddCookie(&http.Cookie{Name: "vault_session", Value: "session"})
+	allResponse := httptest.NewRecorder()
+	s.browseSecrets(allResponse, allRequest)
+	if allResponse.Code != http.StatusOK ||
+		!strings.Contains(allResponse.Body.String(), `"group":""`) ||
+		!strings.Contains(allResponse.Body.String(), `"paths":["dummy/app/secret2","dummy/app/z-nested/secret3","other","production/database"]`) ||
+		!strings.Contains(allResponse.Body.String(), `"total":5`) {
+		t.Fatalf("all-path browse response = status %d, body %s", allResponse.Code, allResponse.Body.String())
 	}
 }
 

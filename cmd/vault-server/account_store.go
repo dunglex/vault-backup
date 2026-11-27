@@ -10,7 +10,7 @@ type accountRecord struct {
 	username           string
 	passwordHash       string
 	role               string
-	secretPrefixes     string
+	secretMounts       string
 	locked             int
 	mustChangePassword int
 	totpSecret         sql.NullString
@@ -32,7 +32,7 @@ func (s *server) accountDatabase(role string) *sql.DB {
 func (s *server) loadAccount(username string) (accountRecord, *sql.DB, error) {
 	var account accountRecord
 	err := s.db.QueryRow(`
-		SELECT username, password_hash, role, secret_prefixes, locked, must_change_password,
+		SELECT username, password_hash, role, secret_mounts, locked, must_change_password,
 		       totp_secret, totp_enabled, totp_recovery_codes
 		FROM accounts WHERE username = ? AND role = 'admin'`,
 		username,
@@ -40,7 +40,7 @@ func (s *server) loadAccount(username string) (accountRecord, *sql.DB, error) {
 		&account.username,
 		&account.passwordHash,
 		&account.role,
-		&account.secretPrefixes,
+		&account.secretMounts,
 		&account.locked,
 		&account.mustChangePassword,
 		&account.totpSecret,
@@ -64,7 +64,7 @@ func (s *server) loadAccount(username string) (accountRecord, *sql.DB, error) {
 		username:           operatorAccount.Username,
 		passwordHash:       operatorAccount.PasswordHash,
 		role:               operatorAccount.Role,
-		secretPrefixes:     operatorAccount.SecretPrefixes,
+		secretMounts:       operatorAccount.SecretMounts,
 		locked:             operatorAccount.Locked,
 		mustChangePassword: operatorAccount.MustChangePassword,
 		totpSecret:         operatorAccount.TOTPSecret,

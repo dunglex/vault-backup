@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Engines - Vault Server</title>
+  <link rel="stylesheet" href="/normalize.css">
+  <link rel="stylesheet" href="/miligram.css">
+  <link rel="stylesheet" href="/admin.css">
+</head>
+<body>
+<main class="app-shell">
+  <header class="app-header">
+    <h1 class="brand"><a href="/">Vault Server</a></h1>
+    <nav class="app-nav" aria-label="Admin navigation">
+      <button class="app-nav-toggle" type="button" aria-label="Open navigation menu" aria-expanded="false" aria-controls="app-nav-links">
+        <svg aria-hidden="true" viewBox="0 0 24 24" width="24" height="24">
+          <path d="M4 6h16M4 12h16M4 18h16" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="2"></path>
+        </svg>
+      </button>
+      <div id="app-nav-links" class="app-nav-links">
+        {{if .IsAdmin}}<a class="button" aria-current="page" href="/mounts.html">Engines</a>{{end}}
+        <a class="button button-outline" href="/secrets.html">Secrets</a>
+        <a class="button button-outline" href="/tokens.html">API</a>
+        <a class="button button-outline" href="/audits.html">Audit</a>
+        {{if and .IsAdmin .HasOperators}}<a class="button button-outline" href="/operators.html">Operators</a>{{end}}
+        {{if and .IsAdmin .HasBackup}}<a class="button button-outline" href="/backup.html">Backup</a>{{end}}
+        {{if .IsAdmin}}<a class="button button-outline" href="/security.html">Security</a>{{end}}
+        <a class="button button-outline" href="/account.html">Account</a>
+      </div>
+    </nav>
+  </header>
+  <div id="error" class="notice" role="alert"></div>
+  <section class="panel">
+    <div class="token-page-header">
+      <h2 class="section-label">Engines</h2>
+      <button id="openCreateEngine" type="button">Create engine</button>
+    </div>
+    <p>Create engines to isolate secrets and grant API tokens and Operators access per engine. Engine paths may contain multiple segments. An engine cannot be an ancestor or descendant of another engine.</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Engine</th><th>Status</th><th>Actions</th></tr></thead>
+        <tbody id="mountList" aria-live="polite"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+<dialog id="createEngineDialog" class="admin-dialog" aria-labelledby="createEngineTitle">
+  <form id="createEngineForm">
+    <div class="admin-dialog-heading">
+      <h2 id="createEngineTitle">Create engine</h2>
+      <button id="closeCreateEngine" class="button button-outline" type="button" aria-label="Close dialog">Close</button>
+    </div>
+    <label for="enginePath">Engine path</label>
+    <input id="enginePath" name="name" required placeholder="apps/cma" autocomplete="off">
+    <p id="createEngineError" class="notice" role="alert"></p>
+    <div class="row-actions admin-dialog-actions">
+      <button id="submitCreateEngine" type="submit">Create engine</button>
+    </div>
+  </form>
+</dialog>
+<script>
+const errorBox = document.getElementById('error');
+const createEngineDialog = document.getElementById('createEngineDialog');
+const createEngineError = document.getElementById('createEngineError');
+async function api(url, options = {}) {
+  options.credentials = 'same-origin';
+  options.headers = options.headers || {};
+  const response = await fetch(url, options);
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    if (response.status === 401) location.assign('/401.html');
+    throw new Error(body.error || 'Request failed');
+  }
+  return body;
+}
+async function refreshMounts() {
+  const result = await api('/v1/mounts/managed');
+  const list = document.getElementById('mountList');
+  list.replaceChildren();
+  for (const mount of result.mounts) {
+    const row = list.insertRow();
+    row.insertCell().textContent = mount.name;
+    row.insertCell().textContent = mount.deleted ? 'Deleted; access removed' : 'Active';
+    const actions = row.insertCell();
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'button button-outline';
+    button.textContent = mount.deleted ? 'Restore' : 'Delete';
+    button.addEventListener('click', async () => {
+      if (!mount.deleted && !confirm(`Delete engine ${mount.name}? Its secrets will be retained, and all token and Operator grants will be removed.`)) return;
+      try {
+        await api(mount.deleted ? '/v1/mounts/restore' : '/v1/mounts', {
+          method:mount.deleted ? 'PUT' : 'DELETE',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({name:mount.name})
+        });
+        errorBox.textContent = '';
+        await refreshMounts();
+      } catch (error) {
+        errorBox.textContent = error.message;
+      }
+    });
+    actions.append(button);
+  }
+}
+document.getElementById('openCreateEngine').addEventListener('click', () => {
+  createEngineError.textContent = '';
+  createEngineDialog.showModal();
+  document.getElementById('enginePath').focus();
+});
+document.getElementById('closeCreateEngine').addEventListener('click', () => createEngineDialog.close());
+createEngineDialog.addEventListener('close', () => {
+  document.getElementById('enginePath').value = '';
+  createEngineError.textContent = '';
+});
+document.getElementById('createEngineForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  const submitButton = document.getElementById('submitCreateEngine');
+  submitButton.disabled = true;
+  createEngineError.textContent = '';
+  try {
+    await api('/v1/mounts', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({name:document.getElementById('enginePath').value})
+    });
+    createEngineDialog.close();
+    errorBox.textContent = '';
+    await refreshMounts();
+  } catch (error) {
+    if (createEngineDialog.open) {
+      createEngineError.textContent = error.message;
+    } else {
+      errorBox.textContent = error.message;
+    }
+  } finally {
+    submitButton.disabled = false;
+  }
+});
+refreshMounts().catch(error => { errorBox.textContent = error.message; });
+</script>
+</body>
+</html>

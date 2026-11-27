@@ -9,15 +9,15 @@ import (
 	"time"
 )
 
-func TestOperatorAuditEventsAreFilteredBySecretPrefixes(t *testing.T) {
+func TestOperatorAuditEventsAreFilteredBySecretMounts(t *testing.T) {
 	s := newOperatorTestServer(t)
-	prefixes, err := encodeSecretPrefixes([]string{"team-a"})
+	mounts, err := encodeSecretMounts([]string{"kv"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.operatorDB.Exec(
-		"INSERT INTO accounts(username, password_hash, role, secret_prefixes) VALUES ('scoped-operator', 'hash', 'operator', ?)",
-		prefixes,
+		"INSERT INTO accounts(username, password_hash, role, secret_mounts) VALUES ('scoped-operator', 'hash', 'operator', ?)",
+		mounts,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -41,10 +41,10 @@ func TestOperatorAuditEventsAreFilteredBySecretPrefixes(t *testing.T) {
 		source   string
 		resource string
 	}{
-		{"read", "operator-token", "web", "team-a/database"},
-		{"read", "operator-token", "web", "team-a-archive/database"},
-		{"read", "api-token:abc123", "api", "team-a/database"},
-		{"read", "api-token:def456", "api", "team-b/database"},
+		{"read", "operator-token", "web", "kv/team-a/database"},
+		{"read", "operator-token", "web", "kv-archive/database"},
+		{"read", "api-token:abc123", "api", "kv/team-a/database"},
+		{"read", "api-token:def456", "api", "other/team-b/database"},
 		{"list", "api-token:abc123", "api", ""},
 		{"list", "scoped-operator", "web", "*"},
 		{"list", "other-operator", "web", "*"},
@@ -84,13 +84,13 @@ func TestOperatorAuditEventsAreFilteredBySecretPrefixes(t *testing.T) {
 	for _, event := range result.Events {
 		visibleResources[event.Resource] = true
 	}
-	for _, resource := range []string{"team-a/database", "", "*"} {
+	for _, resource := range []string{"kv/team-a/database", "", "*"} {
 		if !visibleResources[resource] {
 			t.Errorf("operator audit omitted allowed resource %q", resource)
 		}
 	}
 
-	hiddenSearch := httptest.NewRequest(http.MethodGet, "/v1/audit?year="+time.Now().UTC().Format("2006")+"&q=team-b", nil)
+	hiddenSearch := httptest.NewRequest(http.MethodGet, "/v1/audit?year="+time.Now().UTC().Format("2006")+"&q=other", nil)
 	hiddenSearch.AddCookie(&http.Cookie{Name: "vault_session", Value: "scoped-operator-session"})
 	hiddenResponse := httptest.NewRecorder()
 	s.listAuditEvents(hiddenResponse, hiddenSearch)

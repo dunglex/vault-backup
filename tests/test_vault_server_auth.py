@@ -148,19 +148,26 @@ def main() -> None:
             and b'id="logout"' not in operators_page,
             "popup operator creation form",
         )
+        for mount in ("team-a", "team-b"):
+            status, _ = server.client.json(
+                "POST",
+                f"{server.https_url}/v1/mounts",
+                data={"name": mount},
+            )
+            assert_status(201, status, f"create {mount} mount")
         status, create_result = server.client.json(
             "POST",
             f"{server.https_url}/v1/operators",
-            data={"username": "night-shift", "prefixes": ["team-a"]},
+            data={"username": "night-shift", "mounts": ["team-a"]},
         )
         assert_status(201, status, "create operator as admin")
-        for secret_path in ("team-a/auth-test", "team-b/auth-test"):
+        for mount in ("team-a", "team-b"):
             status, _ = server.client.json(
                 "PUT",
-                f"{server.https_url}/v1/secrets/{secret_path}",
-                data={"data": {"marker": secret_path}},
+                f"{server.https_url}/v1/secrets/auth-test?mount={mount}",
+                data={"data": {"marker": mount}},
             )
-            assert_status(200, status, f"seed operator scope test secret {secret_path}")
+            assert_status(200, status, f"seed operator mount test secret {mount}")
         temporary_password = create_result.get("initial_password")
         require(
             isinstance(temporary_password, str) and 12 <= len(temporary_password) <= 20
@@ -185,7 +192,7 @@ def main() -> None:
                 "authenticated": True,
                 "role": "operator",
                 "must_change_password": True,
-                "secret_prefixes": ["team-a"],
+                "secret_mounts": ["team-a"],
             },
             "operator session requires a password change",
         )
@@ -224,31 +231,35 @@ def main() -> None:
         status, operator_secret_editor = operator_client.request("GET", f"{server.https_url}/secret.html")
         assert_status(200, status, "open operator secret editor")
         require(
-            b'id="secretPrefix"' in operator_secret_editor
-            and b'id="secretPathSuffix"' in operator_secret_editor
-            and b'id="adminPathField"' in operator_secret_editor,
-            "show prefix selector and suffix field in operator editor",
+            b'id="secretMount"' in operator_secret_editor
+            and b'id="secretPath"' in operator_secret_editor,
+            "show mount selector and mount-relative path in operator editor",
         )
-        status, visible_secrets = operator_client.json("GET", f"{server.https_url}/v1/secrets")
-        assert_status(200, status, "list secrets within operator prefixes")
-        require(visible_secrets == ["team-a/auth-test"], "filter operator secret listing by prefix")
+        status, visible_mounts = operator_client.json("GET", f"{server.https_url}/v1/mounts")
+        assert_status(200, status, "list operator mounts")
+        require(visible_mounts == {"mounts": ["team-a"]}, "filter mounts by operator grant")
+        status, visible_secrets = operator_client.json(
+            "GET", f"{server.https_url}/v1/secrets?mount=team-a"
+        )
+        assert_status(200, status, "list secrets within operator mount")
+        require(visible_secrets == ["auth-test"], "list all paths inside the granted mount")
         status, scoped_audit = operator_client.json(
             "GET", f"{server.https_url}/v1/audit?q=team-a%2Fauth-test"
         )
-        assert_status(200, status, "search audit events within operator prefixes")
+        assert_status(200, status, "search audit events within operator mount")
         require(
             any(event["resource"] == "team-a/auth-test" for event in scoped_audit["events"]),
-            "include audit records for assigned prefixes",
+            "include audit records for assigned mount",
         )
         status, hidden_audit = operator_client.json(
             "GET", f"{server.https_url}/v1/audit?q=team-b%2Fauth-test"
         )
-        assert_status(200, status, "search audit events outside operator prefixes")
-        require(hidden_audit["total"] == 0, "exclude audit records outside assigned prefixes")
+        assert_status(200, status, "search audit events outside operator mount")
+        require(hidden_audit["total"] == 0, "exclude audit records outside assigned mount")
         status, _ = operator_client.request(
-            "GET", f"{server.https_url}/v1/secrets/team-b/auth-test"
+            "GET", f"{server.https_url}/v1/secrets/auth-test?mount=team-b"
         )
-        assert_status(403, status, "deny operator access outside assigned prefixes")
+        assert_status(403, status, "deny operator access outside assigned mount")
         status, reset_result = server.client.json(
             "POST",
             f"{server.https_url}/v1/operators/password",
@@ -310,10 +321,9 @@ def main() -> None:
         status, operator_token_page = operator_client.request("GET", f"{server.https_url}/tokens.html")
         assert_status(200, status, "open operator token management page")
         require(
-            b'<select id="tokenPrefixes" name="prefixes" multiple' in operator_token_page
-            and b'<select id="editTokenPrefixes" multiple' in operator_token_page
-            and b'<textarea id="tokenPrefixes"' not in operator_token_page,
-            "restrict operator token path choices to assigned prefixes",
+            b'<select id="tokenMounts" name="mounts" multiple' in operator_token_page
+            and b'<select id="editTokenMounts" multiple' in operator_token_page,
+            "restrict operator token mount choices to assigned mounts",
         )
         status, _ = operator_client.request("GET", f"{server.https_url}/v1/audit")
         assert_status(200, status, "allow operator audit access")
@@ -328,7 +338,7 @@ def main() -> None:
                 "locked": False,
                 "mfa_enabled": True,
                 "mfa_configured": True,
-                "prefixes": ["team-a"],
+                "mounts": ["team-a"],
             }],
             "operator status",
         )
@@ -394,7 +404,7 @@ def main() -> None:
         status, _ = server.client.json(
             "POST",
             f"{server.http_url}/v1/tokens",
-            data={"name": "insecure-token", "prefixes": ["app"]},
+            data={"name": "insecure-token", "mounts": ["kv"]},
             headers=server.cookie_header(),
         )
         assert_status(426, status, "require HTTPS when issuing tokens and private keys")
@@ -402,13 +412,13 @@ def main() -> None:
         status, _ = server.client.json(
             "POST",
             f"{server.https_url}/v1/tokens",
-            data={"name": "invalid-expiry", "expires_in_days": 366, "prefixes": ["app"]},
+            data={"name": "invalid-expiry", "expires_in_days": 366, "mounts": ["kv"]},
         )
         assert_status(400, status, "reject token lifetime above one year")
         status, _ = server.client.json(
             "POST",
             f"{server.https_url}/v1/tokens",
-            data={"name": "invalid-expiry", "expires_in_days": 0, "prefixes": ["app"]},
+            data={"name": "invalid-expiry", "expires_in_days": 0, "mounts": ["kv"]},
         )
         assert_status(400, status, "reject non-positive token lifetime")
 
@@ -448,7 +458,7 @@ def main() -> None:
         status, duplicate_name = server.client.json(
             "POST",
             f"{server.https_url}/v1/tokens",
-            data={"name": "backup-agent", "prefixes": ["token"]},
+            data={"name": "backup-agent", "mounts": ["kv"]},
         )
         assert_status(409, status, "reject duplicate API token name")
         require("already exists" in duplicate_name["error"], "explain duplicate API token name")
@@ -479,21 +489,15 @@ def main() -> None:
         assert_status(200, status, "authenticate with managed API token")
         status, _ = server.client.request("GET", f"{server.https_url}/api/v1/kv/data/token/test", headers=api_headers)
         assert_status(200, status, "read secret with managed API token")
-        status, _ = server.client.json(
-            "PUT",
-            f"{server.https_url}/v1/secrets/private/auth-test",
-            data={"data": {"marker": "outside-token-scope"}},
-        )
-        assert_status(200, status, "seed API token scope boundary test secret")
         status, _ = server.client.request(
-            "GET", f"{server.https_url}/api/v1/kv/data/private/auth-test", headers=api_headers
+            "GET", f"{server.https_url}/api/v1/team-a/data/auth-test", headers=api_headers
         )
-        assert_status(403, status, "deny API token access outside assigned prefixes")
+        assert_status(403, status, "deny API token access outside assigned mount")
         status, api_listing = server.client.json(
             "LIST", f"{server.https_url}/api/v1/kv/metadata/", headers=api_headers
         )
-        assert_status(200, status, "list API secrets within token prefixes")
-        require(api_listing == {"data": {"keys": ["token"]}}, "filter API listing by token prefix")
+        assert_status(200, status, "list API secrets within token mount")
+        require(api_listing == {"data": {"keys": ["token/"]}}, "list API paths inside the granted mount")
 
         _, settings = server.client.json("GET", f"{server.https_url}/v1/settings")
         require(
@@ -602,7 +606,7 @@ def main() -> None:
             f"{server.https_url}/api/v1/kv/data/token/test",
             headers=api_headers | {"X-Vault-Backup-Protocol": "client-cert-v1"},
         )
-        assert_status(403, status, "require client certificate for Vault API")
+        assert_status(401, status, "require client certificate for Vault API")
         status, _ = cert_client.request(
             "GET",
             f"{server.https_url}/api/v1/kv/data/token/test",
@@ -620,7 +624,7 @@ def main() -> None:
             f"{server.https_url}/api/v1/kv/data/token/test",
             headers={"X-Vault-Token": duplicate_token, "X-Vault-Backup-Protocol": "client-cert-v1"},
         )
-        assert_status(403, status, "reject a certificate paired with a different token")
+        assert_status(401, status, "reject a certificate paired with a different token")
         status, _ = server.client.request("GET", f"{server.https_url}/api/health")
         assert_status(200, status, "keep health checks available without mTLS")
         status, _ = server.client.request("GET", f"{server.https_url}/security.html")

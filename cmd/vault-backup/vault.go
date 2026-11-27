@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -271,7 +272,7 @@ func backupSecretFolder(client *vault.Client, arguments Arguments) error {
 	metadataPath := arguments.SecretName + "/metadata/" + arguments.SecretPath
 	list, err := client.Logical().List(metadataPath)
 	if err != nil {
-		return fmt.Errorf("list folder %s: %w", arguments.SecretPath, err)
+		return fmt.Errorf("list folder %s: %s", arguments.SecretPath, formatVaultAPIError(err))
 	}
 	if list == nil || list.Data == nil {
 		return fmt.Errorf("list folder %s: empty response", arguments.SecretPath)
@@ -323,7 +324,7 @@ func backupSingleSecret(client *vault.Client, arguments Arguments) error {
 	fullPath := arguments.SecretName + "/data/" + arguments.SecretPath
 	secretData, err := client.Logical().Read(fullPath)
 	if err != nil {
-		return fmt.Errorf("read secret %s: %w", arguments.SecretPath, err)
+		return fmt.Errorf("read secret %s: %s", arguments.SecretPath, formatVaultAPIError(err))
 	}
 	if secretData == nil || secretData.Data == nil {
 		return fmt.Errorf("read secret %s: empty response", arguments.SecretPath)
@@ -518,6 +519,9 @@ func formatVaultError(err error) string {
 	if err == nil {
 		return "unknown error"
 	}
+	if isClientCertificateHandshakeError(err) {
+		return "Vault rejected the client certificate during the TLS handshake. Check that the certificate is valid, matches the private key, and is trusted by the Vault server's client CA."
+	}
 	var responseErr *vault.ResponseError
 	if errors.As(err, &responseErr) {
 		details := strings.TrimSpace(strings.Join(responseErr.Errors, "; "))
@@ -543,6 +547,25 @@ func formatVaultError(err error) string {
 	return err.Error()
 }
 
+func isClientCertificateHandshakeError(err error) bool {
+	var networkErr *net.OpError
+	if !errors.As(err, &networkErr) || networkErr.Op != "remote error" {
+		return false
+	}
+	switch networkErr.Err.Error() {
+	case "tls: bad certificate",
+		"tls: unsupported certificate",
+		"tls: revoked certificate",
+		"tls: expired certificate",
+		"tls: unknown certificate",
+		"tls: unknown certificate authority",
+		"tls: certificate required":
+		return true
+	default:
+		return false
+	}
+}
+
 func formatVaultAPIError(err error) string {
 	var responseErr *vault.ResponseError
 	if !errors.As(err, &responseErr) {
@@ -551,10 +574,10 @@ func formatVaultAPIError(err error) string {
 	details := strings.TrimSpace(strings.Join(responseErr.Errors, "; "))
 	switch responseErr.StatusCode {
 	case http.StatusUnauthorized:
-		message := "Vault rejected the API token (401 Unauthorized). Use a current managed API token; it may be invalid, expired, or revoked."
+		message := "Vault rejected the API token or client certificate (401 Unauthorized). Use a current managed API token (it may be invalid, expired, or revoked); if mTLS is enforced, check that the client certificate matches the token and is current."
 		return formatVaultResponseMessage(message, details)
 	case http.StatusForbidden:
-		message := "Vault denied this request (403 Forbidden). If mTLS is enforced, check that the client certificate matches the API token and is current; also verify the token has access."
+		message := "Vault denied this request (403 Forbidden). The authenticated token does not have permission to access this resource."
 		return formatVaultResponseMessage(message, details)
 	case http.StatusUpgradeRequired:
 		message := "Vault requires a newer vault-backup client (426 Upgrade Required). Upgrade to a version that supports the server's required API protocol."

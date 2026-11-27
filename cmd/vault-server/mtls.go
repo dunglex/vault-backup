@@ -468,7 +468,8 @@ func (s *server) updateSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) issueAPITokenCertificate(w http.ResponseWriter, r *http.Request) {
-	if !s.authorizedWeb(r) {
+	session, ok := s.sessionFromRequest(r)
+	if !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
@@ -480,6 +481,17 @@ func (s *server) issueAPITokenCertificate(w http.ResponseWriter, r *http.Request
 	if err != nil || id < 1 {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid token id"})
 		return
+	}
+	if session.role != "admin" {
+		owned, err := s.operatorOwnsAPIToken(id, session.username)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not verify API token ownership"})
+			return
+		}
+		if !owned {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "active API token not found"})
+			return
+		}
 	}
 	tx, err := s.db.Begin()
 	if err != nil {

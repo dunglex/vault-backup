@@ -81,15 +81,15 @@ def main() -> None:
         status, legacy_page = server.client.request("GET", f"{server.https_url}/audit.html")
         assert_status(200, status, "redirect legacy audit page URL")
         require(b'id="events"' in legacy_page, "legacy audit URL target")
-        _, audit = server.client.json("GET", f"{server.https_url}/v1/audit?action=update&q=app%2Fdatabase")
-        require(any(e["action"] == "update" and e["resource"] == "app/database" for e in audit["events"]), "filtered audit")
+        _, audit = server.client.json("GET", f"{server.https_url}/v1/audit?action=update&q=kv%2Fapp%2Fdatabase")
+        require(any(e["action"] == "update" and e["resource"] == "kv/app/database" for e in audit["events"]), "filtered audit")
         require(
             any(e["source"] == "web" and e["detail"] == "version=2" for e in audit["events"])
             and any(e["source"] == "api" and e["detail"] == "version=3" for e in audit["events"]),
             "audit update versions for web and API",
         )
         _, reads = server.client.json(
-            "GET", f"{server.https_url}/v1/audit?action=read&q=app%2Fdatabase"
+            "GET", f"{server.https_url}/v1/audit?action=read&q=kv%2Fapp%2Fdatabase"
         )
         require(
             any(e["source"] == "web" and e["detail"] == "version=1" for e in reads["events"])
@@ -117,14 +117,16 @@ def main() -> None:
         assert_status(401, status, "reject unauthenticated audit access")
 
         status, page = server.client.request("GET", f"{server.https_url}/secrets.html")
-        assert_status(200, status, "serve grouped secret browser")
-        require(b'id="secret-groups"' in page, "browser groups")
+        assert_status(200, status, "serve secret browser")
+        require(b'id="secret-list"' in page, "secret list")
+        require(b'id="secret-groups"' not in page, "remove browser groups")
+        require(b"all:'true'" in page, "browse all secrets")
         require(b'href="/operators.html"' not in page, "hide operator navigation without the optional database")
         status, _ = server.client.request("GET", f"{server.https_url}/operators.html")
         assert_status(404, status, "keep operator management disabled without the optional database")
         _, browser = server.client.json("GET", f"{server.https_url}/v1/secrets-browser?group=app&limit=1&offset=0")
         require("groups" in browser, "browser response")
-        print("PASS: grouped and paginated secret browser")
+        print("PASS: ungrouped and paginated secret browser")
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ import subprocess
 TEST_DIR = Path(__file__).resolve().parent
 TESTS = [
     "test_vault_backup_setup.py",
+    "test_vault_backup_tls.py",
     "test_vault_backup_seed.py",
     "test_vault_backup_env.py",
     "test_vault_backup_restore.py",

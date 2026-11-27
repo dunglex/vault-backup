@@ -18,71 +18,30 @@
           <path d="M4 6h16M4 12h16M4 18h16" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="2"></path>
         </svg>
       </button>
-      <div id="app-nav-links" class="app-nav-links">
+     <div id="app-nav-links" class="app-nav-links">
+        {{if .IsAdmin}}<a class="button button-outline" href="/mounts.html">Engines</a>{{end}}
         <a class="button button-outline" href="/secrets.html">Secrets</a>
-        <a class="button button-outline" href="/tokens.html">API tokens</a>
-        <a class="button button-outline" href="/audits.html">Audit log</a>
-        {{if .HasOperators}}<a class="button button-outline" href="/operators.html">Operators</a>{{end}}
-        <a class="button" aria-current="page" href="/backup.html">Backup</a>
-        <a class="button button-outline" href="/security.html">Security</a>
+        <a class="button button-outline" href="/tokens.html">API</a>
+        <a class="button button-outline" href="/audits.html">Audit</a>
+        {{if and .IsAdmin .HasOperators}}<a class="button button-outline" href="/operators.html">Operators</a>{{end}}
+        {{if and .IsAdmin .HasBackup}}<a class="button" aria-current="page" href="/backup.html">Backup</a>{{end}}
+        {{if .IsAdmin}}<a class="button button-outline" href="/security.html">Security</a>{{end}}
         <a class="button button-outline" href="/account.html">Account</a>
       </div>
     </nav>
   </header>
   <div id="error" class="notice" role="alert"></div>
   <section class="panel">
-    <h2 class="section-label">Scheduled backup</h2>
-    <form id="backupSettingsForm">
-      <label class="setting-option">
-        <input id="automaticServerBackup" type="checkbox">
-        Enable scheduled server backups
-      </label>
-      <label for="serverBackupCron">Backup schedule (six-field cron, UTC)</label>
-      <input id="serverBackupCron" type="text" maxlength="128" value="0 0 2 * * *" autocomplete="off" spellcheck="false">
-      <p class="muted">Every day at 02:00:00 UTC by default. Archives older than 30 days are removed after a successful backup.</p>
-      <p class="muted">Last successful backup: <span id="lastServerBackup">None</span></p>
-      <button type="submit">Save backup settings</button>
-      <span id="saved" class="success" role="status"></span>
-    </form>
-  </section>
-  <section class="panel">
-    <h2 class="section-label">S3 copy</h2>
-    <form id="s3SettingsForm">
-      <label class="setting-option">
-        <input id="s3Enabled" type="checkbox">
-        Copy each created backup to S3
-      </label>
-      <p class="muted">Disabled by default. Backups are first created locally, then uploaded after the server databases reopen.</p>
-      <label for="s3Endpoint">S3 endpoint (optional)</label>
-      <input id="s3Endpoint" type="url" maxlength="512" placeholder="https://s3.amazonaws.com">
-      <label for="s3Region">Region</label>
-      <input id="s3Region" maxlength="128" placeholder="us-east-1">
-      <label for="s3Bucket">Bucket</label>
-      <input id="s3Bucket" maxlength="255" required>
-      <label for="s3Prefix">Object key prefix (optional)</label>
-      <input id="s3Prefix" maxlength="512" placeholder="vault-server/backups">
-      <label for="s3AccessKeyId">Access key ID</label>
-      <input id="s3AccessKeyId" maxlength="512" autocomplete="off">
-      <label for="s3SecretAccessKey">Secret access key</label>
-      <input id="s3SecretAccessKey" type="password" maxlength="512" autocomplete="new-password" placeholder="Leave blank to keep the saved key">
-      <label for="s3SessionToken">Session token (optional)</label>
-      <input id="s3SessionToken" type="password" maxlength="4096" autocomplete="off">
-      <label class="setting-option">
-        <input id="s3PathStyle" type="checkbox">
-        Use path-style bucket URLs
-      </label>
-      <div class="row-actions">
-        <button type="submit">Save S3 settings</button>
-        <button id="testS3Connection" class="button button-outline" type="button">Test S3 connection</button>
-        <span id="s3Saved" class="success" role="status"></span>
-      </div>
-    </form>
-  </section>
-  <section class="panel">
     <div class="token-page-header">
       <h2 class="section-label">Server backups</h2>
-      <button id="createServerBackup" type="button">Create backup now</button>
+      <div class="row-actions">
+        <button id="openBackupSettings" class="button button-outline" type="button">Schedule backup</button>
+        <button id="openS3Settings" class="button button-outline" type="button">S3 copy settings</button>
+        <button id="createServerBackup" type="button">Create backup now</button>
+      </div>
     </div>
+    <p class="muted">Last successful backup: <span id="lastServerBackup">None</span></p>
+    <p id="s3Status" class="muted" role="status"></p>
     <table>
       <thead><tr><th>Name</th><th>Created</th><th>Operators</th><th>Secrets</th><th>API tokens</th><th>Actions</th></tr></thead>
       <tbody id="backups"></tbody>
@@ -90,6 +49,63 @@
     <p id="backupsEmpty" class="muted" hidden>No server backups found.</p>
   </section>
 </main>
+<dialog id="backupSettingsDialog" class="admin-dialog" aria-labelledby="backupSettingsTitle">
+  <form id="backupSettingsForm">
+    <div class="admin-dialog-heading">
+      <h2 id="backupSettingsTitle">Schedule backup</h2>
+      <button id="closeBackupSettings" class="button button-outline" type="button" aria-label="Close dialog">Close</button>
+    </div>
+    <label class="setting-option">
+      <input id="automaticServerBackup" type="checkbox">
+      Enable scheduled server backups
+    </label>
+    <label for="serverBackupCron">Backup schedule (six-field cron, UTC)</label>
+    <input id="serverBackupCron" type="text" maxlength="128" value="0 0 2 * * *" autocomplete="off" spellcheck="false">
+    <p class="muted">Every day at 02:00:00 UTC by default. Archives older than 30 days are removed after a successful backup.</p>
+    <p id="backupSettingsError" class="notice" role="alert"></p>
+    <div class="row-actions admin-dialog-actions">
+      <span id="saved" class="success" role="status"></span>
+      <button id="saveBackupSettings" type="submit">Save backup settings</button>
+    </div>
+  </form>
+</dialog>
+<dialog id="s3SettingsDialog" class="admin-dialog" aria-labelledby="s3SettingsTitle">
+  <form id="s3SettingsForm">
+    <div class="admin-dialog-heading">
+      <h2 id="s3SettingsTitle">S3 copy settings</h2>
+      <button id="closeS3Settings" class="button button-outline" type="button" aria-label="Close dialog">Close</button>
+    </div>
+    <label class="setting-option">
+      <input id="s3Enabled" type="checkbox">
+      Copy each created backup to S3
+    </label>
+    <p class="muted">Disabled by default. Backups are first created locally, then uploaded after the server databases reopen.</p>
+    <label for="s3Endpoint">S3 endpoint (optional)</label>
+    <input id="s3Endpoint" type="url" maxlength="512" placeholder="https://s3.amazonaws.com">
+    <label for="s3Region">Region</label>
+    <input id="s3Region" maxlength="128" placeholder="us-east-1">
+    <label for="s3Bucket">Bucket</label>
+    <input id="s3Bucket" maxlength="255" required>
+    <label for="s3Prefix">Object key prefix (optional)</label>
+    <input id="s3Prefix" maxlength="512" placeholder="vault-server/backups">
+    <label for="s3AccessKeyId">Access key ID</label>
+    <input id="s3AccessKeyId" maxlength="512" autocomplete="off">
+    <label for="s3SecretAccessKey">Secret access key</label>
+    <input id="s3SecretAccessKey" type="password" maxlength="512" autocomplete="new-password" placeholder="Leave blank to keep the saved key">
+    <label for="s3SessionToken">Session token (optional)</label>
+    <input id="s3SessionToken" type="password" maxlength="4096" autocomplete="off">
+    <label class="setting-option">
+      <input id="s3PathStyle" type="checkbox">
+      Use path-style bucket URLs
+    </label>
+    <p id="s3SettingsError" class="notice" role="alert"></p>
+    <div class="row-actions admin-dialog-actions">
+      <button id="saveS3Settings" type="submit">Save S3 settings</button>
+      <button id="testS3Connection" class="button button-outline" type="button">Test S3 connection</button>
+      <span id="s3Saved" class="success" role="status"></span>
+    </div>
+  </form>
+</dialog>
 <dialog id="restoreBackupDialog" class="admin-dialog" aria-labelledby="restoreBackupTitle">
   <div class="admin-dialog-heading">
     <h2 id="restoreBackupTitle">Restore server backup</h2>
@@ -102,6 +118,8 @@
 <script src="/api-loading.js"></script>
 <script>
 const errorBox = document.getElementById('error');
+const backupSettingsDialog = document.getElementById('backupSettingsDialog');
+const s3SettingsDialog = document.getElementById('s3SettingsDialog');
 let restoreName = '';
 async function api(path, options = {}) {
   options.credentials = 'same-origin';
@@ -116,6 +134,7 @@ async function loadSettings() {
   document.getElementById('serverBackupCron').value = settings.server_backup_cron;
   document.getElementById('lastServerBackup').textContent = settings.server_backup_last_success || 'None';
   document.getElementById('s3Enabled').checked = settings.s3_enabled;
+  document.getElementById('s3Status').textContent = settings.s3_enabled ? 'S3 copy is enabled.' : 'S3 copy is disabled.';
   document.getElementById('s3Endpoint').value = settings.s3_endpoint || '';
   document.getElementById('s3Region').value = settings.s3_region || '';
   document.getElementById('s3Bucket').value = settings.s3_bucket || '';
@@ -166,29 +185,64 @@ function s3Payload() {
   if (sessionToken !== '') payload.s3_session_token = sessionToken;
   return payload;
 }
+document.getElementById('openS3Settings').addEventListener('click', () => {
+  document.getElementById('s3SettingsError').textContent = '';
+  document.getElementById('s3Saved').textContent = '';
+  s3SettingsDialog.showModal();
+  document.getElementById('s3Enabled').focus();
+});
+document.getElementById('closeS3Settings').addEventListener('click', () => s3SettingsDialog.close());
 document.getElementById('s3SettingsForm').addEventListener('submit', async event => {
   event.preventDefault();
+  const saveButton = document.getElementById('saveS3Settings');
+  document.getElementById('s3SettingsError').textContent = '';
+  document.getElementById('s3Saved').textContent = '';
+  saveButton.disabled = true;
   try {
     await api('/v1/backup/settings', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(s3Payload())});
     document.getElementById('s3Saved').textContent = 'Saved';
-  } catch (error) { errorBox.textContent = error.message; }
+    document.getElementById('s3Status').textContent = document.getElementById('s3Enabled').checked
+      ? 'S3 copy is enabled.' : 'S3 copy is disabled.';
+  } catch (error) {
+    document.getElementById('s3SettingsError').textContent = error.message;
+  } finally {
+    saveButton.disabled = false;
+  }
 });
 document.getElementById('testS3Connection').addEventListener('click', async () => {
   document.getElementById('s3Saved').textContent = '';
+  document.getElementById('s3SettingsError').textContent = '';
   try {
     await api('/v1/backup/s3/test', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(s3Payload())});
     document.getElementById('s3Saved').textContent = 'Connection successful';
-  } catch (error) { errorBox.textContent = error.message; }
+  } catch (error) {
+    document.getElementById('s3SettingsError').textContent = error.message;
+  }
 });
+document.getElementById('openBackupSettings').addEventListener('click', () => {
+  document.getElementById('backupSettingsError').textContent = '';
+  document.getElementById('saved').textContent = '';
+  backupSettingsDialog.showModal();
+  document.getElementById('automaticServerBackup').focus();
+});
+document.getElementById('closeBackupSettings').addEventListener('click', () => backupSettingsDialog.close());
 document.getElementById('backupSettingsForm').addEventListener('submit', async event => {
   event.preventDefault();
+  const saveButton = document.getElementById('saveBackupSettings');
+  document.getElementById('backupSettingsError').textContent = '';
+  document.getElementById('saved').textContent = '';
+  saveButton.disabled = true;
   try {
     await api('/v1/backup/settings', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({
       automatic_server_backup:document.getElementById('automaticServerBackup').checked,
       server_backup_cron:document.getElementById('serverBackupCron').value
     })});
     document.getElementById('saved').textContent = 'Saved';
-  } catch (error) { errorBox.textContent = error.message; }
+  } catch (error) {
+    document.getElementById('backupSettingsError').textContent = error.message;
+  } finally {
+    saveButton.disabled = false;
+  }
 });
 document.getElementById('createServerBackup').addEventListener('click', async () => {
   try {

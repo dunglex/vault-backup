@@ -266,8 +266,8 @@ func (s *server) apiTokenOwnerIsAdmin(r *http.Request) (bool, error) {
 }
 
 func (s *server) authorizeVersionedAPIPath(w http.ResponseWriter, r *http.Request, action string) (string, string, bool) {
-	path := r.PathValue("path")
-	if !validSecretPath(r.PathValue("mount")+"/"+path) || path == "" {
+	mount, path := r.PathValue("mount"), r.PathValue("path")
+	if !validSecretMount(mount) || !validSecretPath(path) {
 		s.recordAuditEvent(r, action, "failure", s.auditRequestActor(r, "api"), "api", path, "invalid_secret_path")
 		writeInvalidSecretPath(w)
 		return "", "", false
@@ -277,18 +277,18 @@ func (s *server) authorizeVersionedAPIPath(w http.ResponseWriter, r *http.Reques
 		s.recordAuditEvent(r, action, "failure", s.auditRequestActor(r, "api"), "api", path, "unauthorized")
 		return "", "", false
 	}
-	allowed, err := s.secretPathAllowed(access, path)
+	allowed, err := s.secretMountAllowed(access, mount)
 	if err != nil {
 		s.recordAuditEvent(r, action, "failure", s.auditRequestActor(r, "api"), "api", path, "scope_lookup_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not verify secret access"})
 		return "", "", false
 	}
 	if !allowed {
-		s.recordAuditEvent(r, action, "failure", s.auditRequestActor(r, "api"), "api", path, "scope_denied")
+		s.recordAuditEvent(r, action, "failure", s.auditRequestActor(r, "api"), "api", secretStoragePath(mount, path), "scope_denied")
 		denySecretScope(w)
 		return "", "", false
 	}
-	return path, s.auditRequestActor(r, "api"), true
+	return secretStoragePath(mount, path), s.auditRequestActor(r, "api"), true
 }
 
 func (s *server) getKVMetadata(w http.ResponseWriter, r *http.Request) {

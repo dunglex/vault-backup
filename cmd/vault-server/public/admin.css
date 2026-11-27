@@ -422,33 +422,19 @@ textarea {
   padding: 1.4rem;
 }
 
-.secret-groups,
 .secret-list {
   list-style: none;
   margin: 0;
   padding: 0;
 }
 
-.secret-groups li,
 .secret-list li {
   border-bottom: 0.1rem solid var(--border);
   padding: 0.8rem 0;
 }
 
-.secret-groups li:last-child,
 .secret-list li:last-child {
   border-bottom: 0;
-}
-
-.group-button {
-  margin: 0;
-  text-align: left;
-  width: 100%;
-}
-
-.group-button.selected {
-  background: var(--primary);
-  color: #fff;
 }
 
 .secret-list a {

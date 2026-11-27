@@ -19,12 +19,13 @@
         </svg>
       </button>
       <div id="app-nav-links" class="app-nav-links">
+        {{if .IsAdmin}}<a class="button button-outline" href="/mounts.html">Engines</a>{{end}}
         <a class="button button-outline" href="/secrets.html">Secrets</a>
-        <a class="button button-outline" href="/tokens.html">API tokens</a>
-        <a class="button button-outline" href="/audits.html">Audit log</a>
-        {{if .IsAdmin}}<a class="button" aria-current="page" href="/operators.html">Operators</a>
-        {{if .HasBackup}}<a class="button button-outline" href="/backup.html">Backup</a>{{end}}
-        <a class="button button-outline" href="/security.html">Security</a>{{end}}
+        <a class="button button-outline" href="/tokens.html">API</a>
+        <a class="button button-outline" href="/audits.html">Audit</a>
+        {{if and .IsAdmin .HasOperators}}<a class="button" aria-current="page" href="/operators.html">Operators</a>{{end}}
+        {{if and .IsAdmin .HasBackup}}<a class="button button-outline" href="/backup.html">Backup</a>{{end}}
+        {{if .IsAdmin}}<a class="button button-outline" href="/security.html">Security</a>{{end}}
         <a class="button button-outline" href="/account.html">Account</a>
       </div>
     </nav>
@@ -35,7 +36,7 @@
       <h2 class="section-label">Operator accounts</h2>
       <button id="openCreateOperator" type="button">Add operator</button>
     </div>
-    <p>Operators can manage secrets, API tokens, and audit events within their allowed secret path prefixes. Each prefix includes that path and its descendants. Locking an operator revokes their sessions. If MFA is enforced, operators must re-enroll after 2FA is removed.</p>
+    <p>Operators can manage secrets, API tokens, and audit events in their assigned engines. Locking an operator revokes their sessions. If MFA is enforced, operators must re-enroll after 2FA is removed.</p>
     <h3 class="section-label">Current operators</h3>
     <ul id="operators" class="operator-list" aria-live="polite"></ul>
   </section>
@@ -48,8 +49,9 @@
       <div id="operatorDialogError" class="notice" role="alert"></div>
       <label for="operatorUsername">Username</label>
       <input id="operatorUsername" name="username" maxlength="128" required>
-      <label for="operatorPrefixes">Allowed secret path prefixes (up to 100, one per line)</label>
-      <textarea id="operatorPrefixes" name="prefixes" rows="4" required placeholder="team-a&#10;shared/build"></textarea>
+      <label for="operatorMounts">Allowed engines</label>
+      <select id="operatorMounts" name="mounts" multiple required size="5"></select>
+      <p class="muted">Each selected engine grants access to all its secret paths.</p>
       <div class="row-actions admin-dialog-actions">
         <button id="createOperator" type="submit">Create operator</button>
       </div>
@@ -66,15 +68,15 @@
       </section>
     </form>
   </dialog>
-  <dialog id="operatorPrefixesDialog" class="admin-dialog" aria-labelledby="operatorPrefixesTitle">
-    <form id="operatorPrefixesForm">
+  <dialog id="operatorMountsDialog" class="admin-dialog" aria-labelledby="operatorMountsTitle">
+    <form id="operatorMountsForm">
       <div class="admin-dialog-heading">
-        <h2 id="operatorPrefixesTitle">Edit operator access</h2>
-        <button id="closeOperatorPrefixes" class="button button-outline" type="button">Close</button>
+        <h2 id="operatorMountsTitle">Edit operator access</h2>
+        <button id="closeOperatorMounts" class="button button-outline" type="button">Close</button>
       </div>
-      <div id="operatorPrefixesError" class="notice" role="alert"></div>
-      <label for="editOperatorPrefixes">Allowed secret path prefixes (up to 100, one per line)</label>
-      <textarea id="editOperatorPrefixes" rows="5" required></textarea>
+      <div id="operatorMountsError" class="notice" role="alert"></div>
+      <label for="editOperatorMounts">Allowed engines</label>
+      <select id="editOperatorMounts" multiple required size="5"></select>
       <div class="row-actions admin-dialog-actions">
         <button type="submit">Save access</button>
       </div>
@@ -100,7 +102,8 @@
 const errorBox = document.getElementById('error');
 const createDialog = document.getElementById('createOperatorDialog');
 const resetPasswordDialog = document.getElementById('resetOperatorPasswordDialog');
-const prefixesDialog = document.getElementById('operatorPrefixesDialog');
+const mountsDialog = document.getElementById('operatorMountsDialog');
+let secretMounts = [];
 let passwordAcknowledgementRequired = false;
 let resetPasswordAcknowledgementRequired = false;
 let editingOperator = '';
@@ -139,10 +142,10 @@ function renderOperators(operators) {
     mfaStatus.className = 'operator-badge operator-badge-muted';
     mfaStatus.textContent = operator.mfa_enabled ? '2FA enabled' :
       operator.mfa_configured ? '2FA setup pending' : '2FA disabled';
-    const prefixes = document.createElement('span');
-    prefixes.className = 'operator-badge operator-badge-muted';
-    prefixes.textContent = operator.prefixes.length ? 'Paths: ' + operator.prefixes.join(', ') : 'No secret path access';
-    identity.append(label, status, mfaStatus, prefixes);
+    const mounts = document.createElement('span');
+    mounts.className = 'operator-badge operator-badge-muted';
+    mounts.textContent = operator.mounts.length ? 'Engines: ' + operator.mounts.join(', ') : 'No engine access';
+    identity.append(label, status, mfaStatus, mounts);
     const actions = document.createElement('div');
     actions.className = 'operator-actions';
     const lock = document.createElement('button');
@@ -161,20 +164,37 @@ function renderOperators(operators) {
     resetPassword.className = 'button button-outline';
     resetPassword.textContent = 'Reset password';
     resetPassword.addEventListener('click', () => resetOperatorPassword(operator, resetPassword));
-    const editPrefixes = document.createElement('button');
-    editPrefixes.type = 'button';
-    editPrefixes.className = 'button button-outline';
-    editPrefixes.textContent = 'Edit paths';
-    editPrefixes.addEventListener('click', () => {
+    const editMounts = document.createElement('button');
+    editMounts.type = 'button';
+    editMounts.className = 'button button-outline';
+    editMounts.textContent = 'Edit engines';
+    editMounts.addEventListener('click', () => {
       editingOperator = operator.username;
-      document.getElementById('operatorPrefixesTitle').textContent = `Edit paths for ${operator.username}`;
-      document.getElementById('operatorPrefixesError').textContent = '';
-      document.getElementById('editOperatorPrefixes').value = operator.prefixes.join('\n');
-      prefixesDialog.showModal();
+      document.getElementById('operatorMountsTitle').textContent = `Edit engines for ${operator.username}`;
+      document.getElementById('operatorMountsError').textContent = '';
+      setSelectedMounts('editOperatorMounts', operator.mounts);
+      mountsDialog.showModal();
     });
-    actions.append(lock, removeMFA, resetPassword, editPrefixes);
+    actions.append(lock, removeMFA, resetPassword, editMounts);
     item.append(identity, actions);
     list.append(item);
+  }
+}
+function setSelectedMounts(id, selectedMounts) {
+  const select = document.getElementById(id);
+  for (const option of select.options) option.selected = selectedMounts.includes(option.value);
+}
+function selectedMounts(id) {
+  return Array.from(document.getElementById(id).selectedOptions, option => option.value);
+}
+function populateMountChoices(id) {
+  const select = document.getElementById(id);
+  select.replaceChildren();
+  for (const mount of secretMounts) {
+    const option = document.createElement('option');
+    option.value = mount;
+    option.textContent = mount;
+    select.append(option);
   }
 }
 async function loadOperators() {
@@ -255,7 +275,7 @@ document.getElementById('operatorForm').addEventListener('submit', async event =
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({
         username:document.getElementById('operatorUsername').value,
-        prefixes:document.getElementById('operatorPrefixes').value.split('\n').map(prefix => prefix.trim()).filter(Boolean)
+        mounts:selectedMounts('operatorMounts')
       })
     });
     document.getElementById('operatorUsername').disabled = true;
@@ -347,22 +367,33 @@ resetPasswordDialog.addEventListener('close', () => {
     'Copy the password or select it to copy manually.';
   resetPasswordAcknowledgementRequired = false;
 });
-loadOperators();
-document.getElementById('closeOperatorPrefixes').addEventListener('click', () => prefixesDialog.close());
-document.getElementById('operatorPrefixesForm').addEventListener('submit', async event => {
+async function initializeOperatorPage() {
+  try {
+    const result = await api('/v1/mounts');
+    secretMounts = result.mounts;
+    populateMountChoices('operatorMounts');
+    populateMountChoices('editOperatorMounts');
+    await loadOperators();
+  } catch (error) {
+    errorBox.textContent = error.message;
+  }
+}
+initializeOperatorPage();
+document.getElementById('closeOperatorMounts').addEventListener('click', () => mountsDialog.close());
+document.getElementById('operatorMountsForm').addEventListener('submit', async event => {
   event.preventDefault();
-  const error = document.getElementById('operatorPrefixesError');
+  const error = document.getElementById('operatorMountsError');
   error.textContent = '';
   try {
-    await api('/v1/operators/prefixes', {
+    await api('/v1/operators/mounts', {
       method:'PUT',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({
         username:editingOperator,
-        prefixes:document.getElementById('editOperatorPrefixes').value.split('\n').map(prefix => prefix.trim()).filter(Boolean)
+        mounts:selectedMounts('editOperatorMounts')
       })
     });
-    prefixesDialog.close();
+    mountsDialog.close();
     await loadOperators();
   } catch (failure) {
     error.textContent = failure.message;

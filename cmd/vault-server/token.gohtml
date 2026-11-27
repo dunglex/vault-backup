@@ -21,9 +21,10 @@
         </svg>
       </button>
       <div id="app-nav-links" class="app-nav-links">
+        {{if .IsAdmin}}<a class="button button-outline" href="/mounts.html">Engines</a>{{end}}
         <a class="button button-outline" href="/secrets.html">Secrets</a>
-        <a class="button" aria-current="page" href="/tokens.html">API tokens</a>
-        <a class="button button-outline" href="/audits.html">Audit log</a>
+        <a class="button" aria-current="page" href="/tokens.html">API</a>
+        <a class="button button-outline" href="/audits.html">Audit</a>
         {{if and .IsAdmin .HasOperators}}<a class="button button-outline" href="/operators.html">Operators</a>{{end}}
         {{if and .IsAdmin .HasBackup}}<a class="button button-outline" href="/backup.html">Backup</a>{{end}}
         {{if .IsAdmin}}<a class="button button-outline" href="/security.html">Security</a>{{end}}
@@ -57,15 +58,10 @@
         <option value="180">180 days</option>
         <option value="365">365 days</option>
       </select>
-      {{if .IsAdmin}}
-      <label for="tokenPrefixes">Allowed secret path prefixes (up to 100, one per line)</label>
-      <textarea id="tokenPrefixes" name="prefixes" rows="4" required placeholder="team-a&#10;shared/build"></textarea>
-      {{else}}
-      <label for="tokenPrefixes">Choose allowed secret path prefixes</label>
-      <select id="tokenPrefixes" name="prefixes" multiple required size="5"></select>
-      <p class="muted">Only prefixes assigned to your operator account are available. Hold Ctrl or Command to choose multiple prefixes.</p>
-      {{end}}
-      <p class="muted">Each prefix grants access to that exact secret path and its descendants.</p>
+      <label for="tokenMounts">Allowed engines</label>
+      <select id="tokenMounts" name="mounts" multiple required size="5"></select>
+      {{if not .IsAdmin}}<p class="muted">Only engines assigned to your operator account are available.</p>{{end}}
+      <p class="muted">Each selected engine grants access to all its secret paths.</p>
       {{if .EnforceMTLS}}<p class="muted">The client certificate expires at the same time as the token.</p>{{end}}
     </div>
     <p id="dialogError" class="notice" role="alert"></p>
@@ -91,21 +87,15 @@
     </div>
   </form>
 </dialog>
-<dialog id="editTokenPrefixesDialog" class="admin-dialog" aria-labelledby="editTokenPrefixesTitle">
-  <form id="editTokenPrefixesForm">
+<dialog id="editTokenMountsDialog" class="admin-dialog" aria-labelledby="editTokenMountsTitle">
+  <form id="editTokenMountsForm">
     <div class="admin-dialog-heading">
-      <h2 id="editTokenPrefixesTitle">Edit token access</h2>
-      <button id="closeEditTokenPrefixes" class="button button-outline" type="button">Close</button>
+      <h2 id="editTokenMountsTitle">Edit token access</h2>
+      <button id="closeEditTokenMounts" class="button button-outline" type="button">Close</button>
     </div>
-    <div id="editTokenPrefixesError" class="notice" role="alert"></div>
-    {{if .IsAdmin}}
-    <label for="editTokenPrefixes">Allowed secret path prefixes (up to 100, one per line)</label>
-    <textarea id="editTokenPrefixes" rows="5" required></textarea>
-    {{else}}
-    <label for="editTokenPrefixes">Choose allowed secret path prefixes</label>
-    <select id="editTokenPrefixes" multiple required size="5"></select>
-    <p class="muted">Only prefixes assigned to your operator account are available. Hold Ctrl or Command to choose multiple prefixes.</p>
-    {{end}}
+    <div id="editTokenMountsError" class="notice" role="alert"></div>
+    <label for="editTokenMounts">Allowed engines</label>
+    <select id="editTokenMounts" multiple required size="5"></select>
     <div class="row-actions admin-dialog-actions">
       <button type="submit">Save access</button>
     </div>
@@ -119,44 +109,31 @@ const enforceMTLS = {{if .EnforceMTLS}}true{{else}}false{{end}};
 const isAdmin = {{if .IsAdmin}}true{{else}}false{{end}};
 const errorBox = document.getElementById('error');
 const createDialog = document.getElementById('createTokenDialog');
-const editPrefixesDialog = document.getElementById('editTokenPrefixesDialog');
+const editMountsDialog = document.getElementById('editTokenMountsDialog');
 let apiTokens = [];
 let newCredentials = null;
 let editingTokenId = 0;
-let operatorPrefixes = [];
+let allowedMounts = [];
 
 function showError(message) { errorBox.textContent = message || ''; }
-function readPrefixValues(id) {
-  const control = document.getElementById(id);
-  if (control instanceof HTMLSelectElement) {
-    return Array.from(control.selectedOptions, option => option.value);
-  }
-  return control.value.split('\n').map(prefix => prefix.trim()).filter(Boolean);
+function readMountValues(id) {
+  return Array.from(document.getElementById(id).selectedOptions, option => option.value);
 }
-function setPrefixValues(id, prefixes) {
+function setMountValues(id, mounts) {
   const control = document.getElementById(id);
-  if (control instanceof HTMLSelectElement) {
-    const selectablePrefixes = operatorPrefixes.filter(prefix =>
-      prefixes.some(granted => prefix === granted || prefix.startsWith(granted + '/')));
-    for (const option of control.options) {
-      option.selected = selectablePrefixes.includes(option.value);
-    }
-    return;
-  }
-  control.value = prefixes.join('\n');
+  for (const option of control.options) option.selected = mounts.includes(option.value);
 }
-function populateOperatorPrefixChoices(id) {
+function populateMountChoices(id) {
   const select = document.getElementById(id);
-  if (!(select instanceof HTMLSelectElement)) return;
   select.replaceChildren();
-  for (const prefix of operatorPrefixes) {
+  for (const mount of allowedMounts) {
     const option = document.createElement('option');
-    option.value = prefix;
-    option.textContent = prefix;
+    option.value = mount;
+    option.textContent = mount;
     select.append(option);
   }
 }
-function sampleCommand() {
+function sampleCommand(mount) {
   return [
     'export VAULT_TOKEN="PASTE_COPIED_TOKEN_HERE"',
     './bin/vault-backup \\',
@@ -165,7 +142,7 @@ function sampleCommand() {
     '  --ca_cert /path/to/vault-server-ca.pem \\',
     '  --client_cert ./vault-client-cert.pem \\',
     '  --client_key ./vault-client-key.pem \\',
-    '  --secret_name kv \\',
+    '  --secret_name ' + mount + ' \\',
     '  --secret_path app/database \\',
     '  --output_mode file \\',
     '  --output_format env \\',
@@ -193,7 +170,7 @@ function downloadCredential(filename, contents) {
   link.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
-function showCreatedCredentials(certificate, privateKey, token) {
+function showCreatedCredentials(certificate, privateKey, token, mount) {
   const hasCertificate = enforceMTLS && Boolean(certificate && privateKey);
   const credentialDownloads = document.getElementById('credentialDownloads');
   credentialDownloads.replaceChildren();
@@ -219,8 +196,12 @@ function showCreatedCredentials(certificate, privateKey, token) {
     privateKeyButton.onclick = () => downloadCredential('vault-client-key.pem', newCredentials.privateKey);
     credentialDownloads.append(certificateButton, privateKeyButton);
     credentialDownloads.hidden = false;
-    document.getElementById('sampleCommand').querySelector('code').textContent = sampleCommand();
-    document.getElementById('sampleCommandPanel').hidden = false;
+    const sampleMount = mount || readMountValues('tokenMounts')[0] || allowedMounts[0];
+    const samplePanel = document.getElementById('sampleCommandPanel');
+    samplePanel.hidden = !sampleMount;
+    if (sampleMount) {
+      document.getElementById('sampleCommand').querySelector('code').textContent = sampleCommand(sampleMount);
+    }
   }
   const tokenPanel = document.getElementById('tokenCopyPanel');
   tokenPanel.hidden = !token;
@@ -260,23 +241,23 @@ function renderTokens() {
       ? 'client cert expires ' + token.certificate_expires_at
       : 'no client certificate';
     details.textContent = token.name + ' (' + state + ', token expires ' + token.expires_at
-      + (certificate ? '; ' + certificate : '') + '; allowed paths: '
-      + (token.prefixes.length ? token.prefixes.join(', ') : 'none') + ')';
+      + (certificate ? '; ' + certificate : '') + '; allowed engines: '
+      + (token.mounts.length ? token.mounts.join(', ') : 'none') + ')';
     li.appendChild(details);
     const actions = document.createElement('div');
     actions.className = 'row-actions token-actions';
-    const editPrefixes = document.createElement('button');
-    editPrefixes.className = 'button button-outline';
-    editPrefixes.textContent = 'Edit paths';
-    editPrefixes.type = 'button';
-    editPrefixes.onclick = () => {
+    const editMounts = document.createElement('button');
+    editMounts.className = 'button button-outline';
+    editMounts.textContent = 'Edit engines';
+    editMounts.type = 'button';
+    editMounts.onclick = () => {
       editingTokenId = token.id;
-      document.getElementById('editTokenPrefixesTitle').textContent = `Edit paths for ${token.name}`;
-      document.getElementById('editTokenPrefixesError').textContent = '';
-      setPrefixValues('editTokenPrefixes', token.prefixes);
-      editPrefixesDialog.showModal();
+      document.getElementById('editTokenMountsTitle').textContent = `Edit engines for ${token.name}`;
+      document.getElementById('editTokenMountsError').textContent = '';
+      setMountValues('editTokenMounts', token.mounts);
+      editMountsDialog.showModal();
     };
-    actions.appendChild(editPrefixes);
+    actions.appendChild(editMounts);
     if (!token.revoked && !token.expired) {
       if (enforceMTLS) {
         const certificateButton = document.createElement('button');
@@ -292,7 +273,7 @@ function renderTokens() {
             document.getElementById('credentialNotice').textContent = 'Download and protect these files now. The private key is not stored for later download.';
             document.getElementById('createToken').hidden = true;
             document.getElementById('finishCreateToken').hidden = false;
-            showCreatedCredentials(result.client_certificate, result.client_private_key, null);
+            showCreatedCredentials(result.client_certificate, result.client_private_key, null, token.mounts[0]);
             createDialog.showModal();
             await refreshTokens();
           } catch (error) {
@@ -354,7 +335,7 @@ document.getElementById('finishCreateToken').addEventListener('click', closeWith
 createDialog.addEventListener('close', () => {
   document.getElementById('tokenName').value = '';
   document.getElementById('tokenLifetimeDays').value = '30';
-  setPrefixValues('tokenPrefixes', []);
+  setMountValues('tokenMounts', []);
   document.getElementById('credentialNotice').textContent = '';
   document.getElementById('credentialNotice').hidden = true;
   document.getElementById('dialogError').textContent = '';
@@ -400,7 +381,7 @@ document.getElementById('createTokenForm').addEventListener('submit', async even
       body:JSON.stringify({
         name,
         expires_in_days:Number(document.getElementById('tokenLifetimeDays').value),
-        prefixes:readPrefixValues('tokenPrefixes')
+        mounts:readMountValues('tokenMounts')
       })
     });
     document.getElementById('createTokenTitle').textContent = 'Token created';
@@ -409,7 +390,7 @@ document.getElementById('createTokenForm').addEventListener('submit', async even
     document.getElementById('credentialNotice').textContent = hasCertificate
       ? 'Copy the token and download both credential files now. The token will not be shown again.'
       : 'Copy the token now. It will not be shown again after closing.';
-    showCreatedCredentials(result.client_certificate, result.client_private_key, result.token);
+    showCreatedCredentials(result.client_certificate, result.client_private_key, result.token, readMountValues('tokenMounts')[0]);
     createButton.hidden = true;
     document.getElementById('finishCreateToken').hidden = false;
     await refreshTokens();
@@ -424,14 +405,11 @@ document.getElementById('createTokenForm').addEventListener('submit', async even
 
 async function initializeTokenPage() {
   try {
+    const result = await api('/v1/mounts');
+    allowedMounts = result.mounts;
+    populateMountChoices('tokenMounts');
+    populateMountChoices('editTokenMounts');
     if (!isAdmin) {
-      const session = await api('/v1/session');
-      if (session.role !== 'operator' || !Array.isArray(session.secret_prefixes)) {
-        throw new Error('Could not load your allowed secret path prefixes');
-      }
-      operatorPrefixes = session.secret_prefixes;
-      populateOperatorPrefixChoices('tokenPrefixes');
-      populateOperatorPrefixChoices('editTokenPrefixes');
       document.getElementById('openCreateToken').disabled = false;
     }
   } catch (error) {
@@ -440,20 +418,20 @@ async function initializeTokenPage() {
   await refreshTokens();
 }
 initializeTokenPage();
-document.getElementById('closeEditTokenPrefixes').addEventListener('click', () => editPrefixesDialog.close());
-document.getElementById('editTokenPrefixesForm').addEventListener('submit', async event => {
+document.getElementById('closeEditTokenMounts').addEventListener('click', () => editMountsDialog.close());
+document.getElementById('editTokenMountsForm').addEventListener('submit', async event => {
   event.preventDefault();
-  const error = document.getElementById('editTokenPrefixesError');
+  const error = document.getElementById('editTokenMountsError');
   error.textContent = '';
   try {
-    await api('/v1/tokens/' + editingTokenId + '/prefixes', {
+    await api('/v1/tokens/' + editingTokenId + '/mounts', {
       method:'PUT',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({
-        prefixes:readPrefixValues('editTokenPrefixes')
+        mounts:readMountValues('editTokenMounts')
       })
     });
-    editPrefixesDialog.close();
+    editMountsDialog.close();
     await refreshTokens();
   } catch (failure) {
     error.textContent = failure.message;

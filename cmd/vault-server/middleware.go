@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"log"
 	"net/http"
 	"strings"
@@ -342,17 +344,22 @@ func (s *server) apiClientCertificateGuard(next http.Handler) http.Handler {
 		var expectedID int64
 		if token != "" {
 			if err := s.lookupActiveAPIToken(token, &expectedID); err != nil {
-				writeJSON(w, http.StatusForbidden, map[string]string{"error": "invalid API token"})
+				if errors.Is(err, sql.ErrNoRows) {
+					writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid API token"})
+					return
+				}
+				log.Printf("ERROR: could not validate API token for mTLS request: %v", err)
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not validate API token"})
 				return
 			}
 		}
 		tokenID, ok := s.certificateTokenID(r)
 		if !ok {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "a valid managed client certificate is required"})
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "a valid managed client certificate is required"})
 			return
 		}
 		if token != "" && expectedID != tokenID {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "client certificate does not match the API token"})
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "client certificate does not match the API token"})
 			return
 		}
 		next.ServeHTTP(w, r)

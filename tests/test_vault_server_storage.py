@@ -38,7 +38,7 @@ def main() -> None:
         status, _ = server.client.json(
             "POST",
             f"{server.https_url}/v1/operators",
-            data={"username": "restart-test", "prefixes": ["restart-test"]},
+            data={"username": "restart-test", "mounts": ["kv"]},
         )
         assert_status(201, status, "create operator before restart")
         server.stop()

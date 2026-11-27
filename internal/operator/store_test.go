@@ -17,12 +17,25 @@ func TestRenderPageIncludesOperatorManagementControls(t *testing.T) {
 	}
 	for _, marker := range []string{
 		`id="operatorForm"`,
-		`id="operatorPrefixes"`,
+		`id="operatorMounts"`,
 		"/v1/operators",
+		`href="/operators.html"`,
+		`href="/mounts.html"`,
+		`href="/security.html"`,
 	} {
 		if !strings.Contains(page.String(), marker) {
 			t.Errorf("operator page missing %q", marker)
 		}
+	}
+}
+
+func TestRenderPageIncludesBackupNavigationWhenEnabled(t *testing.T) {
+	var page bytes.Buffer
+	if err := RenderPageWithOptions(&page, true); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(page.String(), `href="/backup.html"`) {
+		t.Error("operator page missing backup navigation")
 	}
 }
 
@@ -35,7 +48,8 @@ func TestMigrateLegacyAccountsMovesOperatorsAndSessions(t *testing.T) {
 	if _, err := source.Exec(`
 		CREATE TABLE accounts (
 			username TEXT PRIMARY KEY, password_hash TEXT NOT NULL, role TEXT NOT NULL,
-			secret_prefixes TEXT NOT NULL, locked INTEGER NOT NULL, must_change_password INTEGER NOT NULL,
+			secret_prefixes TEXT NOT NULL, secret_mounts TEXT NOT NULL DEFAULT '[]',
+			locked INTEGER NOT NULL, must_change_password INTEGER NOT NULL,
 			totp_secret TEXT, totp_enabled INTEGER NOT NULL, totp_recovery_codes TEXT NOT NULL
 		);
 		CREATE TABLE web_sessions (
@@ -44,7 +58,8 @@ func TestMigrateLegacyAccountsMovesOperatorsAndSessions(t *testing.T) {
 			FOREIGN KEY(username) REFERENCES accounts(username) ON DELETE CASCADE
 		);
 		PRAGMA foreign_keys = ON;
-		INSERT INTO accounts VALUES ('operator-one', 'password-hash', 'operator', '["team-a"]', 0, 1, NULL, 0, '[]');
+		INSERT INTO accounts(username, password_hash, role, secret_prefixes, secret_mounts, locked, must_change_password, totp_secret, totp_enabled, totp_recovery_codes)
+		VALUES ('operator-one', 'password-hash', 'operator', '["team-a"]', '[]', 0, 1, NULL, 0, '[]');
 		INSERT INTO web_sessions VALUES ('session-hash', 'operator-one', 200, 30, 100);
 	`); err != nil {
 		t.Fatal(err)
@@ -57,7 +72,7 @@ func TestMigrateLegacyAccountsMovesOperatorsAndSessions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if account.PasswordHash != "password-hash" || account.SecretPrefixes != `["team-a"]` || account.MustChangePassword != 1 {
+	if account.PasswordHash != "password-hash" || account.SecretMounts != `[]` || account.MustChangePassword != 1 {
 		t.Fatalf("migrated account = %#v", account)
 	}
 	var migratedSessions int
@@ -85,14 +100,16 @@ func TestMigrateLegacyAccountsDoesNotDeleteOnConflict(t *testing.T) {
 	if _, err := source.Exec(`
 		CREATE TABLE accounts (
 			username TEXT PRIMARY KEY, password_hash TEXT NOT NULL, role TEXT NOT NULL,
-			secret_prefixes TEXT NOT NULL, locked INTEGER NOT NULL, must_change_password INTEGER NOT NULL,
+			secret_prefixes TEXT NOT NULL, secret_mounts TEXT NOT NULL DEFAULT '[]',
+			locked INTEGER NOT NULL, must_change_password INTEGER NOT NULL,
 			totp_secret TEXT, totp_enabled INTEGER NOT NULL, totp_recovery_codes TEXT NOT NULL
 		);
 		CREATE TABLE web_sessions (
 			token_hash TEXT PRIMARY KEY, username TEXT NOT NULL, expires_at INTEGER NOT NULL,
 			ttl_seconds INTEGER NOT NULL, created_at INTEGER NOT NULL
 		);
-		INSERT INTO accounts VALUES ('operator-one', 'source-hash', 'operator', '[]', 0, 0, NULL, 0, '[]');
+		INSERT INTO accounts(username, password_hash, role, secret_prefixes, secret_mounts, locked, must_change_password, totp_secret, totp_enabled, totp_recovery_codes)
+		VALUES ('operator-one', 'source-hash', 'operator', '[]', '[]', 0, 0, NULL, 0, '[]');
 	`); err != nil {
 		t.Fatal(err)
 	}

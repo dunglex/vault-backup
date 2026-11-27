@@ -102,6 +102,7 @@ func initializeDatabase(db *sql.DB) error {
 			password_hash TEXT NOT NULL,
 			role TEXT NOT NULL DEFAULT 'admin' CHECK (role IN ('admin', 'operator')),
 			secret_prefixes TEXT NOT NULL DEFAULT '[]',
+			secret_mounts TEXT NOT NULL DEFAULT '[]',
 			locked INTEGER NOT NULL DEFAULT 0 CHECK (locked IN (0, 1)),
 			must_change_password INTEGER NOT NULL DEFAULT 0 CHECK (must_change_password IN (0, 1)),
 			totp_secret TEXT,
@@ -127,6 +128,7 @@ func initializeDatabase(db *sql.DB) error {
 			expires_at INTEGER NOT NULL,
 			revoked_at INTEGER,
 			secret_prefixes TEXT NOT NULL DEFAULT '[]',
+			secret_mounts TEXT NOT NULL DEFAULT '[]',
 			created_by TEXT
 		);
 		CREATE TABLE IF NOT EXISTS server_settings (
@@ -175,7 +177,7 @@ func initializeDatabase(db *sql.DB) error {
 	if err := allowDuplicateAPITokenNames(db); err != nil {
 		return err
 	}
-	if err := ensureSecretPrefixColumns(db); err != nil {
+	if err := ensureSecretMountColumns(db); err != nil {
 		return err
 	}
 	if _, err := db.Exec("DELETE FROM web_sessions WHERE expires_at <= ?", time.Now().Unix()); err != nil {
@@ -192,7 +194,13 @@ func initializeSecretsDatabase(db *sql.DB) error {
 		return fmt.Errorf("check secrets table: %w", err)
 	}
 	if exists == 0 {
-		return createVersionedSecretsSchema(db)
+		if err := createVersionedSecretsSchema(db); err != nil {
+			return err
+		}
+		if err := ensureMountTable(db); err != nil {
+			return err
+		}
+		return migrateSecretNamespace(db)
 	}
 
 	columns, err := tableColumns(db, "secrets")
@@ -203,7 +211,10 @@ func initializeSecretsDatabase(db *sql.DB) error {
 		if _, err := db.Exec(secretVersionsTableSchema); err != nil {
 			return fmt.Errorf("initialize secret versions table: %w", err)
 		}
-		return nil
+		if err := ensureMountTable(db); err != nil {
+			return err
+		}
+		return migrateSecretNamespace(db)
 	}
 	if !columns["path"] || !columns["data"] {
 		return fmt.Errorf("unsupported secrets table schema")
@@ -247,7 +258,10 @@ func initializeSecretsDatabase(db *sql.DB) error {
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit secrets migration: %w", err)
 	}
-	return nil
+	if err := ensureMountTable(db); err != nil {
+		return err
+	}
+	return migrateSecretNamespace(db)
 }
 
 const versionedSecretsTableSchema = `
@@ -291,13 +305,18 @@ func newDatabaseAEAD(masterKey []byte) (cipher.AEAD, error) {
 	return cipher.NewGCM(block)
 }
 
-func ensureSecretPrefixColumns(db *sql.DB) error {
+func ensureSecretMountColumns(db *sql.DB) error {
 	accountColumns, err := accountColumns(db)
 	if err != nil {
 		return err
 	}
 	if !accountColumns["secret_prefixes"] {
 		if _, err := db.Exec("ALTER TABLE accounts ADD COLUMN secret_prefixes TEXT NOT NULL DEFAULT '[]'"); err != nil {
+			return err
+		}
+	}
+	if !accountColumns["secret_mounts"] {
+		if _, err := db.Exec("ALTER TABLE accounts ADD COLUMN secret_mounts TEXT NOT NULL DEFAULT '[]'"); err != nil {
 			return err
 		}
 	}
@@ -308,6 +327,11 @@ func ensureSecretPrefixColumns(db *sql.DB) error {
 	}
 	if !tokenColumns["secret_prefixes"] {
 		if _, err := db.Exec("ALTER TABLE api_tokens ADD COLUMN secret_prefixes TEXT NOT NULL DEFAULT '[]'"); err != nil {
+			return err
+		}
+	}
+	if !tokenColumns["secret_mounts"] {
+		if _, err := db.Exec("ALTER TABLE api_tokens ADD COLUMN secret_mounts TEXT NOT NULL DEFAULT '[]'"); err != nil {
 			return err
 		}
 	}

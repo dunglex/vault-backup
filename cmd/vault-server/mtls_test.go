@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -62,6 +63,72 @@ func TestManagedCertificateUsesTokenExpiry(t *testing.T) {
 	}
 	if _, err := tls.X509KeyPair([]byte(issued.Certificate), []byte(issued.PrivateKey)); err != nil {
 		t.Fatalf("issued certificate and key do not match: %v", err)
+	}
+}
+
+func TestAPIClientCertificateGuardReturnsUnauthorizedForInvalidCredentials(t *testing.T) {
+	s := newOperatorTestServer(t)
+	if _, err := s.db.Exec("INSERT INTO server_settings(key, value) VALUES ('enforce_mtls', 'true')"); err != nil {
+		t.Fatal(err)
+	}
+	insertScopedAPIToken(t, s, "cert-token", []string{"kv"}, "")
+	insertScopedAPIToken(t, s, "other-token", []string{"kv"}, "")
+
+	var tokenID int64
+	if err := s.db.QueryRow("SELECT id FROM api_tokens WHERE name = 'cert-token'").Scan(&tokenID); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Unix()
+	if _, err := s.db.Exec(`
+		INSERT INTO managed_client_certificates(serial_number, token_id, certificate_pem, created_at, not_after)
+		VALUES (?, ?, 'test-certificate', ?, ?)`,
+		"cafe", tokenID, now, now+3600,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	cert := func(serial int64) *x509.Certificate {
+		return &x509.Certificate{SerialNumber: big.NewInt(serial)}
+	}
+	matchingCert := cert(0xcafe)
+	unregisteredCert := cert(0xbeef)
+	request := func(token string, clientCert *x509.Certificate) *http.Request {
+		r := httptest.NewRequest(http.MethodGet, "/api/v1/kv/data/example", nil)
+		r.Header.Set("X-Vault-Backup-Protocol", "client-cert-v1")
+		if token != "" {
+			r.Header.Set("X-Vault-Token", token)
+		}
+		if clientCert != nil {
+			r.TLS = &tls.ConnectionState{
+				PeerCertificates: []*x509.Certificate{clientCert},
+				VerifiedChains:   [][]*x509.Certificate{{clientCert}},
+			}
+		}
+		return r
+	}
+	handler := s.apiClientCertificateGuard(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	for _, test := range []struct {
+		name       string
+		token      string
+		cert       *x509.Certificate
+		wantStatus int
+	}{
+		{name: "invalid token", token: "wrong-token", cert: matchingCert, wantStatus: http.StatusUnauthorized},
+		{name: "missing certificate", token: "cert-token", wantStatus: http.StatusUnauthorized},
+		{name: "unregistered certificate", token: "cert-token", cert: unregisteredCert, wantStatus: http.StatusUnauthorized},
+		{name: "certificate for another token", token: "other-token", cert: matchingCert, wantStatus: http.StatusUnauthorized},
+		{name: "matching credentials", token: "cert-token", cert: matchingCert, wantStatus: http.StatusNoContent},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request(test.token, test.cert))
+			if response.Code != test.wantStatus {
+				t.Fatalf("response status = %d, want %d; body %s", response.Code, test.wantStatus, response.Body.String())
+			}
+		})
 	}
 }
 

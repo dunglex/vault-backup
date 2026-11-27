@@ -47,25 +47,35 @@ Locking an Operator blocks login and revokes their active web sessions.
 Resetting two-factor authentication clears their TOTP setup and recovery codes
 and revokes active sessions; when MFA enforcement is enabled, the Operator must
 enroll again before continuing. Operators can manage secrets, API tokens, and
-audit events within their assigned secret path prefixes. Their audit views
-include only resource paths that overlap their current prefixes, plus their
-own web secret-list events. Admins retain unrestricted audit access. Filtering
-uses the Operator's current account prefixes at query time; audit records do
-not duplicate role or account-scope data.
+audit events within their assigned engines. Their audit views include only
+resources within those engines, plus their own web secret-list events. Admins
+retain unrestricted audit access. Filtering uses the Operator's current engine
+grants at query time; audit records do not duplicate role or account-scope data.
 Operators cannot access `/security.html`,
 `/v1/settings`, `/operators.html`, or operator-management endpoints.
 Admin accounts retain unrestricted web access. Admins assign one or more
-prefixes when creating an Operator and can change them later from
-`/operators.html`. Existing Operators are migrated without prefixes and need an
-Admin to assign them before they can access secrets. Each account or token can
-have up to 100 prefixes. A prefix grants access to
-the exact path and its descendants at segment boundaries; for example, `team-a`
-covers `team-a/database`, but not `team-archive`. Prefixes use the same path
-validation as secrets. The API mount is a routing component, not part of a
-secret's path: `team-a` grants access to `team-a/database` through
-`/api/v1/kv/data/team-a/database`. All mounts share the same secret-path
-namespace, so the same path through another mount refers to the same secret.
-Operators with no configured prefixes cannot access secrets.
+existing engines when creating an Operator and can change them later from
+`/operators.html`. Existing Operators are migrated with no engine grants and need
+an Admin to assign them before they can access secrets. Each account or token
+can have up to 100 exact engine grants. A grant covers every secret path in that
+engine and does not grant access to similarly named engines. Operators with no
+configured engines cannot access secrets.
+
+## Engines
+
+The server starts with the `kv` engine. Admins can create additional engines from
+`/mounts.html`; engine names may contain multiple slash-separated segments, but
+ancestor/descendant overlaps such as `apps` and `apps/cma` are rejected. Each
+engine is a separate secret namespace: `apps/data/aspire/example` uses the
+`apps` engine and secret path `aspire/example`, while `/data/` is the KV v2 API
+route segment. The same relative path in two engines refers to different
+secrets. Secrets from an older server database are placed under `kv`.
+
+Deleting an engine is a soft delete: its secrets remain stored, but the engine is
+unavailable and all Operator and API-token grants to it are removed. Restoring
+the engine makes its secrets available again only after an Admin explicitly
+reassigns access. Existing API tokens are migrated without engine grants, so an
+Admin must assign their engines before they can access secrets.
 Creating an Operator generates a random 12-20 character temporary password
 shown only once in the admin dialog. Copy or record it before closing the
 dialog, then provide it to the Operator through a secure channel. The Operator
@@ -215,14 +225,13 @@ The restore refuses to overwrite a non-empty destination unless `--replace` is s
 
 After logging in through the web UI at `/tokens.html`, an admin or enabled operator can
 create tokens in the add-token dialog, list, and revoke API tokens. Each token
-requires one or more secret path prefixes and can read, write, delete, and list
-only within those prefixes. Prefixes use the secret path format described above.
-Operators may create tokens only for paths within their own assigned prefixes;
-their tokens remain bounded by the Operator's current prefixes. Admins enter
-token prefixes directly; Operators choose from the prefixes assigned to them by
-an Admin. The server rejects out-of-scope prefixes even if an Operator bypasses
-the web form. Tokens with no configured prefixes, including existing tokens
-after upgrade, cannot access secrets until an Admin assigns prefixes.
+requires one or more active engines and can read, write, delete, and list
+secrets only within those engines. Operators can create and manage only their own
+tokens, and only for engines assigned to their account. Their tokens remain
+bounded by the Operator's current engines. Admins choose from all active engines;
+Operators choose from their assigned engines. The server enforces these limits
+even if an Operator bypasses the web form. Tokens with no configured engines
+cannot access secrets until engines are assigned.
 Tokens:
 
 - Must have a unique name
@@ -243,13 +252,14 @@ secrets.
 
 Management endpoints use a web session. When the optional operator database is
 enabled, Operators can manage API tokens, but
-their token prefixes cannot exceed their own assigned prefixes. Security
+they can manage only their own tokens, and their tokens cannot access engines
+beyond those assigned to them. Security
 settings and operator-management endpoints require the Admin role:
 
 ```bash
 POST   /v1/tokens
 GET    /v1/tokens
-PUT    /v1/tokens/{id}/prefixes
+PUT    /v1/tokens/{id}/mounts
 POST   /v1/tokens/{id}/certificate
 DELETE /v1/tokens/{id}
 GET    /v1/settings
@@ -265,7 +275,7 @@ POST   /v1/backup/s3/test             (backup extension required)
 GET    /v1/operators                 (operator database required)
 GET    /v1/operators/details         (operator database required)
 POST   /v1/operators                 (operator database required)
-PUT    /v1/operators/prefixes        (operator database required)
+PUT    /v1/operators/mounts          (operator database required)
 DELETE /v1/operators                 (operator database required)
 POST   /v1/operators/password        (operator database required)
 PATCH  /v1/operators/lock            (operator database required)
@@ -459,6 +469,12 @@ Recommended deployment controls:
 
 External API endpoints use `/api` and token authentication:
 
+The route is `/api/v1/{mount}/data/{path}` (and `/metadata/{path}` for KV v2
+metadata). For example, `/api/v1/apps/data/aspire/example` uses mount `apps`
+and secret path `aspire/example`; `/data/` is part of the API route, not the
+mount name or secret path. Mounts are separate namespaces and tokens must be
+granted the exact mount they use.
+
 ```bash
 # Read a KV secret
 curl --cacert /path/to/ca.pem \
@@ -488,10 +504,15 @@ curl --cacert /path/to/ca.pem -H 'X-Vault-Token: MANAGED_API_TOKEN' \
 
 Web routes such as `/`, `/v1/setup`, `/v1/auth/login`, and `/v1/secrets/...` use an HttpOnly session cookie.
 
-Open `/secrets.html` to browse secrets grouped by their first two path segments. Each group is paginated independently, and selecting a secret opens it in the editor at `/secret.html`. The editor shows the current version and a version selector; older versions are read-only, while selecting the current version enables editing. The editor breadcrumb links back to each ancestor path; nested prefixes open a filtered secret list.
-Secret path segments are 1–127 characters and may contain only ASCII letters, digits, and hyphens. Underscores and dots are rejected. Full paths remain unique by the primary database key.
+Admins manage engines through `/mounts.html` or the `/v1/mounts` management
+endpoints. `GET /v1/mounts` returns engines available to the current web user;
+the managed list and create, soft-delete, and restore operations are
+administrator-only.
 
-Each successful write creates a monotonically increasing version; prior versions are retained. The API accepts `options.cas` on writes (`0` means create-only; a positive value must match the current version) and accepts `?version=N` on reads. `DELETE /data/{path}` soft-deletes the current version. Use `POST /delete/{path}`, `POST /undelete/{path}`, and `POST /destroy/{path}` with `{"versions":[N,...]}` to manage selected versions. Destroying a version clears its ciphertext from the active database and cannot be undone through the API; this operation requires a token created by an active administrator. Database backups or SQLite WAL files created before destruction may still contain the prior encrypted data. Version metadata is available from `GET /metadata/{path}`. These endpoints use the same path scopes as secret reads and writes.
+Open `/secrets.html` to browse secrets grouped by their first two path segments within the selected mount. Each group is paginated independently, and selecting a secret opens it in the editor at `/secret.html`. The editor shows the current version and a version selector; older versions are read-only, while selecting the current version enables editing. The editor breadcrumb links back to each ancestor path; nested paths open a filtered secret list.
+Secret path segments and mount-name segments are 1–127 characters and may contain only ASCII letters, digits, and hyphens. Underscores and dots are rejected. Secret paths are unique within each mount.
+
+Each successful write creates a monotonically increasing version; prior versions are retained. The API accepts `options.cas` on writes (`0` means create-only; a positive value must match the current version) and accepts `?version=N` on reads. `DELETE /data/{path}` soft-deletes the current version. Use `POST /delete/{path}`, `POST /undelete/{path}`, and `POST /destroy/{path}` with `{"versions":[N,...]}` to manage selected versions. Destroying a version clears its ciphertext from the active database and cannot be undone through the API; this operation requires a token created by an active administrator. Database backups or SQLite WAL files created before destruction may still contain the prior encrypted data. Version metadata is available from `GET /metadata/{path}`. These endpoints require a token grant for the API route's mount.
 
 ## Audit log
 

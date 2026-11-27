@@ -19,7 +19,7 @@ type operatorRequest struct {
 	Username             string   `json:"username"`
 	Password             string   `json:"password"`
 	PasswordConfirmation string   `json:"password_confirmation"`
-	Prefixes             []string `json:"prefixes"`
+	Mounts               []string `json:"mounts"`
 }
 
 type operatorSummary struct {
@@ -27,7 +27,7 @@ type operatorSummary struct {
 	Locked        bool     `json:"locked"`
 	MFAEnabled    bool     `json:"mfa_enabled"`
 	MFAConfigured bool     `json:"mfa_configured"`
-	Prefixes      []string `json:"prefixes"`
+	Mounts        []string `json:"mounts"`
 }
 
 func (h *Handler) ListOperators(w http.ResponseWriter, r *http.Request) {
@@ -62,7 +62,7 @@ func (h *Handler) ListOperatorDetails(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := h.db.Query(`
-		SELECT username, locked, totp_enabled, (totp_secret IS NOT NULL AND totp_secret != ''), secret_prefixes
+		SELECT username, locked, totp_enabled, (totp_secret IS NOT NULL AND totp_secret != ''), secret_mounts
 		FROM accounts WHERE role = 'operator' ORDER BY username`)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read operators"})
@@ -74,14 +74,14 @@ func (h *Handler) ListOperatorDetails(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var operator operatorSummary
 		var locked, mfaEnabled, mfaPending int
-		var encodedPrefixes string
-		if err := rows.Scan(&operator.Username, &locked, &mfaEnabled, &mfaPending, &encodedPrefixes); err != nil {
+		var encodedMounts string
+		if err := rows.Scan(&operator.Username, &locked, &mfaEnabled, &mfaPending, &encodedMounts); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read operators"})
 			return
 		}
-		operator.Prefixes, err = h.decodeSecretPrefixes(encodedPrefixes)
+		operator.Mounts, err = h.decodeSecretMounts(encodedMounts)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read operator secret access"})
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read operator secret mounts"})
 			return
 		}
 		operator.Locked = locked == 1
@@ -96,66 +96,71 @@ func (h *Handler) ListOperatorDetails(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string][]operatorSummary{"operators": operators})
 }
 
-func (h *Handler) UpdateSecretPrefixes(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) UpdateSecretMounts(w http.ResponseWriter, r *http.Request) {
 	actor := h.actor(r, "web")
 	if !h.requireAdmin(w, r) {
-		h.audit(r, "update_operator_scopes", "failure", actor, "web", "operator", "unauthorized")
+		h.audit(r, "update_operator_mounts", "failure", actor, "web", "operator", "unauthorized")
 		return
 	}
 	if r.TLS == nil {
-		h.audit(r, "update_operator_scopes", "failure", actor, "web", "operator", "https_required")
+		h.audit(r, "update_operator_mounts", "failure", actor, "web", "operator", "https_required")
 		writeJSON(w, http.StatusUpgradeRequired, map[string]string{"error": "HTTPS is required to manage operator accounts"})
 		return
 	}
 	var request struct {
 		Username string   `json:"username"`
-		Prefixes []string `json:"prefixes"`
+		Mounts   []string `json:"mounts"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		h.audit(r, "update_operator_scopes", "failure", actor, "web", "operator", "invalid_request")
+		h.audit(r, "update_operator_mounts", "failure", actor, "web", "operator", "invalid_request")
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
 		return
 	}
 	request.Username = strings.TrimSpace(request.Username)
 	if request.Username == "" || len(request.Username) > 128 {
-		h.audit(r, "update_operator_scopes", "failure", actor, "web", "operator", "invalid_username")
+		h.audit(r, "update_operator_mounts", "failure", actor, "web", "operator", "invalid_username")
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "valid username is required"})
 		return
 	}
-	prefixes, err := h.normalizeSecretPrefixes(request.Prefixes)
+	mounts, err := h.normalizeSecretMounts(request.Mounts)
 	if err != nil {
-		h.audit(r, "update_operator_scopes", "failure", actor, "web", "operator:"+request.Username, "invalid_secret_prefixes")
+		h.audit(r, "update_operator_mounts", "failure", actor, "web", "operator:"+request.Username, "invalid_secret_mounts")
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	encoded, err := EncodeSecretPrefixes(prefixes)
+	if err := h.requireActiveMounts(mounts); err != nil {
+		h.audit(r, "update_operator_mounts", "failure", actor, "web", "operator:"+request.Username, "mount_not_found")
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	encoded, err := EncodeSecretMounts(mounts)
 	if err != nil {
-		h.audit(r, "update_operator_scopes", "failure", actor, "web", "operator:"+request.Username, "encoding_error")
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not save secret path prefixes"})
+		h.audit(r, "update_operator_mounts", "failure", actor, "web", "operator:"+request.Username, "encoding_error")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not save secret mounts"})
 		return
 	}
 	result, err := h.db.Exec(
-		"UPDATE accounts SET secret_prefixes = ? WHERE username = ? AND role = 'operator'",
+		"UPDATE accounts SET secret_mounts = ? WHERE username = ? AND role = 'operator'",
 		encoded, request.Username,
 	)
 	if err != nil {
-		h.audit(r, "update_operator_scopes", "failure", actor, "web", "operator:"+request.Username, "storage_error")
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not update operator secret access"})
+		h.audit(r, "update_operator_mounts", "failure", actor, "web", "operator:"+request.Username, "storage_error")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not update operator secret mounts"})
 		return
 	}
 	updated, err := result.RowsAffected()
 	if err != nil {
-		h.audit(r, "update_operator_scopes", "failure", actor, "web", "operator:"+request.Username, "storage_error")
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not update operator secret access"})
+		h.audit(r, "update_operator_mounts", "failure", actor, "web", "operator:"+request.Username, "storage_error")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not update operator secret mounts"})
 		return
 	}
 	if updated != 1 {
-		h.audit(r, "update_operator_scopes", "failure", actor, "web", "operator:"+request.Username, "operator_not_found")
+		h.audit(r, "update_operator_mounts", "failure", actor, "web", "operator:"+request.Username, "operator_not_found")
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "operator not found"})
 		return
 	}
-	h.audit(r, "update_operator_scopes", "success", actor, "web", "operator:"+request.Username, "")
-	writeJSON(w, http.StatusOK, map[string]any{"username": request.Username, "prefixes": prefixes})
+	h.audit(r, "update_operator_mounts", "success", actor, "web", "operator:"+request.Username, "")
+	writeJSON(w, http.StatusOK, map[string]any{"username": request.Username, "mounts": mounts})
 }
 
 func (h *Handler) SetOperatorLock(w http.ResponseWriter, r *http.Request) {
@@ -311,13 +316,18 @@ func (h *Handler) CreateOperator(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "username is required and must be at most 128 characters"})
 		return
 	}
-	prefixes, err := h.normalizeSecretPrefixes(request.Prefixes)
+	mounts, err := h.normalizeSecretMounts(request.Mounts)
 	if err != nil {
-		h.audit(r, "create_operator", "failure", actor, "web", "operator:"+request.Username, "invalid_secret_prefixes")
+		h.audit(r, "create_operator", "failure", actor, "web", "operator:"+request.Username, "invalid_secret_mounts")
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	encodedPrefixes, err := EncodeSecretPrefixes(prefixes)
+	if err := h.requireActiveMounts(mounts); err != nil {
+		h.audit(r, "create_operator", "failure", actor, "web", "operator:"+request.Username, "mount_not_found")
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	encodedMounts, err := EncodeSecretMounts(mounts)
 	if err != nil {
 		h.audit(r, "create_operator", "failure", actor, "web", "operator:"+request.Username, "encoding_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not create operator"})
@@ -358,10 +368,10 @@ func (h *Handler) CreateOperator(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := h.db.Exec(
-		"INSERT INTO accounts(username, password_hash, role, secret_prefixes, must_change_password) VALUES (?, ?, 'operator', ?, 1) ON CONFLICT(username) DO NOTHING",
+		"INSERT INTO accounts(username, password_hash, role, secret_mounts, must_change_password) VALUES (?, ?, 'operator', ?, 1) ON CONFLICT(username) DO NOTHING",
 		request.Username,
 		string(passwordHash),
-		encodedPrefixes,
+		encodedMounts,
 	)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not create operator"})

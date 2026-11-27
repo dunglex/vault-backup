@@ -9,4 +9,4 @@ __pycache__/
 /bin/
 /data/
 /test_data/*.pem
-/test_data/*.log
+/logs/

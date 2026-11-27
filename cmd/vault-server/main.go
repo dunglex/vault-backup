@@ -469,6 +469,9 @@ func main() {
 	for _, path := range []string{"/operators", "/operators.html"} {
 		mux.HandleFunc("GET "+path, s.serveOperators)
 	}
+	for _, path := range []string{"/mounts", "/mounts.html"} {
+		mux.HandleFunc("GET "+path, s.serveMounts)
+	}
 	for _, path := range []string{"/backup", "/backup.html"} {
 		mux.HandleFunc("GET "+path, s.serveBackup)
 	}
@@ -506,6 +509,11 @@ func main() {
 	mux.HandleFunc("DELETE /v1/secrets/{path...}", s.deleteSecret)
 	mux.HandleFunc("GET /v1/secrets", s.listSecrets)
 	mux.HandleFunc("GET /v1/secrets-browser", s.browseSecrets)
+	mux.HandleFunc("GET /v1/mounts", s.listMounts)
+	mux.HandleFunc("GET /v1/mounts/managed", s.listManagedMounts)
+	mux.HandleFunc("POST /v1/mounts", s.createMount)
+	mux.HandleFunc("DELETE /v1/mounts", s.softDeleteMount)
+	mux.HandleFunc("PUT /v1/mounts/restore", s.restoreMount)
 	mux.HandleFunc("GET /v1/session", s.webSession)
 	mux.HandleFunc("POST /v1/tokens", s.createAPIToken)
 	mux.HandleFunc("GET /v1/tokens", s.listAPITokens)
@@ -528,8 +536,8 @@ func main() {
 	mux.HandleFunc("POST /v1/operators/password", s.resetOperatorPassword)
 	mux.HandleFunc("PATCH /v1/operators/lock", s.setOperatorLock)
 	mux.HandleFunc("DELETE /v1/operators/totp", s.removeOperatorTOTP)
-	mux.HandleFunc("PUT /v1/operators/prefixes", s.updateOperatorSecretPrefixes)
-	mux.HandleFunc("PUT /v1/tokens/{id}/prefixes", s.updateAPITokenSecretPrefixes)
+	mux.HandleFunc("PUT /v1/operators/mounts", s.updateOperatorSecretMounts)
+	mux.HandleFunc("PUT /v1/tokens/{id}/mounts", s.updateAPITokenSecretMounts)
 	mux.HandleFunc("GET /v1/account/totp", s.getAccountTOTP)
 	mux.HandleFunc("POST /v1/account/totp/setup", s.setupAccountTOTP)
 	mux.HandleFunc("POST /v1/account/totp/enable", s.enableAccountTOTP)
@@ -543,12 +551,11 @@ func main() {
 	mux.HandleFunc("GET /api/health", s.health)
 	mux.HandleFunc("POST /api/v1/auth/ldap/login/{username}", s.loginLDAP)
 	mux.HandleFunc("PUT /api/v1/auth/ldap/login/{username}", s.loginLDAP)
-	mux.HandleFunc("GET /api/v1/{mount}/data/{path...}", s.getKVSecret)
-	mux.HandleFunc("PUT /api/v1/{mount}/data/{path...}", s.putKVSecret)
-	mux.HandleFunc("DELETE /api/v1/{mount}/data/{path...}", s.deleteKVSecret)
-	mux.HandleFunc("GET /api/v1/{mount}/metadata/{path...}", s.getKVMetadata)
-	mux.HandleFunc("LIST /api/v1/{mount}/metadata/{path...}", s.listKVMetadata)
-	mux.HandleFunc("POST /api/v1/{mount}/{operation}/{path...}", s.changeKVVersionState)
+	mux.HandleFunc("GET /api/v1/{route...}", s.routeKVAPI)
+	mux.HandleFunc("PUT /api/v1/{route...}", s.routeKVAPI)
+	mux.HandleFunc("DELETE /api/v1/{route...}", s.routeKVAPI)
+	mux.HandleFunc("LIST /api/v1/{route...}", s.routeKVAPI)
+	mux.HandleFunc("POST /api/v1/{route...}", s.routeKVAPI)
 
 	mux.HandleFunc("/", s.serveHome)
 
@@ -1485,7 +1492,7 @@ func (s *server) createAPIToken(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name          string   `json:"name"`
 		ExpiresInDays *int     `json:"expires_in_days"`
-		Prefixes      []string `json:"prefixes"`
+		Mounts        []string `json:"mounts"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.recordAuditEvent(r, "create_token", "failure", s.auditRequestActor(r, "web"), "web", "api-token", "invalid_request")
@@ -1498,9 +1505,14 @@ func (s *server) createAPIToken(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name is required and must be at most 128 characters"})
 		return
 	}
-	prefixes, err := normalizeSecretPrefixes(req.Prefixes)
+	mounts, err := normalizeSecretMounts(req.Mounts)
 	if err != nil {
-		s.recordAuditEvent(r, "create_token", "failure", s.auditRequestActor(r, "web"), "web", "api-token", "invalid_secret_prefixes")
+		s.recordAuditEvent(r, "create_token", "failure", s.auditRequestActor(r, "web"), "web", "api-token", "invalid_secret_mounts")
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if err := s.requireActiveMounts(mounts); err != nil {
+		s.recordAuditEvent(r, "create_token", "failure", s.auditRequestActor(r, "web"), "web", "api-token", "mount_not_found")
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
@@ -1509,17 +1521,17 @@ func (s *server) createAPIToken(w http.ResponseWriter, r *http.Request) {
 		if !accessOK {
 			return
 		}
-		for _, prefix := range prefixes {
-			if !operatorAccess.contains(prefix) {
+		for _, mount := range mounts {
+			if !operatorAccess.contains(mount) {
 				s.recordAuditEvent(r, "create_token", "failure", s.auditRequestActor(r, "web"), "web", "api-token", "scope_denied")
-				writeJSON(w, http.StatusForbidden, map[string]string{"error": "token prefixes must be within your allowed secret paths"})
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": "token mounts must be within your allowed mounts"})
 				return
 			}
 		}
 	}
-	encodedPrefixes, err := encodeSecretPrefixes(prefixes)
+	encodedMounts, err := encodeSecretMounts(mounts)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not create API token"})
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not encode API token mounts"})
 		return
 	}
 	lifetime := apiTokenLifetime
@@ -1573,12 +1585,12 @@ func (s *server) createAPIToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := tx.Exec(
-		"INSERT INTO api_tokens(name, token_hash, created_at, expires_at, secret_prefixes, created_by) VALUES (?, ?, ?, ?, ?, ?)",
+		"INSERT INTO api_tokens(name, token_hash, created_at, expires_at, secret_mounts, created_by) VALUES (?, ?, ?, ?, ?, ?)",
 		req.Name,
 		hex.EncodeToString(tokenHash[:]),
 		createdAt.Unix(),
 		expiresAt.Unix(),
-		encodedPrefixes,
+		encodedMounts,
 		session.username,
 	)
 	if err != nil {
@@ -1618,7 +1630,7 @@ func (s *server) createAPIToken(w http.ResponseWriter, r *http.Request) {
 		"token":      token,
 		"created_at": createdAt.UTC().Format(time.RFC3339),
 		"expires_at": expiresAt.UTC().Format(time.RFC3339),
-		"prefixes":   prefixes,
+		"mounts":     mounts,
 	}
 	if enforceMTLS {
 		response["client_certificate"] = issued.Certificate
@@ -1629,18 +1641,27 @@ func (s *server) createAPIToken(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) listAPITokens(w http.ResponseWriter, r *http.Request) {
-	if !s.authorizedWeb(r) {
+	session, ok := s.sessionFromRequest(r)
+	if !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
-	rows, err := s.db.Query(`
-		SELECT tokens.id, tokens.name, tokens.created_at, tokens.expires_at, tokens.revoked_at, tokens.secret_prefixes,
+	query := `
+		SELECT tokens.id, tokens.name, tokens.created_at, tokens.expires_at, tokens.revoked_at, tokens.secret_mounts,
 		       MAX(certificates.not_after)
 		FROM api_tokens AS tokens
 		LEFT JOIN managed_client_certificates AS certificates
 		  ON certificates.token_id = tokens.id AND certificates.revoked_at IS NULL
-		GROUP BY tokens.id, tokens.name, tokens.created_at, tokens.expires_at, tokens.revoked_at, tokens.secret_prefixes
-		ORDER BY tokens.created_at DESC, tokens.id DESC`)
+	`
+	args := []any{}
+	if session.role == "operator" {
+		query += " WHERE tokens.created_by = ?"
+		args = append(args, session.username)
+	}
+	query += `
+		GROUP BY tokens.id, tokens.name, tokens.created_at, tokens.expires_at, tokens.revoked_at, tokens.secret_mounts
+		ORDER BY tokens.created_at DESC, tokens.id DESC`
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not list API tokens"})
 		return
@@ -1651,14 +1672,14 @@ func (s *server) listAPITokens(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var id, createdAt, expiresAt int64
 		var revokedAt, certificateExpiresAt sql.NullInt64
-		var name, encodedPrefixes string
-		if err := rows.Scan(&id, &name, &createdAt, &expiresAt, &revokedAt, &encodedPrefixes, &certificateExpiresAt); err != nil {
+		var name, encodedMounts string
+		if err := rows.Scan(&id, &name, &createdAt, &expiresAt, &revokedAt, &encodedMounts, &certificateExpiresAt); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read API tokens"})
 			return
 		}
-		prefixes, err := decodeSecretPrefixes(encodedPrefixes)
+		mounts, err := decodeSecretMounts(encodedMounts)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read API token secret access"})
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read API token secret mounts"})
 			return
 		}
 		item := map[string]any{
@@ -1669,7 +1690,7 @@ func (s *server) listAPITokens(w http.ResponseWriter, r *http.Request) {
 			"expired":         expiresAt < time.Now().Unix(),
 			"revoked":         revokedAt.Valid,
 			"has_certificate": certificateExpiresAt.Valid && certificateExpiresAt.Int64 > time.Now().Unix(),
-			"prefixes":        prefixes,
+			"mounts":          mounts,
 		}
 		if certificateExpiresAt.Valid {
 			item["certificate_expires_at"] = time.Unix(certificateExpiresAt.Int64, 0).UTC().Format(time.RFC3339)
@@ -1684,7 +1705,8 @@ func (s *server) listAPITokens(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) revokeAPIToken(w http.ResponseWriter, r *http.Request) {
-	if !s.authorizedWeb(r) {
+	session, ok := s.sessionFromRequest(r)
+	if !ok {
 		s.recordAuditEvent(r, "revoke_token", "failure", "anonymous", "web", "api-token", "unauthorized")
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
@@ -1696,6 +1718,17 @@ func (s *server) revokeAPIToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resource := "api-token:" + strconv.FormatInt(id, 10)
+	if session.role != "admin" {
+		owned, err := s.operatorOwnsAPIToken(id, session.username)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not verify API token ownership"})
+			return
+		}
+		if !owned {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "active API token not found"})
+			return
+		}
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		s.recordAuditEvent(r, "revoke_token", "failure", s.auditRequestActor(r, "web"), "web", resource, "storage_error")
@@ -1733,9 +1766,18 @@ func (s *server) revokeAPIToken(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
 }
 
+func (s *server) operatorOwnsAPIToken(id int64, username string) (bool, error) {
+	var owned bool
+	err := s.db.QueryRow(
+		"SELECT EXISTS(SELECT 1 FROM api_tokens WHERE id = ? AND created_by = ?)",
+		id, username,
+	).Scan(&owned)
+	return owned, err
+}
+
 func (s *server) getKVSecret(w http.ResponseWriter, r *http.Request) {
-	source, path := "api", r.PathValue("path")
-	if !validSecretPath(r.PathValue("mount") + "/" + path) {
+	source, mount, path := "api", r.PathValue("mount"), r.PathValue("path")
+	if !validSecretMount(mount) || !validSecretPath(mount+"/"+path) {
 		s.recordAuditEvent(r, "read", "failure", s.auditRequestActor(r, source), source, path, "invalid_secret_path")
 		writeInvalidSecretPath(w)
 		return
@@ -1745,17 +1787,18 @@ func (s *server) getKVSecret(w http.ResponseWriter, r *http.Request) {
 		s.recordAuditEvent(r, "read", "failure", s.auditRequestActor(r, source), source, path, "unauthorized")
 		return
 	}
-	allowed, err := s.secretPathAllowed(access, path)
+	allowed, err := s.secretMountAllowed(access, mount)
 	if err != nil {
 		s.recordAuditEvent(r, "read", "failure", s.auditRequestActor(r, source), source, path, "scope_lookup_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not verify secret access"})
 		return
 	}
 	if !allowed {
-		s.recordAuditEvent(r, "read", "failure", s.auditRequestActor(r, source), source, path, "scope_denied")
+		s.recordAuditEvent(r, "read", "failure", s.auditRequestActor(r, source), source, secretStoragePath(mount, path), "scope_denied")
 		denySecretScope(w)
 		return
 	}
+	path = secretStoragePath(mount, path)
 	var requestedVersion *int64
 	if versionValue := r.URL.Query().Get("version"); versionValue != "" {
 		version, err := strconv.ParseInt(versionValue, 10, 64)
@@ -1805,8 +1848,8 @@ func (s *server) getKVSecret(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) putKVSecret(w http.ResponseWriter, r *http.Request) {
-	source, path := "api", r.PathValue("path")
-	if !validSecretPath(r.PathValue("mount") + "/" + path) {
+	source, mount, path := "api", r.PathValue("mount"), r.PathValue("path")
+	if !validSecretMount(mount) || !validSecretPath(mount+"/"+path) {
 		s.recordAuditEvent(r, "update", "failure", s.auditRequestActor(r, source), source, path, "invalid_secret_path")
 		writeInvalidSecretPath(w)
 		return
@@ -1816,17 +1859,18 @@ func (s *server) putKVSecret(w http.ResponseWriter, r *http.Request) {
 		s.recordAuditEvent(r, "update", "failure", s.auditRequestActor(r, source), source, path, "unauthorized")
 		return
 	}
-	allowed, err := s.secretPathAllowed(access, path)
+	allowed, err := s.secretMountAllowed(access, mount)
 	if err != nil {
 		s.recordAuditEvent(r, "update", "failure", s.auditRequestActor(r, source), source, path, "scope_lookup_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not verify secret access"})
 		return
 	}
 	if !allowed {
-		s.recordAuditEvent(r, "update", "failure", s.auditRequestActor(r, source), source, path, "scope_denied")
+		s.recordAuditEvent(r, "update", "failure", s.auditRequestActor(r, source), source, secretStoragePath(mount, path), "scope_denied")
 		denySecretScope(w)
 		return
 	}
+	path = secretStoragePath(mount, path)
 	action := "create"
 	var currentVersion int64
 	if err := s.secretsDB.QueryRow("SELECT current_version FROM secrets WHERE path = ?", path).Scan(&currentVersion); err == nil {
@@ -1885,8 +1929,8 @@ func (s *server) putKVSecret(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) deleteKVSecret(w http.ResponseWriter, r *http.Request) {
-	source, path := "api", r.PathValue("path")
-	if !validSecretPath(r.PathValue("mount") + "/" + path) {
+	source, mount, path := "api", r.PathValue("mount"), r.PathValue("path")
+	if !validSecretMount(mount) || !validSecretPath(mount+"/"+path) {
 		s.recordAuditEvent(r, "delete", "failure", s.auditRequestActor(r, source), source, path, "invalid_secret_path")
 		writeInvalidSecretPath(w)
 		return
@@ -1896,17 +1940,18 @@ func (s *server) deleteKVSecret(w http.ResponseWriter, r *http.Request) {
 		s.recordAuditEvent(r, "delete", "failure", s.auditRequestActor(r, source), source, path, "unauthorized")
 		return
 	}
-	allowed, err := s.secretPathAllowed(access, path)
+	allowed, err := s.secretMountAllowed(access, mount)
 	if err != nil {
 		s.recordAuditEvent(r, "delete", "failure", s.auditRequestActor(r, source), source, path, "scope_lookup_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not verify secret access"})
 		return
 	}
 	if !allowed {
-		s.recordAuditEvent(r, "delete", "failure", s.auditRequestActor(r, source), source, path, "scope_denied")
+		s.recordAuditEvent(r, "delete", "failure", s.auditRequestActor(r, source), source, secretStoragePath(mount, path), "scope_denied")
 		denySecretScope(w)
 		return
 	}
+	path = secretStoragePath(mount, path)
 	version, found, err := s.softDeleteCurrentSecret(path)
 	if err != nil {
 		s.recordAuditEvent(r, "delete", "failure", s.auditRequestActor(r, source), source, path, "storage_error")
@@ -1922,14 +1967,8 @@ func (s *server) deleteKVSecret(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) listKVMetadata(w http.ResponseWriter, r *http.Request) {
-	source := "api"
-	mount := r.PathValue("mount")
-	path := r.PathValue("path")
-	fullPath := mount
-	if path != "" {
-		fullPath += "/" + path
-	}
-	if !validSecretPath(fullPath) {
+	source, mount, path := "api", r.PathValue("mount"), r.PathValue("path")
+	if !validSecretMount(mount) || (path != "" && !validSecretPath(path)) {
 		s.recordAuditEvent(r, "list", "failure", s.auditRequestActor(r, source), source, path, "invalid_secret_path")
 		writeInvalidSecretPath(w)
 		return
@@ -1939,20 +1978,14 @@ func (s *server) listKVMetadata(w http.ResponseWriter, r *http.Request) {
 		s.recordAuditEvent(r, "list", "failure", s.auditRequestActor(r, source), source, path, "unauthorized")
 		return
 	}
-	var intersects bool
-	var err error
-	if path == "" {
-		intersects = !access.empty()
-	} else {
-		intersects, err = s.secretPathIntersects(access, path)
-	}
+	allowed, err := s.secretMountAllowed(access, mount)
 	if err != nil {
 		s.recordAuditEvent(r, "list", "failure", s.auditRequestActor(r, source), source, path, "scope_lookup_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not verify secret access"})
 		return
 	}
-	if !intersects {
-		s.recordAuditEvent(r, "list", "failure", s.auditRequestActor(r, source), source, path, "scope_denied")
+	if !allowed {
+		s.recordAuditEvent(r, "list", "failure", s.auditRequestActor(r, source), source, secretStoragePath(mount, path), "scope_denied")
 		denySecretScope(w)
 		return
 	}
@@ -1960,64 +1993,60 @@ func (s *server) listKVMetadata(w http.ResponseWriter, r *http.Request) {
 	if path != "" {
 		prefix = path + "/"
 	}
-	query := `
-		WITH candidates AS (
-			SELECT CASE
-				WHEN ? = '' THEN
-					CASE
-						WHEN instr(path, '/') = 0 THEN path
-						ELSE substr(path, 1, instr(path, '/') - 1)
-					END
-				WHEN instr(substr(path, length(?) + 2), '/') = 0 THEN path
-				ELSE substr(path, 1, length(?) + instr(substr(path, length(?) + 2), '/'))
-			END AS child_path
-			FROM secrets
-			WHERE ? = '' OR path LIKE ?
-		)
-		SELECT DISTINCT child_path
-		FROM candidates`
-	args := []any{path, path, path, path, path, prefix + "%"}
-	if !access.unrestricted {
-		query += `
-			WHERE EXISTS (
-				SELECT 1
-				FROM json_each(?) AS scope
-				WHERE child_path = scope.value
-				   OR substr(child_path, 1, length(scope.value) + 1) = scope.value || '/'
-				   OR substr(scope.value, 1, length(child_path) + 1) = child_path || '/'
-			)`
-		args = append(args, access.encoded)
-	}
-	query += " ORDER BY child_path"
-	rows, err := s.secretsDB.Query(query, args...)
+	storagePrefix := mount + "/" + prefix
+	rows, err := s.secretsDB.Query(`
+		SELECT substr(secrets.path, length(?) + 1)
+		FROM secrets
+		WHERE substr(secrets.path, 1, length(?)) = ?
+		  AND EXISTS (
+			SELECT 1 FROM secret_versions v
+			WHERE v.path = secrets.path
+			  AND v.version = secrets.current_version
+			  AND v.deleted_at IS NULL
+			  AND v.destroyed_at IS NULL
+		  )
+		ORDER BY secrets.path`, storagePrefix, storagePrefix, storagePrefix)
 	if err != nil {
 		s.recordAuditEvent(r, "list", "failure", s.auditRequestActor(r, source), source, path, "storage_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not list secrets"})
 		return
 	}
 	defer rows.Close()
-	keys := []string{}
+	childKeys := make(map[string]bool)
 	for rows.Next() {
-		var childPath string
-		if err := rows.Scan(&childPath); err != nil {
+		var remainder string
+		if err := rows.Scan(&remainder); err != nil {
 			s.recordAuditEvent(r, "list", "failure", s.auditRequestActor(r, source), source, path, "storage_error")
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read secrets"})
 			return
 		}
-		keys = append(keys, strings.TrimPrefix(childPath, prefix))
+		parts := strings.SplitN(remainder, "/", 2)
+		key := parts[0]
+		if len(parts) == 2 {
+			key += "/"
+		}
+		childKeys[key] = true
 	}
 	if err := rows.Err(); err != nil {
 		s.recordAuditEvent(r, "list", "failure", s.auditRequestActor(r, source), source, path, "storage_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not list secrets"})
 		return
 	}
-	s.recordAuditEvent(r, "list", "success", s.auditRequestActor(r, source), source, path, "")
+	keys := make([]string, 0, len(childKeys))
+	for key := range childKeys {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	s.recordAuditEvent(r, "list", "success", s.auditRequestActor(r, source), source, secretStoragePath(mount, path), "")
 	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"keys": keys}})
 }
 
 func (s *server) getSecret(w http.ResponseWriter, r *http.Request) {
-	source, path := "web", r.PathValue("path")
-	if !validSecretPath(path) {
+	source, mount, path := "web", r.URL.Query().Get("mount"), r.PathValue("path")
+	if mount == "" {
+		mount = "kv"
+	}
+	if !validSecretMount(mount) || !validSecretPath(path) {
 		writeInvalidSecretPath(w)
 		return
 	}
@@ -2025,16 +2054,17 @@ func (s *server) getSecret(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	allowed, err := s.secretPathAllowed(access, path)
+	allowed, err := s.secretMountAllowed(access, mount)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not verify secret access"})
 		return
 	}
 	if !allowed {
-		s.recordAuditEvent(r, "read", "failure", s.auditRequestActor(r, source), source, path, "scope_denied")
+		s.recordAuditEvent(r, "read", "failure", s.auditRequestActor(r, source), source, secretStoragePath(mount, path), "scope_denied")
 		denySecretScope(w)
 		return
 	}
+	path = secretStoragePath(mount, path)
 	if r.URL.Query().Get("metadata") == "true" {
 		current, versions, err := s.secretVersionSummaries(path)
 		if err != nil {
@@ -2101,8 +2131,11 @@ func (s *server) getSecret(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) putSecret(w http.ResponseWriter, r *http.Request) {
-	source, path := "web", r.PathValue("path")
-	if !validSecretPath(path) {
+	source, mount, path := "web", r.URL.Query().Get("mount"), r.PathValue("path")
+	if mount == "" {
+		mount = "kv"
+	}
+	if !validSecretMount(mount) || !validSecretPath(path) {
 		writeInvalidSecretPath(w)
 		return
 	}
@@ -2110,16 +2143,17 @@ func (s *server) putSecret(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	allowed, err := s.secretPathAllowed(access, path)
+	allowed, err := s.secretMountAllowed(access, mount)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not verify secret access"})
 		return
 	}
 	if !allowed {
-		s.recordAuditEvent(r, "update", "failure", s.auditRequestActor(r, source), source, path, "scope_denied")
+		s.recordAuditEvent(r, "update", "failure", s.auditRequestActor(r, source), source, secretStoragePath(mount, path), "scope_denied")
 		denySecretScope(w)
 		return
 	}
+	path = secretStoragePath(mount, path)
 	action := "create"
 	var currentVersion int64
 	if err := s.secretsDB.QueryRow("SELECT current_version FROM secrets WHERE path = ?", path).Scan(&currentVersion); err == nil {
@@ -2174,8 +2208,11 @@ func (s *server) putSecret(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) deleteSecret(w http.ResponseWriter, r *http.Request) {
-	source, path := "web", r.PathValue("path")
-	if !validSecretPath(path) {
+	source, mount, path := "web", r.URL.Query().Get("mount"), r.PathValue("path")
+	if mount == "" {
+		mount = "kv"
+	}
+	if !validSecretMount(mount) || !validSecretPath(path) {
 		writeInvalidSecretPath(w)
 		return
 	}
@@ -2183,16 +2220,17 @@ func (s *server) deleteSecret(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	allowed, err := s.secretPathAllowed(access, path)
+	allowed, err := s.secretMountAllowed(access, mount)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not verify secret access"})
 		return
 	}
 	if !allowed {
-		s.recordAuditEvent(r, "delete", "failure", s.auditRequestActor(r, source), source, path, "scope_denied")
+		s.recordAuditEvent(r, "delete", "failure", s.auditRequestActor(r, source), source, secretStoragePath(mount, path), "scope_denied")
 		denySecretScope(w)
 		return
 	}
+	path = secretStoragePath(mount, path)
 	version, found, err := s.softDeleteCurrentSecret(path)
 	if err != nil {
 		s.recordAuditEvent(r, "delete", "failure", s.auditRequestActor(r, source), source, path, "storage_error")
@@ -2208,6 +2246,14 @@ func (s *server) deleteSecret(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) listSecrets(w http.ResponseWriter, r *http.Request) {
+	mount := r.URL.Query().Get("mount")
+	if mount == "" {
+		mount = "kv"
+	}
+	if !validSecretMount(mount) {
+		writeInvalidSecretPath(w)
+		return
+	}
 	access, ok := s.webSecretAccessForRequest(w, r)
 	if !ok {
 		return
@@ -2217,7 +2263,17 @@ func (s *server) listSecrets(w http.ResponseWriter, r *http.Request) {
 		denySecretScope(w)
 		return
 	}
-	rows, err := s.visibleSecretPaths(access)
+	allowed, err := s.secretMountAllowed(access, mount)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not verify secret access"})
+		return
+	}
+	if !allowed {
+		s.recordAuditEvent(r, "list", "failure", s.auditRequestActor(r, "web"), "web", mount, "scope_denied")
+		denySecretScope(w)
+		return
+	}
+	rows, err := s.visibleSecretPaths(access, mount)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not list secrets"})
 		return
@@ -2236,7 +2292,7 @@ func (s *server) listSecrets(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not list secrets"})
 		return
 	}
-	s.recordAuditEvent(r, "list", "success", s.auditRequestActor(r, "web"), "web", "*", "")
+	s.recordAuditEvent(r, "list", "success", s.auditRequestActor(r, "web"), "web", mount, "")
 	writeJSON(w, http.StatusOK, paths)
 }
 
@@ -2268,6 +2324,14 @@ func writeInvalidSecretPath(w http.ResponseWriter) {
 }
 
 func (s *server) browseSecrets(w http.ResponseWriter, r *http.Request) {
+	mount := r.URL.Query().Get("mount")
+	if mount == "" {
+		mount = "kv"
+	}
+	if !validSecretMount(mount) {
+		writeInvalidSecretPath(w)
+		return
+	}
 	access, ok := s.webSecretAccessForRequest(w, r)
 	if !ok {
 		return
@@ -2278,7 +2342,17 @@ func (s *server) browseSecrets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := s.visibleSecretPaths(access)
+	allowed, err := s.secretMountAllowed(access, mount)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not verify secret access"})
+		return
+	}
+	if !allowed {
+		s.recordAuditEvent(r, "list", "failure", s.auditRequestActor(r, "web"), "web", mount, "scope_denied")
+		denySecretScope(w)
+		return
+	}
+	rows, err := s.visibleSecretPaths(access, mount)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not list secrets"})
 		return
@@ -2314,8 +2388,11 @@ func (s *server) browseSecrets(w http.ResponseWriter, r *http.Request) {
 		groups = append(groups, map[string]any{"name": group, "count": groupCounts[group]})
 	}
 
+	all := r.URL.Query().Get("all") == "true"
 	selected := strings.TrimSpace(r.URL.Query().Get("group"))
-	if selected == "" && len(groupNames) > 0 {
+	if all {
+		selected = ""
+	} else if selected == "" && len(groupNames) > 0 {
 		selected = groupNames[0]
 	}
 	limit, err := strconv.Atoi(r.URL.Query().Get("limit"))
@@ -2326,16 +2403,22 @@ func (s *server) browseSecrets(w http.ResponseWriter, r *http.Request) {
 	if err != nil || offset < 0 {
 		offset = 0
 	}
-	paths, groupExists := groupPaths[selected]
-	if selected != "" && (!groupExists || !strings.Contains(selected, "/")) {
-		if !validSecretPath(selected) {
-			writeInvalidSecretPath(w)
-			return
-		}
-		paths = make([]string, 0)
-		for _, path := range allPaths {
-			if path == selected || strings.HasPrefix(path, selected+"/") {
-				paths = append(paths, path)
+	var paths []string
+	if all {
+		paths = allPaths
+	} else {
+		var groupExists bool
+		paths, groupExists = groupPaths[selected]
+		if selected != "" && (!groupExists || !strings.Contains(selected, "/")) {
+			if !validSecretPath(selected) {
+				writeInvalidSecretPath(w)
+				return
+			}
+			paths = make([]string, 0)
+			for _, path := range allPaths {
+				if path == selected || strings.HasPrefix(path, selected+"/") {
+					paths = append(paths, path)
+				}
 			}
 		}
 	}
@@ -2350,6 +2433,7 @@ func (s *server) browseSecrets(w http.ResponseWriter, r *http.Request) {
 	pagedPaths := append([]string{}, paths[offset:end]...)
 
 	writeJSON(w, http.StatusOK, map[string]any{
+		"mount":  mount,
 		"groups": groups,
 		"group":  selected,
 		"paths":  pagedPaths,
@@ -2521,7 +2605,7 @@ func queryAuditEvents(db *sql.DB, year int, where string, args []any, limit, off
 	}, nil
 }
 
-func auditResourceScopeFilter(access secretPrefixAccess, actor string) (string, []any) {
+func auditResourceScopeFilter(access secretMountAccess, actor string) (string, []any) {
 	if access.unrestricted {
 		return "", nil
 	}
@@ -2734,6 +2818,10 @@ func (s *server) serveOperators(w http.ResponseWriter, r *http.Request) {
 	_, _ = output.WriteTo(w)
 }
 
+func (s *server) serveMounts(w http.ResponseWriter, r *http.Request) {
+	s.serveAdminProtectedPage(w, r, "mounts.gohtml")
+}
+
 func (s *server) serveAdminProtectedPage(w http.ResponseWriter, r *http.Request, name string) {
 	if s.adminName == "" {
 		destination := "/setup.html"
@@ -2841,7 +2929,7 @@ func (s *server) webSession(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			return
 		}
-		result["secret_prefixes"] = access.prefixes
+		result["secret_mounts"] = access.mounts
 	}
 	writeJSON(w, http.StatusOK, result)
 }

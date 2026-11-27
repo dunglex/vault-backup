@@ -3,6 +3,7 @@ package operator
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 )
 
@@ -14,6 +15,8 @@ type Dependencies struct {
 	RevokeTokens   func(string) error
 	RevokeSessions func(string)
 	ValidPath      func(string) bool
+	ValidMount     func(string) bool
+	MountExists    func(string) (bool, error)
 }
 
 type Handler struct {
@@ -48,10 +51,32 @@ func (h *Handler) actor(r *http.Request, source string) string {
 	return h.deps.Actor(r, source)
 }
 
-func (h *Handler) normalizeSecretPrefixes(prefixes []string) ([]string, error) {
-	return NormalizeSecretPrefixes(prefixes, h.deps.ValidPath)
+func (h *Handler) normalizeSecretMounts(mounts []string) ([]string, error) {
+	if h.deps.ValidMount == nil {
+		return nil, fmt.Errorf("secret mount validation is unavailable")
+	}
+	return NormalizeSecretMounts(mounts, h.deps.ValidMount)
 }
 
-func (h *Handler) decodeSecretPrefixes(encoded string) ([]string, error) {
-	return DecodeSecretPrefixes(encoded, h.deps.ValidPath)
+func (h *Handler) decodeSecretMounts(encoded string) ([]string, error) {
+	if h.deps.ValidMount == nil {
+		return nil, fmt.Errorf("secret mount validation is unavailable")
+	}
+	return DecodeSecretMounts(encoded, h.deps.ValidMount)
+}
+
+func (h *Handler) requireActiveMounts(mounts []string) error {
+	if h.deps.MountExists == nil {
+		return fmt.Errorf("secret mount lookup is unavailable")
+	}
+	for _, mount := range mounts {
+		exists, err := h.deps.MountExists(mount)
+		if err != nil {
+			return fmt.Errorf("could not verify secret mount")
+		}
+		if !exists {
+			return fmt.Errorf("mount %q does not exist or is deleted", mount)
+		}
+	}
+	return nil
 }

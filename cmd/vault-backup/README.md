@@ -38,11 +38,14 @@ Use HTTPS for direct TLS connections. HTTP is insecure and prints a warning when
 
 Backup files are written with mode `0600`. Output directories created by `vault-backup` use mode `0700`.
 
-Folder backups recurse through nested secret paths. For vault-server, the API
-mount is only used for routing and is not included in secret paths; all mounts
-share the same path namespace. Backup and restore operations exit with a
-non-zero status if any item fails, even when other items were processed
-successfully.
+Folder backups recurse through nested secret paths. For vault-server,
+`--secret_name` selects the secret mount, and `--secret_path` is relative to
+that mount. Mounts are separate namespaces; for example, `apps/data/aspire/example`
+uses mount `apps` and secret path `aspire/example` (`data` is the KV v2 API
+route segment). The server starts with the `kv` mount; an administrator must
+create any other mount and grant it to the API token before backup or restore.
+Backup and restore operations exit with a non-zero status if any item fails,
+even when other items were processed successfully.
 
 When the administrator has created a managed API token, `vault-backup` can use it directly:
 

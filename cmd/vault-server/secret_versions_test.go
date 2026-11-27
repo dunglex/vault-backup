@@ -34,7 +34,7 @@ func assertSecretAuditDetail(t *testing.T, s *server, action, expected string) {
 	err := s.auditStore.withYear(time.Now().UTC().Year(), func(db *sql.DB) error {
 		return db.QueryRow(
 			"SELECT detail FROM audit_events WHERE action = ? AND resource = ? ORDER BY id DESC LIMIT 1",
-			action, "app/key",
+			action, "kv/app/key",
 		).Scan(&detail)
 	})
 	if err != nil {
@@ -66,11 +66,11 @@ func TestInitializeSecretsDatabaseMigratesLegacyValuesToVersionOne(t *testing.T)
 	}
 	var currentVersion, version int64
 	var ciphertext string
-	if err := db.QueryRow("SELECT current_version FROM secrets WHERE path = 'app/key'").Scan(&currentVersion); err != nil {
+	if err := db.QueryRow("SELECT current_version FROM secrets WHERE path = 'kv/app/key'").Scan(&currentVersion); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.QueryRow(
-		"SELECT version, data FROM secret_versions WHERE path = 'app/key'",
+		"SELECT version, data FROM secret_versions WHERE path = 'kv/app/key'",
 	).Scan(&version, &ciphertext); err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func TestSecretVersionsCASDeleteRestoreAndDestroy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	version, created, err := s.writeSecretVersion("app/key", first, "admin", nil)
+	version, created, err := s.writeSecretVersion("kv/app/key", first, "admin", nil)
 	if err != nil || version != 1 || !created {
 		t.Fatalf("first write = version %d, created %v, error %v", version, created, err)
 	}
@@ -103,16 +103,16 @@ func TestSecretVersionsCASDeleteRestoreAndDestroy(t *testing.T) {
 		t.Fatal(err)
 	}
 	expected := int64(1)
-	version, created, err = s.writeSecretVersion("app/key", second, "admin", &expected)
+	version, created, err = s.writeSecretVersion("kv/app/key", second, "admin", &expected)
 	if err != nil || version != 2 || created {
 		t.Fatalf("second write = version %d, created %v, error %v", version, created, err)
 	}
-	if _, _, err := s.writeSecretVersion("app/key", first, "admin", &expected); !errors.Is(err, errSecretCASMismatch) {
+	if _, _, err := s.writeSecretVersion("kv/app/key", first, "admin", &expected); !errors.Is(err, errSecretCASMismatch) {
 		t.Fatalf("stale CAS write error = %v, want mismatch", err)
 	}
 
 	oldVersion := int64(1)
-	record, err := s.readSecretVersion("app/key", &oldVersion)
+	record, err := s.readSecretVersion("kv/app/key", &oldVersion)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,13 +120,13 @@ func TestSecretVersionsCASDeleteRestoreAndDestroy(t *testing.T) {
 	if err != nil || string(plaintext) != `{"value":"first"}` {
 		t.Fatalf("historical version = %q, error %v", plaintext, err)
 	}
-	if version, found, err := s.softDeleteCurrentSecret("app/key"); err != nil || !found || version != 2 {
+	if version, found, err := s.softDeleteCurrentSecret("kv/app/key"); err != nil || !found || version != 2 {
 		t.Fatalf("soft delete result = version %d, found %t, error %v", version, found, err)
 	}
-	if _, err := s.readSecretVersion("app/key", nil); !errors.Is(err, errSecretDeleted) {
+	if _, err := s.readSecretVersion("kv/app/key", nil); !errors.Is(err, errSecretDeleted) {
 		t.Fatalf("read deleted current version error = %v, want deleted", err)
 	}
-	rows, err := s.visibleSecretPaths(secretPrefixAccess{unrestricted: true})
+	rows, err := s.visibleSecretPaths(secretMountAccess{unrestricted: true}, "kv")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,21 +139,21 @@ func TestSecretVersionsCASDeleteRestoreAndDestroy(t *testing.T) {
 	if err := rows.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.updateSecretVersions("app/key", "undelete", []int64{2}); err != nil {
+	if err := s.updateSecretVersions("kv/app/key", "undelete", []int64{2}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.readSecretVersion("app/key", nil); err != nil {
+	if _, err := s.readSecretVersion("kv/app/key", nil); err != nil {
 		t.Fatalf("read restored current version: %v", err)
 	}
-	if err := s.updateSecretVersions("app/key", "destroy", []int64{1}); err != nil {
+	if err := s.updateSecretVersions("kv/app/key", "destroy", []int64{1}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.readSecretVersion("app/key", &oldVersion); !errors.Is(err, errSecretDestroyed) {
+	if _, err := s.readSecretVersion("kv/app/key", &oldVersion); !errors.Is(err, errSecretDestroyed) {
 		t.Fatalf("read destroyed historical version error = %v, want destroyed", err)
 	}
 	var destroyedData sql.NullString
 	if err := s.secretsDB.QueryRow(
-		"SELECT data FROM secret_versions WHERE path = 'app/key' AND version = 1",
+		"SELECT data FROM secret_versions WHERE path = 'kv/app/key' AND version = 1",
 	).Scan(&destroyedData); err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +176,7 @@ func TestKVVersionAPIWritesReadsMetadataAndRestores(t *testing.T) {
 	}
 	s.secretsAEAD = aead
 	const token = "version-test-token"
-	insertScopedAPIToken(t, s, token, []string{"app"}, "")
+	insertScopedAPIToken(t, s, token, []string{"kv"}, "")
 
 	put := func(body string) *httptest.ResponseRecorder {
 		response := httptest.NewRecorder()
@@ -251,7 +251,7 @@ func TestKVVersionAPIWritesReadsMetadataAndRestores(t *testing.T) {
 	}
 
 	const adminToken = "admin-version-test-token"
-	insertScopedAPIToken(t, s, adminToken, []string{"app"}, "admin")
+	insertScopedAPIToken(t, s, adminToken, []string{"kv"}, "admin")
 	adminDestroyRequest := apiScopeRequest(
 		http.MethodPost, "/api/v1/kv/destroy/app/key", `{"versions":[1]}`, adminToken,
 	)
