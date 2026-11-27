@@ -284,7 +284,10 @@ func TestSetupCanSkipDomainConfiguration(t *testing.T) {
 	}
 
 	var settingCount int
-	if err := db.QueryRow("SELECT COUNT(*) FROM server_settings").Scan(&settingCount); err != nil {
+	if err := db.QueryRow(
+		"SELECT COUNT(*) FROM server_settings WHERE key IN (?, ?, ?)",
+		serverSettingMainDomain, serverSettingAliasDomains, serverSettingCertificateMode,
+	).Scan(&settingCount); err != nil {
 		t.Fatal(err)
 	}
 	if settingCount != 0 {

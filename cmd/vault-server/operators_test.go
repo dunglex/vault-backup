@@ -45,6 +45,100 @@ func TestEnableOperatorsExtensionInitializesEncryptedDatabase(t *testing.T) {
 	}
 }
 
+func TestResolveOperatorDatabasePath(t *testing.T) {
+	dir := t.TempDir()
+	db, err := sql.Open("sqlite", filepath.Join(dir, "app.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := initializeDatabase(db); err != nil {
+		t.Fatal(err)
+	}
+	config := serverConfig{
+		DBPath:        filepath.Join(dir, "vault.db"),
+		SecretsDBPath: filepath.Join(dir, "vault-secrets.db"),
+		AuditDBPath:   filepath.Join(dir, "audit.db"),
+	}
+	path := defaultOperatorDatabasePath(config.DBPath)
+	resolve := func() (string, bool, error) {
+		t.Helper()
+		return resolveOperatorDatabasePath(db, config)
+	}
+	if got, _, err := resolve(); err != nil || got != "" {
+		t.Fatalf("fresh installation: path %q, error %v", got, err)
+	}
+	if _, err := db.Exec("INSERT INTO accounts(username, password_hash, role) VALUES ('admin', 'hash', 'admin')"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("existing"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := resolve(); err == nil {
+		t.Fatal("existing database without key was accepted")
+	}
+	if err := os.WriteFile(path+".key", []byte("existing"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got, migrate, err := resolve(); err != nil || got != path || !migrate {
+		t.Fatalf("legacy installation: path %q, migrate %t, error %v", got, migrate, err)
+	}
+	if _, err := db.Exec("INSERT INTO server_settings(key, value) VALUES (?, 'true')", operatorExtensionEnabledSetting); err != nil {
+		t.Fatal(err)
+	}
+	if got, migrate, err := resolve(); err != nil || got != path || migrate {
+		t.Fatalf("enabled installation: path %q, migrate %t, error %v", got, migrate, err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := resolve(); err == nil {
+		t.Fatal("enabled extension with missing database was accepted")
+	}
+	if _, err := db.Exec("UPDATE server_settings SET value = 'false' WHERE key = ?", operatorExtensionEnabledSetting); err != nil {
+		t.Fatal(err)
+	}
+	if got, _, err := resolve(); err != nil || got != "" {
+		t.Fatalf("disabled extension: path %q, error %v", got, err)
+	}
+}
+
+func TestSetupPersistsOperatorsWithoutBackup(t *testing.T) {
+	dir := t.TempDir()
+	db, err := sql.Open("sqlite", filepath.Join(dir, "app.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := initializeDatabase(db); err != nil {
+		t.Fatal(err)
+	}
+	s := &server{
+		db:             db,
+		dbPassword:     "test-database-password",
+		operatorDBPath: filepath.Join(dir, "app-operators.db"),
+		setupKey:       "setup-key",
+		setupKeyPath:   filepath.Join(dir, "setup-key"),
+		setupDeadline:  time.Now().Add(time.Hour),
+	}
+	defer func() {
+		if s.operatorDB != nil {
+			_ = s.operatorDB.Close()
+		}
+	}()
+	response := httptest.NewRecorder()
+	s.setup(response, httptest.NewRequest(http.MethodPost, "/v1/setup", strings.NewReader(
+		`{"setup_key":"setup-key","username":"admin","password":"correct-horse-battery","password_confirmation":"correct-horse-battery","enable_operators":true}`,
+	)))
+	if response.Code != http.StatusCreated {
+		t.Fatalf("setup status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var value string
+	if err := db.QueryRow("SELECT value FROM server_settings WHERE key = ?", operatorExtensionEnabledSetting).Scan(&value); err != nil || value != "true" {
+		t.Fatalf("operator extension setting = %q, error %v", value, err)
+	}
+}
+
 func newOperatorTestServer(t *testing.T) *server {
 	t.Helper()
 	dir := t.TempDir()

@@ -109,12 +109,14 @@ class ServerTest:
         setup_key: str = "integration-test-setup-key",
         operator_db: bool = False,
         enable_backup: bool = False,
+        enable_operators: bool = False,
     ):
         self.port = port
         self.http_port = http_port
         self.setup_key = setup_key
         self.operator_db = operator_db
         self.enable_backup = enable_backup
+        self.enable_operators = enable_operators
         self.temp = tempfile.TemporaryDirectory()
         self.path = Path(self.temp.name)
         self.cert = self.path / "test-cert.pem"
@@ -177,6 +179,8 @@ class ServerTest:
         )
 
     def start(self) -> None:
+        if self.log_file:
+            self.log_file.close()
         self.log_file = open(self.path / "server.log", "wb")
         env = os.environ | {
             "VAULT_SERVER_HTTPS_ADDR": f"127.0.0.1:{self.port}",
@@ -246,6 +250,7 @@ class ServerTest:
                 "password": self.password,
                 "password_confirmation": self.password,
                 "enable_backup": self.enable_backup,
+                "enable_operators": self.enable_operators,
             },
         )
         assert_status(201, status, "set up vault server")

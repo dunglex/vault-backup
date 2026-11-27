@@ -198,14 +198,6 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	var operatorMasterKey []byte
-	if config.OperatorDBPath != "" {
-		operatorMasterKey, err = loadOrCreateKey(config.OperatorDBPath+".key", config.DBPassword)
-		if err != nil {
-			log.Fatal(err)
-		}
-	}
-
 	var activeServer *server
 	db, _, err := openDatabaseWithOptions(config.DBPath, masterKey, config.AllowPlaintextDB)
 	if err != nil {
@@ -242,25 +234,7 @@ func main() {
 		}
 	}()
 	var operatorDB *sql.DB
-	if config.OperatorDBPath != "" {
-		operatorDB, _, err = openDatabaseWithOptions(config.OperatorDBPath, operatorMasterKey, false)
-		if err != nil {
-			log.Fatal(err)
-		}
-		defer func() {
-			if activeServer != nil {
-				if activeServer.operatorDB != nil {
-					if err := activeServer.operatorDB.Close(); err != nil {
-						log.Printf("Could not close operator database cleanly: %v", err)
-					}
-				}
-				return
-			}
-			if err := operatorDB.Close(); err != nil {
-				log.Printf("Could not close operator database cleanly: %v", err)
-			}
-		}()
-	}
+	var operatorMasterKey []byte
 	auditStore, err := openAnnualAuditStore(config.AuditDBPath)
 	if err != nil {
 		log.Fatal(err)
@@ -286,12 +260,45 @@ func main() {
 	if err := initializeDatabase(db); err != nil {
 		log.Fatal(err)
 	}
+	var migrateOperatorSetting bool
+	config.OperatorDBPath, migrateOperatorSetting, err = resolveOperatorDatabasePath(db, config)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if config.OperatorDBPath != "" {
+		operatorMasterKey, err = loadOrCreateKey(config.OperatorDBPath+".key", config.DBPassword)
+		if err != nil {
+			log.Fatal(err)
+		}
+		operatorDB, _, err = openDatabaseWithOptions(config.OperatorDBPath, operatorMasterKey, false)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer func() {
+			if activeServer != nil {
+				if activeServer.operatorDB != nil {
+					if err := activeServer.operatorDB.Close(); err != nil {
+						log.Printf("Could not close operator database cleanly: %v", err)
+					}
+				}
+				return
+			}
+			if err := operatorDB.Close(); err != nil {
+				log.Printf("Could not close operator database cleanly: %v", err)
+			}
+		}()
+	}
 	if operatorDB != nil {
 		if err := operator.Initialize(operatorDB); err != nil {
 			log.Fatal(err)
 		}
 		if err := operator.MigrateLegacyAccounts(db, operatorDB); err != nil {
 			log.Fatal(err)
+		}
+		if migrateOperatorSetting {
+			if _, err := db.Exec("INSERT INTO server_settings(key, value) VALUES (?, ?)", operatorExtensionEnabledSetting, "true"); err != nil {
+				log.Fatalf("save operator extension setting: %v", err)
+			}
 		}
 	}
 	fileLogging, err := readFileLoggingSetting(db)
@@ -973,6 +980,14 @@ func (s *server) setup(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not save extension settings"})
 			return
 		}
+	}
+	if _, err := tx.Exec(
+		"INSERT INTO server_settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+		operatorExtensionEnabledSetting,
+		strconv.FormatBool(req.EnableOperators),
+	); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not save extension settings"})
+		return
 	}
 	if err := tx.Commit(); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not create account"})

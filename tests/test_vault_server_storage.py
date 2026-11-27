@@ -14,7 +14,7 @@ def mode(path) -> int:
 
 
 def main() -> None:
-    with ServerTest(18228, 18229, enable_backup=True) as server:
+    with ServerTest(18228, 18229, enable_backup=True, enable_operators=True) as server:
         require(mode(server.path / "vault.db") == 0o600, "database permissions")
         print("PASS: database file permissions")
         require(not (server.path / "vault.db").read_bytes().startswith(b"SQLite format 3\0"), "database is plaintext")
@@ -35,6 +35,22 @@ def main() -> None:
 
         server.setup()
         server.login()
+        status, _ = server.client.json(
+            "POST",
+            f"{server.https_url}/v1/operators",
+            data={"username": "restart-test", "prefixes": ["restart-test"]},
+        )
+        assert_status(201, status, "create operator before restart")
+        server.stop()
+        server.start()
+        server.wait()
+        for page in ("account.html", "backup.html", "operators.html"):
+            status, body = server.client.request("GET", f"{server.https_url}/{page}")
+            assert_status(200, status, f"open {page} after restart")
+            require(b'href="/operators.html"' in body, f"operator navigation missing from {page}")
+        status, operators = server.client.json("GET", f"{server.https_url}/v1/operators")
+        assert_status(200, status, "list operators after restart")
+        require("restart-test" in operators["operators"], "operator account missing after restart")
         status, years = server.client.json(
             "GET", f"{server.https_url}/v1/audit/years"
         )

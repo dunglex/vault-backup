@@ -30,7 +30,10 @@ app extensions, and continue to the login page. Skipping domain configuration
 keeps the current domain and certificate settings. When Operators is selected,
 setup initializes its encrypted operator database at the default
 `*-operators.db` path beside the main database; an explicitly configured
-`--operator-db` or `VAULT_SERVER_OPERATOR_DB` database remains in use.
+`--operator-db` or `VAULT_SERVER_OPERATOR_DB` database remains in use. The
+setup-selected default database is reopened on restart; its database and key
+file must both remain present. Existing setup-created default databases are
+also recovered after upgrading.
 Selecting Backup enables the `/backup.html` menu for scheduled backups,
 on-demand archives, and restoring server data archives.
 
