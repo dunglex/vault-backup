@@ -132,3 +132,27 @@ func TestAccessLoggingUsesRequestPathAndOmitsQueryString(t *testing.T) {
 		t.Fatalf("access log contains query string: %q", logLine)
 	}
 }
+
+func TestAccessLoggingSuppressesSuccessfulHealthChecks(t *testing.T) {
+	var output bytes.Buffer
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("GET /health-failure", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+
+	handler := withAccessLogging(mux, &output)
+	for _, path := range []string{"/health", "/health-failure"} {
+		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, path, nil))
+	}
+
+	logLine := output.String()
+	if strings.Contains(logLine, `route="/health"`) {
+		t.Fatalf("successful health check was logged: %q", logLine)
+	}
+	if !strings.Contains(logLine, `route="/health-failure"`) || !strings.Contains(logLine, "status=503") {
+		t.Fatalf("non-health or failed health access log missing: %q", logLine)
+	}
+}

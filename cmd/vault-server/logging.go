@@ -194,6 +194,9 @@ func withAccessLogging(next http.Handler, output io.Writer) http.Handler {
 		if route == "" {
 			route = "/"
 		}
+		if route == "/health" && status == http.StatusOK {
+			return
+		}
 		accessLogger.Printf("method=%s route=%q status=%d duration=%s",
 			r.Method, route, status, time.Since(started).Round(time.Microsecond))
 	})
