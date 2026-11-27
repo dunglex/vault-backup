@@ -86,7 +86,8 @@ database: the main database for Admin accounts, and the optional operator
 database for Operator accounts.
 
 Admins can enable **Enforce MFA for all users** in `/security.html`; it is
-disabled by default. Users without enrolled TOTP are restricted to their
+disabled by default when no setting has been saved. Existing explicit settings
+are preserved across upgrades. Users without enrolled TOTP are restricted to their
 account page and MFA enrollment until setup is complete. LDAP-compatible login
 cannot issue a client token for an unenrolled account. Once enrolled, users
 must complete TOTP or recovery-code verification at every web and

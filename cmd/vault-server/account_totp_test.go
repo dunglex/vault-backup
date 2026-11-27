@@ -249,8 +249,8 @@ func TestWebSessionCookieLifetimeDependsOnTOTP(t *testing.T) {
 func TestMFAEnforcementRestrictsExistingSessionsUntilEnrollment(t *testing.T) {
 	s := newTOTPTestServer(t)
 	enforced, err := s.mfaEnforcementEnabled()
-	if err != nil || !enforced {
-		t.Fatalf("default MFA enforcement = %t, %v; want true", enforced, err)
+	if err != nil || enforced {
+		t.Fatalf("default MFA enforcement = %t, %v; want false", enforced, err)
 	}
 	if _, err := s.db.Exec(
 		"INSERT INTO server_settings(key, value) VALUES (?, 'true')",

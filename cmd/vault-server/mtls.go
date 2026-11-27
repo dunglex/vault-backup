@@ -225,7 +225,7 @@ func (s *server) mfaEnforcementEnabled() (bool, error) {
 	var value string
 	err := s.db.QueryRow("SELECT value FROM server_settings WHERE key = ?", enforceMFASetting).Scan(&value)
 	if err == sql.ErrNoRows {
-		return true, nil
+		return false, nil
 	}
 	if err != nil {
 		return false, err

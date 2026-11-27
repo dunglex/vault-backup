@@ -57,7 +57,9 @@ def main() -> None:
         )
         assert_status(409, status, "disable admin creation after setup")
 
-        login_token = server.login()
+        login_token = server.login(enroll_mfa=False)
+        status, _ = server.client.request("GET", f"{server.https_url}/v1/secrets")
+        assert_status(200, status, "access secrets without MFA enrollment by default")
         status, account_page = server.client.request("GET", f"{server.https_url}/account.html")
         assert_status(200, status, "open account security page")
         require(
@@ -77,9 +79,10 @@ def main() -> None:
         status, totp_settings = server.client.json("GET", f"{server.https_url}/v1/account/totp")
         assert_status(200, status, "read default TOTP settings")
         require(
-            totp_settings["enabled"] is True and totp_settings["enforced"] is True,
-            "TOTP enrollment and enforcement are enabled",
+            totp_settings["enabled"] is False and totp_settings["enforced"] is False,
+            "TOTP enrollment and enforcement are disabled by default",
         )
+        server.enroll_totp()
         status, token_page = server.client.request("GET", f"{server.https_url}/tokens.html")
         assert_status(200, status, "open canonical API tokens page")
         require(b"const enforceMTLS = false;" in token_page, "token page receives disabled mTLS setting")
@@ -498,7 +501,7 @@ def main() -> None:
             == {
                 "enforce_mtls": False,
                 "auto_block_login_bruteforce_ip": True,
-                "enforce_mfa": True,
+                "enforce_mfa": False,
                 "file_logging": False,
             },
             "default security settings",

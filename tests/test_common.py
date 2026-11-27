@@ -257,27 +257,31 @@ class ServerTest:
             "setup response",
         )
 
-    def login(self):
+    def login(self, enroll_mfa: bool = True):
         status, body = self.client.json(
             "POST",
             f"{self.management_url}/v1/auth/login",
             data={"username": self.user, "password": self.password},
         )
         assert_status(200, status, "login")
+        if enroll_mfa:
+            self.enroll_totp()
+        return body["token"]
+
+    def enroll_totp(self):
         status, setup = self.client.json(
             "POST",
             f"{self.management_url}/v1/account/totp/setup",
             data={},
         )
-        assert_status(200, status, "start required TOTP enrollment")
+        assert_status(200, status, "start TOTP enrollment")
         status, _ = self.client.json(
             "POST",
             f"{self.management_url}/v1/account/totp/enable",
             data={"code": totp_code(setup["secret"])},
         )
-        assert_status(200, status, "complete required TOTP enrollment")
+        assert_status(200, status, "complete TOTP enrollment")
         self.totp_secret = setup["secret"]
-        return body["token"]
 
     def create_api_token(
         self, name: str = "test-token", expires_in_days: int | None = None
