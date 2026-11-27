@@ -12,10 +12,11 @@ import (
 )
 
 type secretMount struct {
-	Name      string `json:"name"`
-	CreatedAt int64  `json:"created_at"`
-	DeletedAt int64  `json:"deleted_at,omitempty"`
-	Deleted   bool   `json:"deleted"`
+	Name        string `json:"name"`
+	CreatedAt   int64  `json:"created_at"`
+	DeletedAt   int64  `json:"deleted_at,omitempty"`
+	Deleted     bool   `json:"deleted"`
+	SecretCount int64  `json:"secret_count"`
 }
 
 func validSecretMount(mount string) bool {
@@ -138,7 +139,21 @@ func (s *server) listManagedMounts(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	rows, err := s.secretsDB.Query("SELECT name, created_at, deleted_at FROM secret_mounts ORDER BY name")
+	rows, err := s.secretsDB.Query(`
+		SELECT m.name, m.created_at, m.deleted_at, (
+			SELECT COUNT(*)
+			FROM secrets
+			WHERE substr(secrets.path, 1, length(m.name) + 1) = m.name || '/'
+			  AND EXISTS (
+				SELECT 1 FROM secret_versions v
+				WHERE v.path = secrets.path
+				  AND v.version = secrets.current_version
+				  AND v.deleted_at IS NULL
+				  AND v.destroyed_at IS NULL
+			  )
+		)
+		FROM secret_mounts m
+		ORDER BY m.name`)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not list secret mounts"})
 		return
@@ -148,7 +163,7 @@ func (s *server) listManagedMounts(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var mount secretMount
 		var deletedAt sql.NullInt64
-		if err := rows.Scan(&mount.Name, &mount.CreatedAt, &deletedAt); err != nil {
+		if err := rows.Scan(&mount.Name, &mount.CreatedAt, &deletedAt, &mount.SecretCount); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read secret mounts"})
 			return
 		}

@@ -39,7 +39,7 @@
     <p>Create engines to isolate secrets and grant API tokens and Operators access per engine. Engine paths may contain multiple segments. An engine cannot be an ancestor or descendant of another engine.</p>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Engine</th><th>Status</th><th>Actions</th></tr></thead>
+        <thead><tr><th>Engine</th><th>Secrets</th><th>Status</th><th>Actions</th></tr></thead>
         <tbody id="mountList" aria-live="polite"></tbody>
       </table>
     </div>
@@ -81,6 +81,7 @@ async function refreshMounts() {
   for (const mount of result.mounts) {
     const row = list.insertRow();
     row.insertCell().textContent = mount.name;
+    row.insertCell().textContent = String(mount.secret_count);
     row.insertCell().textContent = mount.deleted ? 'Deleted; access removed' : 'Active';
     const actions = row.insertCell();
     const button = document.createElement('button');

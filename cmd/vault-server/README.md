@@ -67,7 +67,9 @@ configured engines cannot access secrets.
 ## Engines
 
 The server starts with the `kv` engine. Admins can create additional engines from
-`/mounts.html`; engine names may contain multiple slash-separated segments, but
+`/mounts.html`, where each engine shows its count of currently visible secrets
+(excluding deleted or destroyed current versions). Engine names may contain
+multiple slash-separated segments, but
 ancestor/descendant overlaps such as `apps` and `apps/cma` are rejected. Each
 engine is a separate secret namespace: `apps/data/aspire/example` uses the
 `apps` engine and secret path `aspire/example`, while `/data/` is the KV v2 API

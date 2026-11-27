@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -47,7 +48,8 @@ func TestMountsPageCreatesEnginesInDialog(t *testing.T) {
 		`<dialog id="createEngineDialog"`,
 		`id="enginePath"`,
 		`createEngineDialog.showModal()`,
-		`<th>Engine</th><th>Status</th><th>Actions</th>`,
+		`<th>Engine</th><th>Secrets</th><th>Status</th><th>Actions</th>`,
+		`mount.secret_count`,
 		`<tbody id="mountList"`,
 	} {
 		if !strings.Contains(page.String(), marker) {
@@ -59,6 +61,81 @@ func TestMountsPageCreatesEnginesInDialog(t *testing.T) {
 	}
 	if strings.Contains(page.String(), "Existing engines") {
 		t.Error("engines page should not render an Existing engines heading")
+	}
+}
+
+func TestManagedMountsCountVisibleSecretsByExactEngine(t *testing.T) {
+	s := newOperatorTestServer(t)
+	addActiveMount(t, s, "apps/cma")
+	addActiveMount(t, s, "apps/cma2")
+	addActiveMount(t, s, "archive")
+	if _, err := s.secretsDB.Exec(
+		"UPDATE secret_mounts SET deleted_at = ? WHERE name = 'archive'",
+		time.Now().Unix(),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, path := range []string{
+		"kv/active",
+		"kv/deleted",
+		"kv/destroyed",
+		"apps/cma/service/key",
+		"apps/cma/team/other",
+		"apps/cma2/not-a-child",
+		"archive/retained",
+	} {
+		insertTestSecretRecord(t, s.secretsDB, path, "ciphertext")
+	}
+	now := time.Now().Unix()
+	for _, state := range []struct {
+		path   string
+		column string
+	}{
+		{"kv/deleted", "deleted_at"},
+		{"kv/destroyed", "destroyed_at"},
+	} {
+		if _, err := s.secretsDB.Exec(
+			"UPDATE secret_versions SET "+state.column+" = ? WHERE path = ? AND version = 1",
+			now, state.path,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	response := httptest.NewRecorder()
+	s.listManagedMounts(response, operatorRequestWithSession(http.MethodGet, "/v1/mounts/managed", "", "admin-session", true))
+	if response.Code != http.StatusOK {
+		t.Fatalf("list managed mounts = %d, body %s", response.Code, response.Body.String())
+	}
+	var result struct {
+		Mounts []struct {
+			Name        string `json:"name"`
+			Deleted     bool   `json:"deleted"`
+			SecretCount int64  `json:"secret_count"`
+		} `json:"mounts"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	counts := make(map[string]int64, len(result.Mounts))
+	deleted := make(map[string]bool, len(result.Mounts))
+	for _, mount := range result.Mounts {
+		counts[mount.Name] = mount.SecretCount
+		deleted[mount.Name] = mount.Deleted
+	}
+	for name, want := range map[string]int64{
+		"kv":        1,
+		"apps/cma":  2,
+		"apps/cma2": 1,
+		"archive":   1,
+	} {
+		if got := counts[name]; got != want {
+			t.Errorf("engine %q secret count = %d, want %d", name, got, want)
+		}
+	}
+	if !deleted["archive"] {
+		t.Error("soft-deleted engine was not included in the managed mount list")
 	}
 }
 
