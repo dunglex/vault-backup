@@ -425,6 +425,7 @@ func main() {
 	mux.HandleFunc("GET /normalize.css", serveEmbeddedAsset("normalize.css", "text/css; charset=utf-8"))
 	mux.HandleFunc("GET /miligram.css", serveEmbeddedAsset("miligram.css", "text/css; charset=utf-8"))
 	mux.HandleFunc("GET /admin.css", serveEmbeddedAsset("admin.css", "text/css; charset=utf-8"))
+	mux.HandleFunc("GET /api-loading.js", serveEmbeddedAsset("api-loading.js", "text/javascript; charset=utf-8"))
 	mux.HandleFunc("GET /qrcode.js", serveEmbeddedAsset("qrcode.js", "text/javascript; charset=utf-8"))
 
 	// Serve HTML pages.
