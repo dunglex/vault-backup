@@ -3,6 +3,7 @@ import argparse
 import os
 from pathlib import Path
 import subprocess
+from urllib.parse import urlsplit, urlunsplit
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -14,7 +15,7 @@ def main() -> None:
     parser.add_argument(
         "--url",
         default=os.environ.get("VAULT_URL", "https://127.0.0.1:8200/api"),
-        help="Vault API URL (default: VAULT_URL or https://127.0.0.1:8200/api)",
+        help="vault-server URL or API URL (default: VAULT_URL or https://127.0.0.1:8200/api)",
     )
     parser.add_argument(
         "--token",
@@ -44,6 +45,11 @@ def main() -> None:
     parser.add_argument("--client-cert", help="mTLS client certificate PEM")
     parser.add_argument("--client-key", help="mTLS client private key PEM")
     args = parser.parse_args()
+
+    url = urlsplit(args.url)
+    if url.scheme in ("http", "https") and url.netloc and url.path in ("", "/"):
+        url = url._replace(path="/api")
+    api_url = urlunsplit(url)
 
     input_dir = args.input_dir.expanduser().resolve()
     binary = args.binary.expanduser().resolve()
@@ -76,7 +82,7 @@ def main() -> None:
         command = [
             str(binary),
             "--url",
-            args.url,
+            api_url,
             "--secret_name",
             args.mount,
             "--secret_path",

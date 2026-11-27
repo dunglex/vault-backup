@@ -14,7 +14,13 @@ python3 ./generate_dummy_secrets.py \
 
 Without `--prefix`, the generator writes 100 files under each of its built-in
 prefixes. Restore JSON files through `vault-backup` by setting the API URL and
-managed token:
+managed token. First build the current backup client:
+
+```bash
+go build -o bin/vault-backup ./cmd/vault-backup
+```
+
+Then run the restore:
 
 ```bash
 VAULT_URL=https://127.0.0.1:8200/api \
@@ -29,4 +35,7 @@ it is not prepended to the secret path, and all mounts share the same secret
 namespace. Use `--ca-cert` instead of
 `--insecure-tls` when the server certificate is issued by a trusted CA. Paths
 passed to `--ca-cert`, `--client-cert`, and `--client-key` are resolved relative
-to the directory from which the script is run.
+to the directory from which the script is run. A server-origin URL with no
+path automatically uses `/api`; specify the full API URL when using a reverse
+proxy path. Rebuild `bin/vault-backup` after updating the source, especially
+if it requests LDAP credentials instead of accepting a managed API token.

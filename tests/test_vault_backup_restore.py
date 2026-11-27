@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-from test_common import BackupServerTest, require, run
+import os
+
+from test_common import BackupServerTest, ROOT, require, run
 
 
 def main() -> None:
@@ -64,6 +66,32 @@ def main() -> None:
         )
         require("partial-restore-succeeded" in str(body), "successful partial item missing")
         print("PASS: partial directory restore exited unsuccessfully")
+
+        wrapper_input = server.path / "wrapper-input"
+        (wrapper_input / "app").mkdir(parents=True)
+        (wrapper_input / "app" / "dummy.json").write_text('{"VALUE":"wrapper-restore"}')
+        wrapper_env = os.environ.copy()
+        wrapper_env["VAULT_TOKEN"] = server.api_token
+        for url in (server.https_url, server.https_url + "/api"):
+            run(
+                "python3",
+                ROOT / "test_data" / "restore_dummy_secrets_with_vault_backup.py",
+                "--url",
+                url,
+                "--input-dir",
+                wrapper_input,
+                "--binary",
+                server.backup_binary,
+                "--insecure-tls",
+                env=wrapper_env,
+            )
+            status, body = server.client.json(
+                "GET",
+                f"{server.https_url}/api/v1/kv/data/app/dummy",
+                headers={"Authorization": f"Bearer {server.api_token}"},
+            )
+            require(status == 200 and body["data"]["data"]["VALUE"] == "wrapper-restore", "wrapper restore")
+        print("PASS: wrapper restores using origin and API URLs")
 
 
 if __name__ == "__main__":
