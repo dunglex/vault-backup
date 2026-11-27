@@ -132,6 +132,12 @@ func TestAccountTOTPEnrollmentLoginRecoveryAndDisable(t *testing.T) {
 		t.Fatalf("reused recovery-code login status = %d, want %d", reusedRecoveryLogin.Code, http.StatusUnauthorized)
 	}
 
+	if _, err := s.db.Exec(
+		"INSERT INTO server_settings(key, value) VALUES (?, 'false') ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+		enforceMFASetting,
+	); err != nil {
+		t.Fatal(err)
+	}
 	disable := httptest.NewRecorder()
 	s.disableAccountTOTP(disable, totpRequest(
 		http.MethodDelete,
@@ -243,8 +249,8 @@ func TestWebSessionCookieLifetimeDependsOnTOTP(t *testing.T) {
 func TestMFAEnforcementRestrictsExistingSessionsUntilEnrollment(t *testing.T) {
 	s := newTOTPTestServer(t)
 	enforced, err := s.mfaEnforcementEnabled()
-	if err != nil || enforced {
-		t.Fatalf("default MFA enforcement = %t, %v; want false", enforced, err)
+	if err != nil || !enforced {
+		t.Fatalf("default MFA enforcement = %t, %v; want true", enforced, err)
 	}
 	if _, err := s.db.Exec(
 		"INSERT INTO server_settings(key, value) VALUES (?, 'true')",

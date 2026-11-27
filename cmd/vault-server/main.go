@@ -94,6 +94,7 @@ type sessionInfo struct {
 	username           string
 	role               string
 	expiresAt          time.Time
+	createdAt          time.Time
 	ttl                time.Duration
 	mustChangePassword bool
 }
@@ -1090,7 +1091,7 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	mfaSetupRequired := enforceMFA && account.totpEnabled != 1
 	if account.totpEnabled == 1 {
-		if r.TLS == nil {
+		if !s.requestIsHTTPS(r) {
 			writeJSON(w, http.StatusUpgradeRequired, map[string]string{"error": "HTTPS is required for two-factor login"})
 			return
 		}
@@ -1143,7 +1144,7 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   r.TLS != nil,
+		Secure:   s.requestIsHTTPS(r),
 		SameSite: http.SameSiteStrictMode,
 		MaxAge:   int(sessionTTL.Seconds()),
 	})
@@ -1228,7 +1229,7 @@ func (s *server) loginLDAP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if account.totpEnabled == 1 {
-		if r.TLS == nil {
+		if !s.requestIsHTTPS(r) {
 			writeJSON(w, http.StatusUpgradeRequired, map[string]string{"error": "HTTPS is required for two-factor login"})
 			return
 		}
@@ -1446,7 +1447,7 @@ func (s *server) logout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie("vault_session"); err == nil {
 		token = cookie.Value
 	}
-	http.SetCookie(w, &http.Cookie{Name: "vault_session", Value: "", Path: "/", HttpOnly: true, Secure: r.TLS != nil, SameSite: http.SameSiteStrictMode, MaxAge: -1})
+	http.SetCookie(w, &http.Cookie{Name: "vault_session", Value: "", Path: "/", HttpOnly: true, Secure: s.requestIsHTTPS(r), SameSite: http.SameSiteStrictMode, MaxAge: -1})
 	if err := s.deleteSession(token); err != nil {
 		log.Printf("ERROR: could not complete logout: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not complete logout"})
@@ -1462,7 +1463,7 @@ func (s *server) createAPIToken(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
-	if r.TLS == nil {
+	if !s.requestIsHTTPS(r) {
 		writeJSON(w, http.StatusUpgradeRequired, map[string]string{"error": "HTTPS is required to create tokens and client credentials"})
 		return
 	}

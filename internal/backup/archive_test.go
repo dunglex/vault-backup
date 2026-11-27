@@ -3,9 +3,34 @@ package backup
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestRestoreRejectsWrongBackupManifestHMAC(t *testing.T) {
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "data")
+	backupDir := filepath.Join(root, "backups")
+	if err := os.MkdirAll(dataDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "vault.db"), []byte("database"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	archive, err := CreateWithMetadata(dataDir, backupDir, Metadata{
+		CreatedAt:  time.Date(2026, 11, 26, 2, 0, 0, 0, time.UTC),
+		SigningKey: []byte("test-master-key"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	restoredDir := filepath.Join(root, "restored")
+	err = Restore(backupDir, restoredDir, filepath.Base(archive), []byte("wrong-master-key"))
+	if err == nil || !strings.Contains(err.Error(), "signature mismatch") {
+		t.Fatalf("restore wrong HMAC error = %v", err)
+	}
+}
 
 func TestCreateAndRestoreServerDataArchive(t *testing.T) {
 	root := t.TempDir()

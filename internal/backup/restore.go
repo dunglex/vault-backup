@@ -3,6 +3,7 @@ package backup
 import (
 	"archive/tar"
 	"compress/gzip"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -12,7 +13,7 @@ import (
 	"strings"
 )
 
-func Restore(backupDir, dataDir, name string) error {
+func Restore(backupDir, dataDir, name string, signingKeys ...[]byte) error {
 	if filepath.Base(name) != name ||
 		!strings.HasPrefix(name, "vault-server-backup-") ||
 		!strings.HasSuffix(name, ".tar.gz") {
@@ -37,7 +38,7 @@ func Restore(backupDir, dataDir, name string) error {
 	}
 	defer os.RemoveAll(staging)
 
-	checksums, err := extractDataArchive(archivePath, staging)
+	checksums, err := extractDataArchive(archivePath, staging, signingKeys...)
 	if err != nil {
 		return err
 	}
@@ -75,7 +76,7 @@ func Restore(backupDir, dataDir, name string) error {
 	return nil
 }
 
-func extractDataArchive(path, staging string) (map[string]string, error) {
+func extractDataArchive(path, staging string, signingKeys ...[]byte) (map[string]string, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("open server backup: %w", err)
@@ -91,6 +92,8 @@ func extractDataArchive(path, staging string) (map[string]string, error) {
 	restored := make(map[string]string)
 	manifestFound := false
 	metadataFound := false
+	var signedManifest string
+	var manifestSignature string
 	for {
 		header, err := reader.Next()
 		if err == io.EOF {
@@ -119,10 +122,19 @@ func extractDataArchive(path, staging string) (map[string]string, error) {
 			}
 			for _, line := range strings.Split(string(data), "\n") {
 				fields := strings.Fields(line)
+				if len(fields) == 3 && fields[0] == "#" && fields[1] == "HMAC-SHA256:" {
+					manifestSignature = fields[2]
+					continue
+				}
 				if len(fields) != 2 {
 					continue
 				}
 				checksums[fields[1]] = fields[0]
+			}
+			if signatureIndex := strings.LastIndex(string(data), "\n# HMAC-SHA256:"); signatureIndex >= 0 {
+				signedManifest = string(data[:signatureIndex+1])
+			} else {
+				signedManifest = string(data)
 			}
 		case strings.HasPrefix(header.Name, "vault-server/data/") && header.Typeflag == tar.TypeReg:
 			relative := strings.TrimPrefix(header.Name, "vault-server/data/")
@@ -159,6 +171,16 @@ func extractDataArchive(path, staging string) (map[string]string, error) {
 	}
 	if !metadataFound || !manifestFound {
 		return nil, fmt.Errorf("server backup is missing metadata or manifest")
+	}
+	if len(signingKeys) != 0 && len(signingKeys[0]) != 0 {
+		if manifestSignature == "" {
+			return nil, fmt.Errorf("server backup manifest is missing HMAC-SHA256 signature")
+		}
+		mac := hmac.New(sha256.New, signingKeys[0])
+		_, _ = io.WriteString(mac, signedManifest)
+		if !hmac.Equal([]byte(fmt.Sprintf("%x", mac.Sum(nil))), []byte(manifestSignature)) {
+			return nil, fmt.Errorf("server backup manifest signature mismatch")
+		}
 	}
 	for relative, actual := range restored {
 		expected, ok := checksums["data/"+relative]

@@ -225,7 +225,7 @@ func (s *server) mfaEnforcementEnabled() (bool, error) {
 	var value string
 	err := s.db.QueryRow("SELECT value FROM server_settings WHERE key = ?", enforceMFASetting).Scan(&value)
 	if err == sql.ErrNoRows {
-		return false, nil
+		return true, nil
 	}
 	if err != nil {
 		return false, err
@@ -318,7 +318,7 @@ func (s *server) updateSettings(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	if r.TLS == nil {
+	if !s.requestIsHTTPS(r) {
 		writeJSON(w, http.StatusUpgradeRequired, map[string]string{"error": "HTTPS is required to change security settings"})
 		return
 	}
@@ -472,7 +472,7 @@ func (s *server) issueAPITokenCertificate(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
-	if r.TLS == nil {
+	if !s.requestIsHTTPS(r) {
 		writeJSON(w, http.StatusUpgradeRequired, map[string]string{"error": "HTTPS is required to issue client credentials"})
 		return
 	}

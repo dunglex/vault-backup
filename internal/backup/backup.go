@@ -49,11 +49,12 @@ type Config struct {
 }
 
 type Metadata struct {
-	Name      string    `json:"name"`
-	CreatedAt time.Time `json:"created_at"`
-	Operators int       `json:"operators"`
-	Secrets   int       `json:"secrets"`
-	APITokens int       `json:"api_tokens"`
+	Name       string    `json:"name"`
+	CreatedAt  time.Time `json:"created_at"`
+	Operators  int       `json:"operators"`
+	Secrets    int       `json:"secrets"`
+	APITokens  int       `json:"api_tokens"`
+	SigningKey []byte    `json:"-"`
 }
 
 type Summary struct {

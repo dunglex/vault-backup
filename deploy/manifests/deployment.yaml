@@ -25,8 +25,8 @@ spec:
           type: RuntimeDefault
       containers:
         - name: vault-server
-          image: registry.vn.eit.zone/hr-digi/vault-server:latest
-          imagePullPolicy: Always
+          image: registry.vn.eit.zone/hr-digi/vault-server:d8e6974
+          imagePullPolicy: IfNotPresent
           args:
             - --https-addr=0.0.0.0:8200
             - --db=/data/vault.db

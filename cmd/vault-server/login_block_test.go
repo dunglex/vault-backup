@@ -27,13 +27,16 @@ func newLoginBlockTestServer(t *testing.T, enabled bool) *server {
 	if err := initializeDatabase(db); err != nil {
 		t.Fatal(err)
 	}
+	value := "false"
 	if enabled {
-		if _, err := db.Exec(
-			"INSERT INTO server_settings(key, value) VALUES (?, 'true')",
-			autoBlockLoginIPSetting,
-		); err != nil {
-			t.Fatal(err)
-		}
+		value = "true"
+	}
+	if _, err := db.Exec(
+		"INSERT INTO server_settings(key, value) VALUES (?, ?)",
+		autoBlockLoginIPSetting,
+		value,
+	); err != nil {
+		t.Fatal(err)
 	}
 	return &server{
 		db:         db,
@@ -41,7 +44,7 @@ func newLoginBlockTestServer(t *testing.T, enabled bool) *server {
 	}
 }
 
-func TestAutoBlockLoginIPDisabledByDefault(t *testing.T) {
+func TestAutoBlockLoginIPDisabledExplicitly(t *testing.T) {
 	s := newLoginBlockTestServer(t, false)
 	enabled, err := s.autoBlockLoginIPEnabled()
 	if err != nil {

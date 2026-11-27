@@ -89,8 +89,8 @@ func TestMFAEnforcementSettingPersistsAndSupportsPartialUpdates(t *testing.T) {
 		return settings.EnforceMFA
 	}
 
-	if settings := readSettings(); settings {
-		t.Fatal("MFA enforcement should be disabled by default")
+	if settings := readSettings(); !settings {
+		t.Fatal("MFA enforcement should be enabled by default")
 	}
 	enable := httptest.NewRecorder()
 	s.updateSettings(enable, operatorRequestWithSession(

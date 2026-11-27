@@ -492,8 +492,8 @@ func TestWebPagesUseExpectedStatusAndContent(t *testing.T) {
 		t.Fatalf("login page returned status %d or did not contain its form", login.Code)
 	}
 	warning := "Failed sign-in attempts are recorded with your IP address."
-	if strings.Contains(login.Body.String(), warning) {
-		t.Fatal("login warning is shown while automatic IP blocking is disabled")
+	if !strings.Contains(login.Body.String(), warning) {
+		t.Fatal("login warning is missing while automatic IP blocking is enabled by default")
 	}
 	if _, err := s.db.Exec(
 		"INSERT INTO server_settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",

@@ -2,12 +2,16 @@
 from __future__ import annotations
 
 import http.cookiejar
+import base64
+import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
 import signal
 import ssl
 import subprocess
+import struct
 import tempfile
 import time
 import urllib.error
@@ -28,6 +32,16 @@ def require(condition: bool, message: str) -> None:
 def assert_status(expected: int, actual: int, label: str) -> None:
     require(actual == expected, f"{label}: expected HTTP {expected}, got {actual}")
     print(f"PASS: {label}")
+
+
+def totp_code(secret: str) -> str:
+    padding = "=" * ((8 - len(secret) % 8) % 8)
+    key = base64.b32decode(secret + padding)
+    counter = struct.pack(">Q", int(time.time()) // 30)
+    digest = hmac.new(key, counter, hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    value = struct.unpack(">I", digest[offset : offset + 4])[0] & 0x7FFFFFFF
+    return f"{value % 1000000:06d}"
 
 
 def run(*args: str | Path, env: dict[str, str] | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -250,6 +264,19 @@ class ServerTest:
             data={"username": self.user, "password": self.password},
         )
         assert_status(200, status, "login")
+        status, setup = self.client.json(
+            "POST",
+            f"{self.management_url}/v1/account/totp/setup",
+            data={},
+        )
+        assert_status(200, status, "start required TOTP enrollment")
+        status, _ = self.client.json(
+            "POST",
+            f"{self.management_url}/v1/account/totp/enable",
+            data={"code": totp_code(setup["secret"])},
+        )
+        assert_status(200, status, "complete required TOTP enrollment")
+        self.totp_secret = setup["secret"]
         return body["token"]
 
     def create_api_token(

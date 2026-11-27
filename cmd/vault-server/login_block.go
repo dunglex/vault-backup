@@ -26,7 +26,7 @@ func (s *server) autoBlockLoginIPEnabled() (bool, error) {
 	var value string
 	err := s.db.QueryRow("SELECT value FROM server_settings WHERE key = ?", autoBlockLoginIPSetting).Scan(&value)
 	if err == sql.ErrNoRows {
-		return false, nil
+		return true, nil
 	}
 	if err != nil {
 		return false, err
@@ -210,7 +210,7 @@ func (s *server) unblockLoginIP(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	if r.TLS == nil {
+	if s.requestIsHTTPS(r) == false {
 		writeJSON(w, http.StatusUpgradeRequired, map[string]string{"error": "HTTPS is required to unblock login IPs"})
 		return
 	}

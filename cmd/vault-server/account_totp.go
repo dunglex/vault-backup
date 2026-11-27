@@ -363,7 +363,7 @@ func (s *server) accountTOTPRequest(w http.ResponseWriter, r *http.Request) (ses
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return sessionInfo{}, false
 	}
-	if r.TLS == nil {
+	if !s.requestIsHTTPS(r) {
 		writeJSON(w, http.StatusUpgradeRequired, map[string]string{"error": "HTTPS is required for account security settings"})
 		return sessionInfo{}, false
 	}

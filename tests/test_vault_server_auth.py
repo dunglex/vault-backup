@@ -1,7 +1,21 @@
 #!/usr/bin/env python3
+import base64
+import hashlib
+import hmac
+import struct
+import time
 from datetime import datetime, timezone
 
 from test_common import HttpClient, ServerTest, assert_status, require
+
+
+def totp_code(secret: str) -> str:
+    key = base64.b32decode(secret + "=" * ((8 - len(secret) % 8) % 8))
+    counter = struct.pack(">Q", int(time.time()) // 30)
+    digest = hmac.new(key, counter, hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    value = struct.unpack(">I", digest[offset : offset + 4])[0] & 0x7FFFFFFF
+    return f"{value % 1000000:06d}"
 
 
 def main() -> None:
@@ -63,8 +77,8 @@ def main() -> None:
         status, totp_settings = server.client.json("GET", f"{server.https_url}/v1/account/totp")
         assert_status(200, status, "read default TOTP settings")
         require(
-            totp_settings["enabled"] is False and totp_settings["enforced"] is False,
-            "TOTP enforcement is disabled by default",
+            totp_settings["enabled"] is True and totp_settings["enforced"] is True,
+            "TOTP enrollment and enforcement are enabled",
         )
         status, token_page = server.client.request("GET", f"{server.https_url}/tokens.html")
         assert_status(200, status, "open canonical API tokens page")
@@ -192,6 +206,18 @@ def main() -> None:
         status, operator_session = operator_client.json("GET", f"{server.https_url}/v1/session")
         assert_status(200, status, "read operator session after password change")
         require(operator_session["must_change_password"] is False, "clear first-login password requirement")
+        status, operator_totp_setup = operator_client.json(
+            "POST",
+            f"{server.https_url}/v1/account/totp/setup",
+            data={},
+        )
+        assert_status(200, status, "start operator TOTP enrollment")
+        status, _ = operator_client.json(
+            "POST",
+            f"{server.https_url}/v1/account/totp/enable",
+            data={"code": totp_code(operator_totp_setup["secret"])},
+        )
+        assert_status(200, status, "complete operator TOTP enrollment")
         status, operator_secret_editor = operator_client.request("GET", f"{server.https_url}/secret.html")
         assert_status(200, status, "open operator secret editor")
         require(
@@ -237,7 +263,11 @@ def main() -> None:
         status, reset_login = operator_client.json(
             "POST",
             f"{server.https_url}/v1/auth/login",
-            data={"username": "night-shift", "password": reset_password},
+            data={
+                "username": "night-shift",
+                "password": reset_password,
+                "totp_code": totp_code(operator_totp_setup["secret"]),
+            },
         )
         assert_status(200, status, "login with reset password")
         require(reset_login.get("must_change_password") is True, "require password change after admin reset")
@@ -293,8 +323,8 @@ def main() -> None:
             operator_details["operators"] == [{
                 "username": "night-shift",
                 "locked": False,
-                "mfa_enabled": False,
-                "mfa_configured": False,
+                "mfa_enabled": True,
+                "mfa_configured": True,
                 "prefixes": ["team-a"],
             }],
             "operator status",
@@ -338,7 +368,7 @@ def main() -> None:
         status, ldap = server.client.json(
             "PUT",
             f"{server.https_url}/api/v1/auth/ldap/login/admin",
-            data={"password": server.password},
+            data={"password": server.password, "totp_code": totp_code(server.totp_secret)},
         )
         assert_status(200, status, "LDAP-compatible login")
         status, _ = server.client.request(
@@ -467,8 +497,8 @@ def main() -> None:
             settings
             == {
                 "enforce_mtls": False,
-                "auto_block_login_bruteforce_ip": False,
-                "enforce_mfa": False,
+                "auto_block_login_bruteforce_ip": True,
+                "enforce_mfa": True,
                 "file_logging": False,
             },
             "default security settings",

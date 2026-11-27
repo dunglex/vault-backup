@@ -63,6 +63,7 @@ func pruneServerBackups(directory string, cutoff time.Time) error {
 func (s *server) newServerBackupHandler() *backup.Handler {
 	return backup.NewHandler(s.db, backupConfig(s.backupConfig), backup.Dependencies{
 		RequireAdmin:     s.requireAdmin,
+		RequestHTTPS:     s.requestIsHTTPS,
 		Enabled:          func() bool { return s.backupEnabled },
 		Audit:            func(r *http.Request, action, outcome, detail string) { s.recordServerBackupAudit(r, outcome, detail) },
 		Metadata:         s.serverBackupMetadata,
@@ -125,7 +126,7 @@ func (s *server) restoreServerBackup(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) serverBackupMetadata(createdAt time.Time) (serverBackupMetadata, error) {
-	metadata := serverBackupMetadata{CreatedAt: createdAt.UTC()}
+	metadata := serverBackupMetadata{CreatedAt: createdAt.UTC(), SigningKey: s.backupConfig.masterKey}
 	if s.operatorDB != nil {
 		if err := s.operatorDB.QueryRow("SELECT COUNT(*) FROM accounts WHERE role = 'operator'").Scan(&metadata.Operators); err != nil {
 			return serverBackupMetadata{}, fmt.Errorf("count server backup operators: %w", err)

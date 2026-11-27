@@ -3,6 +3,7 @@ package backup
 import (
 	"archive/tar"
 	"compress/gzip"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -172,7 +173,7 @@ func writeArchive(source, archivePath string, files []string, metadata Metadata)
 			return err
 		}
 	}
-	if err := writeManifest(tw, checksums, metadata.CreatedAt); err != nil {
+	if err := writeManifest(tw, checksums, metadata.CreatedAt, metadata.SigningKey); err != nil {
 		return err
 	}
 	if err := tw.Close(); err != nil {
@@ -232,7 +233,7 @@ func addFile(tw *tar.Writer, path, relative string, checksums map[string]string)
 	return nil
 }
 
-func writeManifest(tw *tar.Writer, checksums map[string]string, createdAt time.Time) error {
+func writeManifest(tw *tar.Writer, checksums map[string]string, createdAt time.Time, signingKey []byte) error {
 	paths := make([]string, 0, len(checksums))
 	for path := range checksums {
 		paths = append(paths, path)
@@ -244,6 +245,12 @@ func writeManifest(tw *tar.Writer, checksums map[string]string, createdAt time.T
 		fmt.Fprintf(&contents, "%s  %s\n", checksums[path], path)
 	}
 	data := contents.String()
+	if len(signingKey) != 0 {
+		mac := hmac.New(sha256.New, signingKey)
+		_, _ = io.WriteString(mac, data)
+		fmt.Fprintf(&contents, "# HMAC-SHA256: %x\n", mac.Sum(nil))
+		data = contents.String()
+	}
 	if err := tw.WriteHeader(&tar.Header{Name: "vault-server/manifest.txt", Mode: 0600, Size: int64(len(data))}); err != nil {
 		return fmt.Errorf("write server backup manifest header: %w", err)
 	}

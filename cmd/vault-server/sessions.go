@@ -25,6 +25,10 @@ func (s *server) storeSession(token string, session sessionInfo) error {
 	if session.expiresAt.IsZero() {
 		session.expiresAt = time.Now().Add(session.ttl)
 	}
+	if session.createdAt.IsZero() {
+		session.createdAt = time.Now()
+	}
+	session.expiresAt = session.createdAt.Add(session.ttl)
 	db := s.accountDatabase(session.role)
 	if db == nil {
 		return fmt.Errorf("app database is unavailable")
@@ -36,7 +40,7 @@ func (s *server) storeSession(token string, session sessionInfo) error {
 		session.username,
 		session.expiresAt.Unix(),
 		int64(session.ttl/time.Second),
-		time.Now().Unix(),
+		session.createdAt.Unix(),
 	)
 	if err != nil {
 		return fmt.Errorf("store web session: %w", err)
@@ -84,11 +88,11 @@ func (s *server) sessionForToken(token string) (sessionInfo, bool) {
 
 	now := time.Now()
 	var session sessionInfo
-	var expiresAt, ttlSeconds int64
+	var expiresAt, ttlSeconds, createdAtUnix int64
 	var mustChangePassword int
 	db := s.db
 	err := db.QueryRow(`
-		SELECT accounts.username, accounts.role, web_sessions.expires_at, web_sessions.ttl_seconds,
+		SELECT accounts.username, accounts.role, web_sessions.expires_at, web_sessions.ttl_seconds, web_sessions.created_at,
 			accounts.must_change_password
 		FROM web_sessions
 		JOIN accounts ON accounts.username = web_sessions.username
@@ -96,11 +100,11 @@ func (s *server) sessionForToken(token string) (sessionInfo, bool) {
 		  AND accounts.locked = 0 AND accounts.role = 'admin'`,
 		sessionTokenHash(token),
 		now.Unix(),
-	).Scan(&session.username, &session.role, &expiresAt, &ttlSeconds, &mustChangePassword)
+	).Scan(&session.username, &session.role, &expiresAt, &ttlSeconds, &createdAtUnix, &mustChangePassword)
 	if err == sql.ErrNoRows && s.operatorDB != nil {
 		db = s.operatorDB
 		err = db.QueryRow(`
-			SELECT accounts.username, accounts.role, web_sessions.expires_at, web_sessions.ttl_seconds,
+			SELECT accounts.username, accounts.role, web_sessions.expires_at, web_sessions.ttl_seconds, web_sessions.created_at,
 				accounts.must_change_password
 			FROM web_sessions
 			JOIN accounts ON accounts.username = web_sessions.username
@@ -108,7 +112,7 @@ func (s *server) sessionForToken(token string) (sessionInfo, bool) {
 			  AND accounts.locked = 0 AND accounts.role = 'operator'`,
 			sessionTokenHash(token),
 			now.Unix(),
-		).Scan(&session.username, &session.role, &expiresAt, &ttlSeconds, &mustChangePassword)
+		).Scan(&session.username, &session.role, &expiresAt, &ttlSeconds, &createdAtUnix, &mustChangePassword)
 	}
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -135,27 +139,13 @@ func (s *server) sessionForToken(token string) (sessionInfo, bool) {
 		return sessionInfo{}, false
 	}
 	session.ttl = time.Duration(ttlSeconds) * time.Second
-	session.expiresAt = now.Add(session.ttl)
+	session.createdAt = time.Unix(createdAtUnix, 0)
+	session.expiresAt = session.createdAt.Add(session.ttl)
+	if !session.expiresAt.After(now) {
+		s.removePersistentSession(token)
+		return sessionInfo{}, false
+	}
 	session.mustChangePassword = mustChangePassword == 1
-	result, err := db.Exec(
-		"UPDATE web_sessions SET expires_at = ? WHERE token_hash = ? AND expires_at > ?",
-		session.expiresAt.Unix(),
-		sessionTokenHash(token),
-		now.Unix(),
-	)
-	if err != nil {
-		log.Printf("ERROR: could not refresh web session: %v", err)
-		return sessionInfo{}, false
-	}
-	updated, err := result.RowsAffected()
-	if err != nil {
-		log.Printf("ERROR: could not verify refreshed web session: %v", err)
-		return sessionInfo{}, false
-	}
-	if updated != 1 {
-		s.removeSessionFromCache(token)
-		return sessionInfo{}, false
-	}
 	s.mu.Lock()
 	if s.sessions == nil {
 		s.sessions = make(map[string]sessionInfo)
@@ -176,7 +166,10 @@ func (s *server) cachedSessionForToken(token string) (sessionInfo, bool) {
 	if session.ttl <= 0 {
 		session.ttl = defaultSessionTTL
 	}
-	session.expiresAt = time.Now().Add(session.ttl)
+	if session.createdAt.IsZero() {
+		session.createdAt = time.Now()
+		session.expiresAt = session.createdAt.Add(session.ttl)
+	}
 	s.sessions[token] = session
 	return session, true
 }

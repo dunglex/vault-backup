@@ -244,7 +244,7 @@ func (s *server) updateAPITokenSecretPrefixes(w http.ResponseWriter, r *http.Req
 		return
 	}
 	var id int64
-	if r.TLS == nil {
+	if !s.requestIsHTTPS(r) {
 		s.recordAuditEvent(r, "update_token_scopes", "failure", actor, "web", resource, "https_required")
 		writeJSON(w, http.StatusUpgradeRequired, map[string]string{"error": "HTTPS is required to manage API tokens"})
 		return

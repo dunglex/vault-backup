@@ -16,6 +16,7 @@ import (
 
 type Dependencies struct {
 	RequireAdmin     func(http.ResponseWriter, *http.Request) bool
+	RequestHTTPS     func(*http.Request) bool
 	Enabled          func() bool
 	Audit            func(*http.Request, string, string, string)
 	Metadata         func(time.Time) (Metadata, error)
@@ -81,6 +82,13 @@ func (h *Handler) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 	return h.deps.RequireAdmin != nil && h.deps.RequireAdmin(w, r)
 }
 
+func (h *Handler) requestIsHTTPS(r *http.Request) bool {
+	if h.deps.RequestHTTPS != nil {
+		return h.deps.RequestHTTPS(r)
+	}
+	return r.TLS != nil
+}
+
 func (h *Handler) audit(r *http.Request, outcome, detail string) {
 	if h.deps.Audit != nil {
 		h.deps.Audit(r, "server_backup", outcome, detail)
@@ -141,7 +149,7 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	if !h.requireAdmin(w, r) {
 		return
 	}
-	if r.TLS == nil {
+	if !h.requestIsHTTPS(r) {
 		writeJSON(w, http.StatusUpgradeRequired, map[string]string{"error": "HTTPS is required to change backup settings"})
 		return
 	}
@@ -318,7 +326,7 @@ func (h *Handler) TestS3(w http.ResponseWriter, r *http.Request) {
 	if !h.requireAdmin(w, r) {
 		return
 	}
-	if r.TLS == nil {
+	if !h.requestIsHTTPS(r) {
 		writeJSON(w, http.StatusUpgradeRequired, map[string]string{"error": "HTTPS is required to test S3 connection"})
 		return
 	}
@@ -380,7 +388,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	if !h.requireAdmin(w, r) {
 		return
 	}
-	if r.TLS == nil {
+	if !h.requestIsHTTPS(r) {
 		writeJSON(w, http.StatusUpgradeRequired, map[string]string{"error": "HTTPS is required to create server backups"})
 		return
 	}
@@ -460,7 +468,7 @@ func (h *Handler) Restore(w http.ResponseWriter, r *http.Request) {
 	if !h.requireAdmin(w, r) {
 		return
 	}
-	if r.TLS == nil {
+	if !h.requestIsHTTPS(r) {
 		writeJSON(w, http.StatusUpgradeRequired, map[string]string{"error": "HTTPS is required to restore server backups"})
 		return
 	}
@@ -489,7 +497,7 @@ func (h *Handler) Restore(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	restoreErr := Restore(h.config.BackupDir, h.config.DataDir, request.Name)
+	restoreErr := Restore(h.config.BackupDir, h.config.DataDir, request.Name, h.config.MasterKey)
 	if h.deps.ReopenDatabases != nil {
 		reopenErr := h.deps.ReopenDatabases()
 		if reopenErr != nil {

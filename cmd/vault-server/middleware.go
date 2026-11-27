@@ -221,7 +221,7 @@ func allowedMFAEnrollmentRequest(r *http.Request) bool {
 		switch r.URL.Path {
 		case "/account", "/account.html", "/normalize.css", "/miligram.css", "/admin.css", "/qrcode.js":
 			return true
-		case "/v1/account/totp":
+		case "/v1/session", "/v1/account/totp":
 			return true
 		}
 	}

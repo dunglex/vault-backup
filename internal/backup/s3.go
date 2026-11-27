@@ -41,8 +41,8 @@ func (c S3Config) validate() error {
 	}
 	if c.Endpoint != "" {
 		parsed, err := url.Parse(c.Endpoint)
-		if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-			return fmt.Errorf("S3 endpoint must be an HTTP or HTTPS URL")
+		if err != nil || parsed.Host == "" || parsed.Scheme != "https" {
+			return fmt.Errorf("S3 endpoint must be an HTTPS URL")
 		}
 		if strings.ContainsAny(c.Endpoint, "\r\n") {
 			return fmt.Errorf("S3 endpoint is invalid")
