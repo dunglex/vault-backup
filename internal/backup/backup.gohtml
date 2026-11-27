@@ -13,13 +13,20 @@
   <header class="app-header">
     <h1 class="brand"><a href="/">Vault Server</a></h1>
     <nav class="app-nav" aria-label="Admin navigation">
-      <a class="button button-outline" href="/secrets.html">Secrets</a>
-      <a class="button button-outline" href="/tokens.html">API tokens</a>
-      <a class="button button-outline" href="/audits.html">Audit log</a>
-      {{if .HasOperators}}<a class="button button-outline" href="/operators.html">Operators</a>{{end}}
-      <a class="button" aria-current="page" href="/backup.html">Backup</a>
-      <a class="button button-outline" href="/security.html">Security</a>
-      <a class="button button-outline" href="/account.html">Account</a>
+      <button class="app-nav-toggle" type="button" aria-label="Open navigation menu" aria-expanded="false" aria-controls="app-nav-links">
+        <svg aria-hidden="true" viewBox="0 0 24 24" width="24" height="24">
+          <path d="M4 6h16M4 12h16M4 18h16" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="2"></path>
+        </svg>
+      </button>
+      <div id="app-nav-links" class="app-nav-links">
+        <a class="button button-outline" href="/secrets.html">Secrets</a>
+        <a class="button button-outline" href="/tokens.html">API tokens</a>
+        <a class="button button-outline" href="/audits.html">Audit log</a>
+        {{if .HasOperators}}<a class="button button-outline" href="/operators.html">Operators</a>{{end}}
+        <a class="button" aria-current="page" href="/backup.html">Backup</a>
+        <a class="button button-outline" href="/security.html">Security</a>
+        <a class="button button-outline" href="/account.html">Account</a>
+      </div>
     </nav>
   </header>
   <div id="error" class="notice" role="alert"></div>
@@ -200,6 +207,32 @@ document.getElementById('confirmRestoreBackup').addEventListener('click', async 
 });
 document.getElementById('closeRestoreBackup').addEventListener('click', () => document.getElementById('restoreBackupDialog').close());
 Promise.all([loadSettings(), refreshBackups()]).catch(error => { errorBox.textContent = error.message; });
+</script>
+<script>
+const appNav = document.querySelector('.app-nav');
+const appNavToggle = appNav.querySelector('.app-nav-toggle');
+
+function closeAppNav() {
+  appNavToggle.setAttribute('aria-expanded', 'false');
+  appNavToggle.setAttribute('aria-label', 'Open navigation menu');
+}
+
+appNavToggle.addEventListener('click', () => {
+  const expanded = appNavToggle.getAttribute('aria-expanded') === 'true';
+  appNavToggle.setAttribute('aria-expanded', String(!expanded));
+  appNavToggle.setAttribute('aria-label', expanded ? 'Open navigation menu' : 'Close navigation menu');
+});
+
+document.addEventListener('click', event => {
+  if (!appNav.contains(event.target)) closeAppNav();
+});
+
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && appNavToggle.getAttribute('aria-expanded') === 'true') {
+    closeAppNav();
+    appNavToggle.focus();
+  }
+});
 </script>
 </body>
 </html>
