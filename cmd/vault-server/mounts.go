@@ -477,7 +477,7 @@ func migrateSecretNamespace(db *sql.DB) error {
 		return err
 	}
 	if migrated {
-		return nil
+		return initializeSecretListingCache(db)
 	}
 	if _, err := db.Exec("CREATE INDEX IF NOT EXISTS idx_secret_versions_created_at ON secret_versions(created_at)"); err != nil {
 		return err
@@ -521,7 +521,10 @@ func migrateSecretNamespace(db *sql.DB) error {
 	if _, err := tx.Exec("INSERT INTO secret_mount_migrations(name) VALUES ('mount-qualified-v1')"); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return initializeSecretListingCache(db)
 }
 
 var errMountNotFound = errors.New("secret mount not found")

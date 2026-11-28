@@ -35,7 +35,7 @@ func parseArguments() (Arguments, error) {
 	pflag.StringP("user", "u", "", "Vault username (required) [env: VAULT_USER]")
 	pflag.StringP("pass", "p", "", "Vault password (required) [env: VAULT_PASS]")
 	pflag.StringP("token", "t", "", "Managed Vault API token (alternative to user/pass) [env: VAULT_TOKEN]")
-	pflag.StringP("secret_name", "n", "", "Vault secret name [env: VAULT_SECRET_NAME]")
+	pflag.StringP("secret_name", "n", "", "Vault secret name/mount/engine [env: VAULT_SECRET_NAME]")
 	pflag.StringP("secret_path", "s", "", "Vault secret path [env: VAULT_SECRET_PATH]")
 	pflag.StringP("output_mode", "m", "all", "Print mode: all/data/file (optional, default: all) [env: VAULT_OUTPUT_MODE]")
 	pflag.StringP("output_format", "f", "json", "Output format: json, yaml, ini, env (optional, default: json) [env: VAULT_OUTPUT_FORMAT]")

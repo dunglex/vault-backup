@@ -196,7 +196,7 @@ func TestServerBackupMetadataCountsOperatorsSecretsAndTokens(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	insertTestSecretRecord(t, s.secretsDB, "app/key", "value")
+	insertTestSecretRecord(t, s.secretsDB, "kv/app/key", "value")
 	if _, err := s.db.Exec(
 		"INSERT INTO api_tokens(name, token_hash, created_at, expires_at) VALUES ('backup', 'hash', ?, ?)",
 		time.Now().Unix(), time.Now().Add(time.Hour).Unix(),

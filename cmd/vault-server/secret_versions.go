@@ -39,6 +39,10 @@ func (s *server) writeSecretVersion(path, encrypted, actor string, cas *int64) (
 	}
 	defer tx.Rollback()
 
+	wasVisible, err := currentSecretIsVisible(tx, path)
+	if err != nil {
+		return 0, false, err
+	}
 	var current int64
 	err = tx.QueryRow("SELECT current_version FROM secrets WHERE path = ?", path).Scan(&current)
 	created := err == sql.ErrNoRows
@@ -83,6 +87,9 @@ func (s *server) writeSecretVersion(path, encrypted, actor string, cas *int64) (
 		"INSERT INTO secret_versions(path, version, data, created_at, created_by) VALUES (?, ?, ?, ?, ?)",
 		path, next, encrypted, now, nullableString(actor),
 	); err != nil {
+		return 0, false, err
+	}
+	if err := syncSecretListingVisibility(tx, path, wasVisible); err != nil {
 		return 0, false, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -190,6 +197,10 @@ func (s *server) softDeleteCurrentSecret(path string) (int64, bool, error) {
 	if err != nil {
 		return 0, false, err
 	}
+	wasVisible, err := currentSecretIsVisible(tx, path)
+	if err != nil {
+		return 0, false, err
+	}
 	if _, err := tx.Exec(`
 		UPDATE secret_versions
 		SET deleted_at = ?
@@ -198,6 +209,9 @@ func (s *server) softDeleteCurrentSecret(path string) (int64, bool, error) {
 		  AND deleted_at IS NULL
 		  AND destroyed_at IS NULL
 	`, time.Now().UTC().Unix(), path, currentVersion); err != nil {
+		return 0, false, err
+	}
+	if err := syncSecretListingVisibility(tx, path, wasVisible); err != nil {
 		return 0, false, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -212,6 +226,10 @@ func (s *server) updateSecretVersions(path, operation string, versions []int64) 
 		return err
 	}
 	defer tx.Rollback()
+	wasVisible, err := currentSecretIsVisible(tx, path)
+	if err != nil {
+		return err
+	}
 	now := time.Now().UTC().Unix()
 	for _, version := range versions {
 		switch operation {
@@ -236,6 +254,9 @@ func (s *server) updateSecretVersions(path, operation string, versions []int64) 
 		if err != nil {
 			return err
 		}
+	}
+	if err := syncSecretListingVisibility(tx, path, wasVisible); err != nil {
+		return err
 	}
 	return tx.Commit()
 }

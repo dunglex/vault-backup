@@ -14,16 +14,27 @@ import (
 func insertTestSecretRecord(t *testing.T, db *sql.DB, path, ciphertext string) {
 	t.Helper()
 	now := time.Now().UTC().Unix()
-	if _, err := db.Exec(
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(
 		"INSERT INTO secrets(path, current_version, created_at, updated_at) VALUES (?, 1, ?, ?)",
 		path, now, now,
 	); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(
+	if _, err := tx.Exec(
 		"INSERT INTO secret_versions(path, version, data, created_at) VALUES (?, 1, ?, ?)",
 		path, ciphertext, now,
 	); err != nil {
+		t.Fatal(err)
+	}
+	if err := updateSecretListingPath(tx, path, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
 }

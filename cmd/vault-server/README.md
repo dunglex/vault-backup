@@ -480,6 +480,11 @@ and secret path `aspire/example`; `/data/` is part of the API route, not the
 mount name or secret path. Mounts are separate namespaces and tokens must be
 granted the exact mount they use.
 
+`GET /api/v1/{mount}/metadata` lists the mount's immediate child keys. The
+server maintains a materialized listing index alongside secret version changes;
+only current versions that are neither deleted nor destroyed appear in the
+listing. Existing secrets are indexed during database initialization.
+
 ```bash
 # Read a KV secret
 curl --cacert /path/to/ca.pem \

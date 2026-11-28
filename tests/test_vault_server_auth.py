@@ -243,6 +243,12 @@ def main() -> None:
         )
         assert_status(200, status, "list secrets within operator mount")
         require(visible_secrets == ["auth-test"], "list all paths inside the granted mount")
+        status, _ = server.client.json(
+            "PUT",
+            f"{server.https_url}/v1/settings",
+            data={"allow_operator_audit": True},
+        )
+        assert_status(200, status, "enable operator audit")
         status, scoped_audit = operator_client.json(
             "GET", f"{server.https_url}/v1/audit?q=team-a%2Fauth-test"
         )
@@ -327,6 +333,12 @@ def main() -> None:
         )
         status, _ = operator_client.request("GET", f"{server.https_url}/v1/audit")
         assert_status(200, status, "allow operator audit access")
+        status, _ = server.client.json(
+            "PUT",
+            f"{server.https_url}/v1/settings",
+            data={"allow_operator_audit": False},
+        )
+        assert_status(200, status, "disable operator audit")
         status, operator_details = server.client.json(
             "GET",
             f"{server.https_url}/v1/operators/details",
@@ -507,8 +519,9 @@ def main() -> None:
                 "auto_block_login_bruteforce_ip": True,
                 "enforce_mfa": False,
                 "file_logging": False,
+                "allow_operator_audit": False,
             },
-            "default security settings",
+            "security settings after disabling operator audit",
         )
         status, _ = server.client.request(
             "GET", f"{server.https_url}/v1/backup/settings"

@@ -1995,48 +1995,31 @@ func (s *server) listKVMetadata(w http.ResponseWriter, r *http.Request) {
 	}
 	storagePrefix := mount + "/" + prefix
 	rows, err := s.secretsDB.Query(`
-		SELECT substr(secrets.path, length(?) + 1)
-		FROM secrets
-		WHERE substr(secrets.path, 1, length(?)) = ?
-		  AND EXISTS (
-			SELECT 1 FROM secret_versions v
-			WHERE v.path = secrets.path
-			  AND v.version = secrets.current_version
-			  AND v.deleted_at IS NULL
-			  AND v.destroyed_at IS NULL
-		  )
-		ORDER BY secrets.path`, storagePrefix, storagePrefix, storagePrefix)
+		SELECT child_key
+		FROM secret_listing
+		WHERE parent_path = ?
+		ORDER BY child_key`, strings.TrimSuffix(storagePrefix, "/"))
 	if err != nil {
 		s.recordAuditEvent(r, "list", "failure", s.auditRequestActor(r, source), source, path, "storage_error")
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not list secrets"})
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not list secret metadata"})
 		return
 	}
 	defer rows.Close()
-	childKeys := make(map[string]bool)
+	keys := make([]string, 0)
 	for rows.Next() {
-		var remainder string
-		if err := rows.Scan(&remainder); err != nil {
+		var key string
+		if err := rows.Scan(&key); err != nil {
 			s.recordAuditEvent(r, "list", "failure", s.auditRequestActor(r, source), source, path, "storage_error")
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read secrets"})
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read secret metadata"})
 			return
 		}
-		parts := strings.SplitN(remainder, "/", 2)
-		key := parts[0]
-		if len(parts) == 2 {
-			key += "/"
-		}
-		childKeys[key] = true
+		keys = append(keys, key)
 	}
 	if err := rows.Err(); err != nil {
 		s.recordAuditEvent(r, "list", "failure", s.auditRequestActor(r, source), source, path, "storage_error")
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not list secrets"})
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not list secret metadata"})
 		return
 	}
-	keys := make([]string, 0, len(childKeys))
-	for key := range childKeys {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
 	s.recordAuditEvent(r, "list", "success", s.auditRequestActor(r, source), source, secretStoragePath(mount, path), "")
 	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"keys": keys}})
 }
