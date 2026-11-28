@@ -17,6 +17,7 @@ type accountRecord struct {
 	totpSecret         sql.NullString
 	totpEnabled        int
 	totpRecoveryCodes  string
+	timezone           string
 }
 
 func (s *server) accountDatabase(role string) *sql.DB {
@@ -39,7 +40,7 @@ func (s *server) loadAccountForRequest(r *http.Request, username string) (accoun
 	_, err := measureDBQuery(r, func() (struct{}, error) {
 		return struct{}{}, s.db.QueryRow(`
 			SELECT username, password_hash, role, secret_mounts, locked, must_change_password,
-			       totp_secret, totp_enabled, totp_recovery_codes
+			       totp_secret, totp_enabled, totp_recovery_codes, timezone
 			FROM accounts WHERE username = ? AND role = 'admin'`,
 			username,
 		).Scan(
@@ -52,6 +53,7 @@ func (s *server) loadAccountForRequest(r *http.Request, username string) (accoun
 			&account.totpSecret,
 			&account.totpEnabled,
 			&account.totpRecoveryCodes,
+			&account.timezone,
 		)
 	})
 	if err == nil {
@@ -79,6 +81,7 @@ func (s *server) loadAccountForRequest(r *http.Request, username string) (accoun
 		totpSecret:         operatorAccount.TOTPSecret,
 		totpEnabled:        operatorAccount.TOTPEnabled,
 		totpRecoveryCodes:  operatorAccount.TOTPRecoveryCodes,
+		timezone:           operatorAccount.Timezone,
 	}, s.operatorDB, nil
 }
 

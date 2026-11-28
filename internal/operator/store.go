@@ -15,6 +15,7 @@ type Account struct {
 	TOTPSecret         sql.NullString
 	TOTPEnabled        int
 	TOTPRecoveryCodes  string
+	Timezone           string
 }
 
 func Initialize(db *sql.DB) error {
@@ -30,6 +31,7 @@ func Initialize(db *sql.DB) error {
 			totp_secret TEXT,
 			totp_enabled INTEGER NOT NULL DEFAULT 0 CHECK (totp_enabled IN (0, 1)),
 			totp_recovery_codes TEXT NOT NULL DEFAULT '[]',
+			timezone TEXT NOT NULL DEFAULT 'UTC',
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		);
 		CREATE TABLE IF NOT EXISTS web_sessions (
@@ -51,6 +53,7 @@ func Initialize(db *sql.DB) error {
 		return fmt.Errorf("inspect operator database: %w", err)
 	}
 	hasMounts := false
+	hasTimezone := false
 	for rows.Next() {
 		var sequence, notNull, primaryKey int
 		var name, columnType string
@@ -61,6 +64,9 @@ func Initialize(db *sql.DB) error {
 		}
 		if name == "secret_mounts" {
 			hasMounts = true
+		}
+		if name == "timezone" {
+			hasTimezone = true
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -75,6 +81,11 @@ func Initialize(db *sql.DB) error {
 			return fmt.Errorf("add operator secret mounts: %w", err)
 		}
 	}
+	if !hasTimezone {
+		if _, err := db.Exec("ALTER TABLE accounts ADD COLUMN timezone TEXT NOT NULL DEFAULT 'UTC'"); err != nil {
+			return fmt.Errorf("add operator timezone: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -82,7 +93,7 @@ func LoadAccount(db *sql.DB, username string) (Account, error) {
 	var account Account
 	err := db.QueryRow(`
 		SELECT username, password_hash, role, secret_mounts, locked, must_change_password,
-		       totp_secret, totp_enabled, totp_recovery_codes
+		       totp_secret, totp_enabled, totp_recovery_codes, timezone
 		FROM accounts WHERE username = ? AND role = 'operator'`,
 		username,
 	).Scan(
@@ -95,14 +106,25 @@ func LoadAccount(db *sql.DB, username string) (Account, error) {
 		&account.TOTPSecret,
 		&account.TOTPEnabled,
 		&account.TOTPRecoveryCodes,
+		&account.Timezone,
 	)
 	return account, err
 }
 
 func MigrateLegacyAccounts(source, destination *sql.DB) error {
+	var timezoneExists int
+	if err := source.QueryRow(
+		"SELECT COUNT(*) FROM pragma_table_info('accounts') WHERE name = 'timezone'",
+	).Scan(&timezoneExists); err != nil {
+		return fmt.Errorf("inspect legacy operator account timezone: %w", err)
+	}
+	timezoneColumn := "timezone"
+	if timezoneExists == 0 {
+		timezoneColumn = "'UTC'"
+	}
 	rows, err := source.Query(`
 		SELECT username, password_hash, role, secret_mounts, locked, must_change_password,
-		       totp_secret, totp_enabled, totp_recovery_codes
+		       totp_secret, totp_enabled, totp_recovery_codes, ` + timezoneColumn + `
 		FROM accounts WHERE role = 'operator' ORDER BY username`)
 	if err != nil {
 		return fmt.Errorf("read legacy operator accounts: %w", err)
@@ -122,6 +144,7 @@ func MigrateLegacyAccounts(source, destination *sql.DB) error {
 			&account.TOTPSecret,
 			&account.TOTPEnabled,
 			&account.TOTPRecoveryCodes,
+			&account.Timezone,
 		); err != nil {
 			return fmt.Errorf("read legacy operator account: %w", err)
 		}
@@ -147,8 +170,8 @@ func MigrateLegacyAccounts(source, destination *sql.DB) error {
 		if _, err := tx.Exec(`
 			INSERT INTO accounts(
 				username, password_hash, role, secret_mounts, locked, must_change_password,
-				totp_secret, totp_enabled, totp_recovery_codes
-			) VALUES (?, ?, 'operator', ?, ?, ?, ?, ?, ?)
+				totp_secret, totp_enabled, totp_recovery_codes, timezone
+			) VALUES (?, ?, 'operator', ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(username) DO NOTHING`,
 			account.Username,
 			account.PasswordHash,
@@ -158,6 +181,7 @@ func MigrateLegacyAccounts(source, destination *sql.DB) error {
 			account.TOTPSecret,
 			account.TOTPEnabled,
 			account.TOTPRecoveryCodes,
+			account.Timezone,
 		); err != nil {
 			return fmt.Errorf("copy legacy operator account: %w", err)
 		}
@@ -213,7 +237,7 @@ func LoadAccountTx(tx *sql.Tx, username string) (Account, error) {
 	var account Account
 	err := tx.QueryRow(`
 		SELECT username, password_hash, role, secret_mounts, locked, must_change_password,
-		       totp_secret, totp_enabled, totp_recovery_codes
+		       totp_secret, totp_enabled, totp_recovery_codes, timezone
 		FROM accounts WHERE username = ? AND role = 'operator'`,
 		username,
 	).Scan(
@@ -226,6 +250,7 @@ func LoadAccountTx(tx *sql.Tx, username string) (Account, error) {
 		&account.TOTPSecret,
 		&account.TOTPEnabled,
 		&account.TOTPRecoveryCodes,
+		&account.Timezone,
 	)
 	return account, err
 }

@@ -109,7 +109,9 @@
 <script src="/notyf.js"></script>
 <script src="/notifications.js"></script>
 <script src="/api-loading.js"></script>
+<script src="/date-time.js"></script>
 <script>
+window.vaultTimezone = {{if .Timezone}}{{.Timezone}}{{else}}"UTC"{{end}};
 const enforceMTLS = {{if .EnforceMTLS}}true{{else}}false{{end}};
 const isAdmin = {{if .IsAdmin}}true{{else}}false{{end}};
 const errorBox = document.getElementById('error');
@@ -241,29 +243,37 @@ function renderTokens() {
   apiTokens.forEach(token => {
     const li = document.createElement('li');
     const state = token.revoked ? 'revoked' : token.expired ? 'expired' : 'active';
+    const active = state === 'active';
     const details = document.createElement('span');
-    const certificate = !enforceMTLS ? '' : token.has_certificate
-      ? 'client cert expires ' + token.certificate_expires_at
+    details.className = 'token-details';
+    const name = document.createElement('span');
+    name.className = 'token-name';
+    name.textContent = token.name;
+    const metadata = document.createElement('span');
+    metadata.className = 'token-metadata';
+    const certificateText = !enforceMTLS ? '' : token.has_certificate
+      ? 'client cert expires ' + window.vaultFormatDateTime(token.certificate_expires_at)
       : 'no client certificate';
-    details.textContent = token.name + ' (' + state + (token.readonly ? ', read-only' : ', read/write') + ', token expires ' + token.expires_at
-      + (certificate ? '; ' + certificate : '') + '; allowed engines: '
-      + (token.mounts.length ? token.mounts.join(', ') : 'none') + ')';
+    metadata.textContent = state + (token.readonly ? ', read-only' : ', read/write') + ', token expires ' + window.vaultFormatDateTime(token.expires_at)
+      + (certificateText ? '; ' + certificateText : '') + '; allowed engines: '
+      + (token.mounts.length ? token.mounts.join(', ') : 'none');
+    details.append(name, metadata);
     li.appendChild(details);
-    const actions = document.createElement('div');
-    actions.className = 'row-actions token-actions';
-    const editMounts = document.createElement('button');
-    editMounts.className = 'button button-outline';
-    editMounts.textContent = 'Edit engines';
-    editMounts.type = 'button';
-    editMounts.onclick = () => {
-      editingTokenId = token.id;
-      document.getElementById('editTokenMountsTitle').textContent = `Edit engines for ${token.name}`;
-      document.getElementById('editTokenMountsError').textContent = '';
-      setMountValues('editTokenMounts', token.mounts);
-      editMountsDialog.showModal();
-    };
-    actions.appendChild(editMounts);
-    if (!token.revoked && !token.expired) {
+    if (active) {
+      const actions = document.createElement('div');
+      actions.className = 'row-actions token-actions';
+      const editMounts = document.createElement('button');
+      editMounts.className = 'button button-outline';
+      editMounts.textContent = 'Edit engines';
+      editMounts.type = 'button';
+      editMounts.onclick = () => {
+        editingTokenId = token.id;
+        document.getElementById('editTokenMountsTitle').textContent = `Edit engines for ${token.name}`;
+        document.getElementById('editTokenMountsError').textContent = '';
+        setMountValues('editTokenMounts', token.mounts);
+        editMountsDialog.showModal();
+      };
+      actions.appendChild(editMounts);
       if (enforceMTLS) {
         const certificateButton = document.createElement('button');
         certificateButton.className = 'button button-outline';
@@ -300,8 +310,8 @@ function renderTokens() {
         } catch (error) { showError(error.message); }
       };
       actions.appendChild(button);
+      li.appendChild(actions);
     }
-    li.appendChild(actions);
     list.appendChild(li);
   });
 }

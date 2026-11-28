@@ -108,6 +108,7 @@ func initializeDatabase(db *sql.DB) error {
 			totp_secret TEXT,
 			totp_enabled INTEGER NOT NULL DEFAULT 0 CHECK (totp_enabled IN (0, 1)),
 			totp_recovery_codes TEXT NOT NULL DEFAULT '[]',
+			timezone TEXT NOT NULL DEFAULT 'UTC',
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		);
 		CREATE TABLE IF NOT EXISTS web_sessions (
@@ -167,6 +168,9 @@ func initializeDatabase(db *sql.DB) error {
 		return err
 	}
 	if err := ensureAccountTOTPColumns(db); err != nil {
+		return err
+	}
+	if err := ensureAccountTimezoneColumn(db); err != nil {
 		return err
 	}
 	if err := ensureAccountLockColumn(db); err != nil {
@@ -426,6 +430,18 @@ func ensureAccountTOTPColumns(db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+func ensureAccountTimezoneColumn(db *sql.DB) error {
+	columns, err := accountColumns(db)
+	if err != nil {
+		return err
+	}
+	if columns["timezone"] {
+		return nil
+	}
+	_, err = db.Exec("ALTER TABLE accounts ADD COLUMN timezone TEXT NOT NULL DEFAULT 'UTC'")
+	return err
 }
 
 func accountColumns(db *sql.DB) (map[string]bool, error) {

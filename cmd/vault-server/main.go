@@ -97,6 +97,7 @@ type sessionInfo struct {
 	createdAt          time.Time
 	ttl                time.Duration
 	mustChangePassword bool
+	timezone           string
 }
 
 type accountRequest struct {
@@ -445,6 +446,7 @@ func main() {
 	mux.HandleFunc("GET /notyf.js", serveEmbeddedAsset("notyf.js", "text/javascript; charset=utf-8"))
 	mux.HandleFunc("GET /notifications.js", serveEmbeddedAsset("notifications.js", "text/javascript; charset=utf-8"))
 	mux.HandleFunc("GET /api-loading.js", serveEmbeddedAsset("api-loading.js", "text/javascript; charset=utf-8"))
+	mux.HandleFunc("GET /date-time.js", serveEmbeddedAsset("date-time.js", "text/javascript; charset=utf-8"))
 	mux.HandleFunc("GET /qrcode.js", serveEmbeddedAsset("qrcode.js", "text/javascript; charset=utf-8"))
 
 	// Serve HTML pages.
@@ -549,6 +551,8 @@ func main() {
 	mux.HandleFunc("POST /v1/account/totp/recovery-codes", s.regenerateAccountRecoveryCodes)
 	mux.HandleFunc("DELETE /v1/account/totp", s.disableAccountTOTP)
 	mux.HandleFunc("POST /v1/account/password", s.changeAccountPassword)
+	mux.HandleFunc("GET /v1/account/timezone", s.getAccountTimezone)
+	mux.HandleFunc("PUT /v1/account/timezone", s.updateAccountTimezone)
 	mux.HandleFunc("GET /v1/audit/years", s.listAuditYears)
 	mux.HandleFunc("GET /v1/audit", s.listAuditEvents)
 
@@ -1168,6 +1172,7 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		expiresAt:          time.Now().Add(sessionTTL),
 		ttl:                sessionTTL,
 		mustChangePassword: account.mustChangePassword == 1,
+		timezone:           account.timezone,
 	}
 	if err := s.storeSessionForRequest(r, token, session); err != nil {
 		s.recordAuditEvent(r, "login", "failure", req.Username, "web", "", "session_storage_error")
@@ -1301,6 +1306,7 @@ func (s *server) loginLDAP(w http.ResponseWriter, r *http.Request) {
 		role:      account.role,
 		expiresAt: time.Now().Add(defaultSessionTTL),
 		ttl:       defaultSessionTTL,
+		timezone:  account.timezone,
 	}
 	if err := s.storeSessionForRequest(r, token, session); err != nil {
 		s.recordAuditEvent(r, "login", "failure", username, "api", "", "session_storage_error")
@@ -1708,7 +1714,7 @@ func (s *server) listAPITokens(w http.ResponseWriter, r *http.Request) {
 			"name":            name,
 			"created_at":      time.Unix(createdAt, 0).UTC().Format(time.RFC3339),
 			"expires_at":      time.Unix(expiresAt, 0).UTC().Format(time.RFC3339),
-			"expired":         expiresAt < time.Now().Unix(),
+			"expired":         expiresAt <= time.Now().Unix(),
 			"revoked":         revokedAt.Valid,
 			"has_certificate": certificateExpiresAt.Valid && certificateExpiresAt.Int64 > time.Now().Unix(),
 			"mounts":          mounts,
@@ -2585,7 +2591,58 @@ func (s *server) listAuditEvents(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not query selected audit year"})
 		return
 	}
+	session, _ := s.sessionFromRequest(r)
+	if err := s.addAuditTokenNames(result, session.username, access.unrestricted); err != nil {
+		log.Printf("ERROR: could not resolve audit token names: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not resolve audit token names"})
+		return
+	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *server) addAuditTokenNames(result map[string]any, actor string, unrestricted bool) error {
+	events, ok := result["events"].([]map[string]any)
+	if !ok {
+		return nil
+	}
+	namesByID := make(map[string]string)
+	namesByFingerprint := make(map[string]string)
+	rows, err := s.db.Query(`
+		SELECT id, name, token_hash
+		FROM api_tokens
+		WHERE (? = 1 OR COALESCE(created_by, '') = ?)`, unrestricted, actor)
+	if err != nil {
+		return fmt.Errorf("list API token metadata: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, name, hash string
+		if err := rows.Scan(&id, &name, &hash); err != nil {
+			return fmt.Errorf("read API token metadata: %w", err)
+		}
+		namesByID[id] = name
+		if len(hash) >= 12 {
+			namesByFingerprint[hash[:12]] = name
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read API token metadata: %w", err)
+	}
+	for _, event := range events {
+		resource, _ := event["resource"].(string)
+		eventActor, _ := event["actor"].(string)
+		name := ""
+		if strings.HasPrefix(resource, "api-token:") {
+			name = namesByID[strings.TrimPrefix(resource, "api-token:")]
+		}
+		if name == "" && strings.HasPrefix(eventActor, "api-token:") {
+			name = namesByFingerprint[strings.TrimPrefix(eventActor, "api-token:")]
+		}
+		if name != "" {
+			event["token_name"] = name
+		}
+	}
+	return nil
 }
 
 func queryAuditEvents(db *sql.DB, year int, where string, args []any, limit, offset int) (map[string]any, error) {
@@ -2896,10 +2953,11 @@ func (s *server) serveAdminProtectedPage(w http.ResponseWriter, r *http.Request,
 		http.Error(w, "administrator access required", http.StatusForbidden)
 		return
 	}
-	s.renderPage(w, name, http.StatusOK, map[string]bool{
+	s.renderPage(w, name, http.StatusOK, map[string]any{
 		"IsAdmin":      true,
 		"HasOperators": s.operatorDB != nil,
 		"HasBackup":    s.backupEnabled,
+		"Timezone":     sessionTimezone(session),
 	})
 }
 
@@ -2931,11 +2989,12 @@ func (s *server) serveProtectedPage(w http.ResponseWriter, r *http.Request, name
 			return
 		}
 	}
-	data := map[string]bool{
+	data := map[string]any{
 		"IsAdmin":            session.role == "admin",
 		"HasOperators":       s.operatorDB != nil,
 		"HasBackup":          s.backupEnabled,
 		"AllowOperatorAudit": allowOperatorAudit,
+		"Timezone":           sessionTimezone(session),
 	}
 	if name == "token.gohtml" {
 		enforced, err := s.mtlsSettings()
@@ -2947,6 +3006,15 @@ func (s *server) serveProtectedPage(w http.ResponseWriter, r *http.Request, name
 		data["EnforceMTLS"] = enforced
 	}
 	s.renderPage(w, name, http.StatusOK, data)
+}
+
+func sessionTimezone(session sessionInfo) string {
+	timezone := strings.TrimSpace(session.timezone)
+	timezone = canonicalTimezone(timezone)
+	if _, err := time.LoadLocation(timezone); err == nil {
+		return timezone
+	}
+	return "UTC"
 }
 
 func (s *server) setupLocked() bool {

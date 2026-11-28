@@ -86,7 +86,7 @@
       <p id="blockedIPsEmpty" class="muted" hidden>No IP addresses are blocked.</p>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>IP address</th><th>Blocked at (UTC)</th><th>Failed logins</th><th>Action</th></tr></thead>
+          <thead><tr><th>IP address</th><th>Blocked at</th><th>Failed logins</th><th>Action</th></tr></thead>
           <tbody id="blockedIPs"></tbody>
         </table>
       </div>
@@ -96,7 +96,9 @@
 <script src="/notyf.js"></script>
 <script src="/notifications.js"></script>
 <script src="/api-loading.js"></script>
+<script src="/date-time.js"></script>
 <script>
+window.vaultTimezone = {{if .Timezone}}{{.Timezone}}{{else}}"UTC"{{end}};
 const errorBox = document.getElementById('error');
 async function api(url, options = {}) {
   options.credentials = 'same-origin';
@@ -157,7 +159,7 @@ async function refreshBlockedIPs() {
   const result = await api('/v1/settings/blocked-login-ips');
   for (const blocked of result.blocked_ips) {
     const row = body.insertRow();
-    for (const value of [blocked.ip, blocked.blocked_at, blocked.failure_count]) {
+    for (const value of [blocked.ip, window.vaultFormatDateTime(blocked.blocked_at), blocked.failure_count]) {
       const cell = row.insertCell();
       cell.textContent = String(value);
     }

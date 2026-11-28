@@ -95,6 +95,9 @@ password once, and requires the Operator to change it at their next web login.
 Two-factor authentication with TOTP is optional and disabled by default for
 each account. Users can change their password, enroll TOTP, and disable it from
 `/account.html`; setup displays a local QR code or the secret for manual entry.
+Each account can also select an IANA display timezone from `/account.html`;
+audit, token, certificate, and blocked-login timestamps then render in that
+timezone while API values and stored timestamps remain UTC.
 Recovery codes are shown once when TOTP is enabled. Users can generate and
 display a replacement set from their account page by confirming their password
 and second factor; this invalidates all previous recovery codes. Once enabled,

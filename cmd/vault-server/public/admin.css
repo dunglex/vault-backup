@@ -402,10 +402,10 @@ textarea {
 
 #paths li,
 #tokens li {
-  align-items: center;
+  align-items: flex-start;
   border-bottom: 0.1rem solid var(--border);
   display: flex;
-  gap: 0.8rem;
+  gap: 1.2rem;
   justify-content: space-between;
   padding: 1rem 0;
   min-width: 0;
@@ -419,6 +419,35 @@ textarea {
 #paths button,
 #tokens button {
   margin-bottom: 0;
+}
+
+.token-details {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.token-name,
+.token-metadata {
+  display: block;
+}
+
+.token-name {
+  color: var(--text);
+  font-weight: 700;
+}
+
+.token-metadata {
+  color: var(--muted);
+  font-size: 1.3rem;
+  line-height: 1.5;
+  margin-top: 0.2rem;
+}
+
+.token-actions {
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+  justify-content: flex-end;
 }
 
 .operator-list {
@@ -667,6 +696,30 @@ textarea {
 
 table {
   min-width: 90rem;
+}
+
+.audit-event-row {
+  cursor: pointer;
+}
+
+.audit-time-column {
+  min-width: 11rem;
+  white-space: nowrap;
+}
+
+.audit-time-value span {
+  display: block;
+  white-space: nowrap;
+}
+
+.audit-event-row:hover,
+.audit-event-row:focus-visible {
+  background: var(--surface-muted);
+}
+
+.audit-event-row:focus-visible {
+  outline: 0.2rem solid var(--primary);
+  outline-offset: -0.2rem;
 }
 
 .audit-detail-grid {
@@ -996,6 +1049,17 @@ pre {
 
   .operator-actions button {
     flex: 1 1 12rem;
+  }
+
+  #tokens li {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .token-actions {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    width: 100%;
   }
 }
 

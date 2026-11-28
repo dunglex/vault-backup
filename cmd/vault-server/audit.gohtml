@@ -40,7 +40,7 @@
         <label>Year<select id="year"></select></label>
         <label>Search<input id="q" placeholder="Actor, resource, or detail"></label>
         <label>Actor<input id="actor" placeholder="Exact actor"></label>
-        <label>Action<select id="action"><option value="">All</option><option>login</option><option>login_blocked</option><option>block_login_ip</option><option>unblock_login_ip</option><option>start_mfa_setup</option><option>enable_mfa</option><option>disable_mfa</option><option>regenerate_mfa_recovery_codes</option><option>list</option><option>read</option><option>create</option><option>update</option><option>delete</option><option>create_token</option><option>update_token_mounts</option><option>revoke_token</option><option>update_operator_mounts</option><option>issue_certificate</option><option>rotate_certificate</option><option>update_settings</option><option>server_backup</option></select></label>
+        <label>Action<select id="action"><option value="">All</option><option>login</option><option>login_blocked</option><option>block_login_ip</option><option>unblock_login_ip</option><option>start_mfa_setup</option><option>enable_mfa</option><option>disable_mfa</option><option>regenerate_mfa_recovery_codes</option><option>update_account_timezone</option><option>list</option><option>read</option><option>create</option><option>update</option><option>delete</option><option>create_token</option><option>update_token_mounts</option><option>revoke_token</option><option>update_operator_mounts</option><option>issue_certificate</option><option>rotate_certificate</option><option>update_settings</option><option>server_backup</option></select></label>
         <label>Outcome<select id="outcome"><option value="">All</option><option>started</option><option>success</option><option>failure</option></select></label>
         <label>Source<select id="source"><option value="">All</option><option>web</option><option>api</option></select></label>
         <label>From<input id="from" type="date"></label>
@@ -50,7 +50,7 @@
     </details>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Time (UTC)</th><th>Actor</th><th>Action</th><th>Outcome</th><th>Source</th><th>Client IP</th><th>Resource / detail</th><th>Details</th></tr></thead>
+        <thead><tr><th class="audit-time-column">Time</th><th>Actor</th><th>Action</th><th>Outcome</th><th>Source</th><th>Client IP</th><th>Resource / detail</th></tr></thead>
         <tbody id="events"></tbody>
       </table>
     </div>
@@ -62,8 +62,9 @@
       </div>
       <dl class="audit-detail-grid">
         <dt>Event ID</dt><dd id="auditDetailId"></dd>
-        <dt>Time (UTC)</dt><dd id="auditDetailTime"></dd>
+        <dt>Time</dt><dd id="auditDetailTime"></dd>
         <dt>Actor</dt><dd id="auditDetailActor"></dd>
+        <dt id="auditDetailTokenNameLabel" hidden>Token name</dt><dd id="auditDetailTokenName" hidden></dd>
         <dt>Action</dt><dd id="auditDetailAction"></dd>
         <dt>Outcome</dt><dd id="auditDetailOutcome"></dd>
         <dt>Source</dt><dd id="auditDetailSource"></dd>
@@ -77,7 +78,9 @@
 <script src="/notyf.js"></script>
 <script src="/notifications.js"></script>
 <script src="/api-loading.js"></script>
+<script src="/date-time.js"></script>
 <script>
+window.vaultTimezone = {{if .Timezone}}{{.Timezone}}{{else}}"UTC"{{end}};
 const errorBox = document.getElementById('error');
 let offset = 0;
 const limit = 100;
@@ -109,7 +112,7 @@ function textCell(row, value, className = '') {
 function openAuditDetail(event) {
   const fields = {
     auditDetailId: event.id,
-    auditDetailTime: event.created_at,
+    auditDetailTime: window.vaultFormatCompactDateTime(event.created_at),
     auditDetailActor: event.actor,
     auditDetailAction: event.action,
     auditDetailOutcome: event.outcome,
@@ -121,6 +124,11 @@ function openAuditDetail(event) {
   for (const [id, value] of Object.entries(fields)) {
     document.getElementById(id).textContent = value === '' || value === null || value === undefined ? '-' : String(value);
   }
+  const tokenNameLabel = document.getElementById('auditDetailTokenNameLabel');
+  const tokenNameValue = document.getElementById('auditDetailTokenName');
+  tokenNameLabel.hidden = !event.token_name;
+  tokenNameValue.hidden = !event.token_name;
+  tokenNameValue.textContent = event.token_name || '';
   document.getElementById('auditDetailOutcome').className = event.outcome || '';
   auditDetailDialog.showModal();
 }
@@ -137,21 +145,31 @@ async function refresh() {
     body.replaceChildren();
     for (const event of result.events) {
       const row = body.insertRow();
-      textCell(row, event.created_at);
+      row.className = 'audit-event-row';
+      row.tabIndex = 0;
+      row.setAttribute('aria-label', `View audit event ${event.id} detail`);
+      row.setAttribute('aria-haspopup', 'dialog');
+      const timeCell = row.insertCell();
+      timeCell.className = 'audit-time-value';
+      const [day, time] = window.vaultFormatCompactDateTime(event.created_at).split(' ');
+      const dayValue = document.createElement('span');
+      dayValue.textContent = day;
+      const timeValue = document.createElement('span');
+      timeValue.textContent = time || '';
+      timeCell.append(dayValue, timeValue);
       textCell(row, event.actor);
       textCell(row, event.action);
       textCell(row, event.outcome, event.outcome);
       textCell(row, event.source);
       textCell(row, event.client_ip);
       textCell(row, [event.resource, event.detail].filter(Boolean).join(' - '));
-      const actionCell = row.insertCell();
-      const detailButton = document.createElement('button');
-      detailButton.type = 'button';
-      detailButton.className = 'button button-outline';
-      detailButton.textContent = 'View detail';
-      detailButton.setAttribute('aria-label', `View audit event ${event.id} detail`);
-      detailButton.addEventListener('click', () => openAuditDetail(event));
-      actionCell.append(detailButton);
+      row.addEventListener('click', () => openAuditDetail(event));
+      row.addEventListener('keydown', keyEvent => {
+        if (keyEvent.key === 'Enter' || keyEvent.key === ' ') {
+          keyEvent.preventDefault();
+          openAuditDetail(event);
+        }
+      });
     }
     document.getElementById('summary').textContent = `${result.total} event${result.total === 1 ? '' : 's'}; showing ${result.events.length}`;
     document.getElementById('previous').disabled = offset === 0;

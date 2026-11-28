@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -201,6 +202,52 @@ func TestCreateAPITokenReadonlyOption(t *testing.T) {
 		!strings.Contains(listResponse.Body.String(), `"name":"readwrite-agent"`) ||
 		!strings.Contains(listResponse.Body.String(), `"readonly":false`) {
 		t.Fatalf("token list missing readonly state: %s", listResponse.Body.String())
+	}
+}
+
+func TestAuditTokenNamesResolveIDsAndFingerprintsByOwner(t *testing.T) {
+	s := newOperatorTestServer(t)
+	insertScopedAPIToken(t, s, "operator-token", []string{"kv"}, "scoped-operator")
+	insertScopedAPIToken(t, s, "admin-token", []string{"kv"}, "admin")
+
+	var operatorID, adminID int
+	if err := s.db.QueryRow("SELECT id FROM api_tokens WHERE name = 'operator-token'").Scan(&operatorID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRow("SELECT id FROM api_tokens WHERE name = 'admin-token'").Scan(&adminID); err != nil {
+		t.Fatal(err)
+	}
+	operatorHash := sha256.Sum256([]byte("operator-token"))
+	adminHash := sha256.Sum256([]byte("admin-token"))
+	adminResult := map[string]any{"events": []map[string]any{
+		{"resource": fmt.Sprintf("api-token:%d", adminID)},
+		{"resource": "kv/app", "actor": "api-token:" + hex.EncodeToString(operatorHash[:6])},
+	}}
+	if err := s.addAuditTokenNames(adminResult, "admin", true); err != nil {
+		t.Fatal(err)
+	}
+	adminEvents := adminResult["events"].([]map[string]any)
+	if adminEvents[0]["token_name"] != "admin-token" || adminEvents[1]["token_name"] != "operator-token" {
+		t.Fatalf("admin audit token names = %#v", adminEvents)
+	}
+
+	operatorResult := map[string]any{"events": []map[string]any{
+		{"resource": fmt.Sprintf("api-token:%d", operatorID)},
+		{"resource": fmt.Sprintf("api-token:%d", adminID)},
+		{"resource": "kv/app", "actor": "api-token:" + hex.EncodeToString(adminHash[:6])},
+	}}
+	if err := s.addAuditTokenNames(operatorResult, "scoped-operator", false); err != nil {
+		t.Fatal(err)
+	}
+	operatorEvents := operatorResult["events"].([]map[string]any)
+	if operatorEvents[0]["token_name"] != "operator-token" {
+		t.Fatalf("operator token name = %#v", operatorEvents[0])
+	}
+	if _, ok := operatorEvents[1]["token_name"]; ok {
+		t.Fatalf("operator resolved another user's resource token: %#v", operatorEvents[1])
+	}
+	if _, ok := operatorEvents[2]["token_name"]; ok {
+		t.Fatalf("operator resolved another user's actor token: %#v", operatorEvents[2])
 	}
 }
 

@@ -105,28 +105,28 @@ func (s *server) sessionForTokenForRequest(r *http.Request, token string) (sessi
 	_, err := measureDBQuery(r, func() (struct{}, error) {
 		return struct{}{}, db.QueryRow(`
 			SELECT accounts.username, accounts.role, web_sessions.expires_at, web_sessions.ttl_seconds, web_sessions.created_at,
-				accounts.must_change_password
+				accounts.must_change_password, accounts.timezone
 			FROM web_sessions
 			JOIN accounts ON accounts.username = web_sessions.username
 			WHERE web_sessions.token_hash = ? AND web_sessions.expires_at > ?
 			  AND accounts.locked = 0 AND accounts.role = 'admin'`,
 			sessionTokenHash(token),
 			now.Unix(),
-		).Scan(&session.username, &session.role, &expiresAt, &ttlSeconds, &createdAtUnix, &mustChangePassword)
+		).Scan(&session.username, &session.role, &expiresAt, &ttlSeconds, &createdAtUnix, &mustChangePassword, &session.timezone)
 	})
 	if err == sql.ErrNoRows && s.operatorDB != nil {
 		db = s.operatorDB
 		_, err = measureDBQuery(r, func() (struct{}, error) {
 			return struct{}{}, db.QueryRow(`
 				SELECT accounts.username, accounts.role, web_sessions.expires_at, web_sessions.ttl_seconds, web_sessions.created_at,
-					accounts.must_change_password
+					accounts.must_change_password, accounts.timezone
 				FROM web_sessions
 				JOIN accounts ON accounts.username = web_sessions.username
 				WHERE web_sessions.token_hash = ? AND web_sessions.expires_at > ?
 				  AND accounts.locked = 0 AND accounts.role = 'operator'`,
 				sessionTokenHash(token),
 				now.Unix(),
-			).Scan(&session.username, &session.role, &expiresAt, &ttlSeconds, &createdAtUnix, &mustChangePassword)
+			).Scan(&session.username, &session.role, &expiresAt, &ttlSeconds, &createdAtUnix, &mustChangePassword, &session.timezone)
 		})
 	}
 	if err != nil {

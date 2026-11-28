@@ -113,6 +113,18 @@
     </section>
   </dialog>
   <section class="panel">
+    <h2 class="section-label">Display timezone</h2>
+    <form id="timezoneForm">
+      <label for="accountTimezone">Timezone</label>
+      <select id="accountTimezone" name="timezone" required></select>
+      <p class="muted">Dates and times in the web interface are displayed using this account setting.</p>
+      <div class="row-actions">
+        <button id="saveTimezone" type="submit">Save timezone</button>
+        <span id="timezoneStatus" class="success" role="status"></span>
+      </div>
+    </form>
+  </section>
+  <section class="panel">
     <h2 class="section-label">Change password</h2>
     <button id="openPasswordDialog" type="button">Change password</button>
     <p id="passwordStatus" role="status" class="muted"></p>
@@ -158,6 +170,7 @@ const disableDialogError = document.getElementById('disableDialogError');
 let mfaSetupRequired = new URLSearchParams(location.search).get('mfa') === 'required';
 let passwordChangeRequired = new URLSearchParams(location.search).get('password') === 'required';
 let pendingTOTPProvisioningURI = '';
+const accountTimezone = document.getElementById('accountTimezone');
 async function api(url, options = {}) {
   options.credentials = 'same-origin';
   const response = await fetch(url, options);
@@ -167,6 +180,22 @@ async function api(url, options = {}) {
     throw new Error(body.error || 'Request failed');
   }
   return body;
+}
+async function loadTimezone() {
+  const result = await api('/v1/account/timezone');
+  const values = ['UTC'];
+  if (typeof Intl.supportedValuesOf === 'function') {
+    values.push(...Intl.supportedValuesOf('timeZone'));
+  }
+  values.push(Intl.DateTimeFormat().resolvedOptions().timeZone, result.timezone);
+  accountTimezone.replaceChildren();
+  for (const timezone of [...new Set(values.filter(Boolean))].sort()) {
+    const option = document.createElement('option');
+    option.value = timezone;
+    option.textContent = timezone.replaceAll('_', ' ');
+    accountTimezone.append(option);
+  }
+  accountTimezone.value = result.timezone;
 }
 function showRecoveryCodes(codes, regenerated = false) {
   const list = document.getElementById('recoveryCodes');
@@ -413,6 +442,25 @@ document.getElementById('logout').addEventListener('click', async () => {
   try { await api('/v1/auth/logout', {method:'POST'}); } catch (_) {}
   location.assign('/login.html');
 });
+document.getElementById('timezoneForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  const button = document.getElementById('saveTimezone');
+  const status = document.getElementById('timezoneStatus');
+  button.disabled = true;
+  status.textContent = '';
+  try {
+    await api('/v1/account/timezone', {
+      method:'PUT',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({timezone:accountTimezone.value})
+    });
+    status.textContent = 'Timezone saved.';
+  } catch (error) {
+    errorBox.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+});
 if (passwordChangeRequired) {
   document.getElementById('passwordChangeRequiredNotice').hidden = false;
   document.getElementById('totpSetupPanel').hidden = true;
@@ -422,6 +470,7 @@ if (passwordChangeRequired) {
 } else {
   loadTOTP();
 }
+loadTimezone().catch(error => { errorBox.textContent = error.message; });
 </script>
   <script>
   const appNav = document.querySelector('.app-nav');
