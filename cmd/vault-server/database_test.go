@@ -108,6 +108,13 @@ func TestInitializeDatabaseRemovesLegacyUniqueTokenNameConstraint(t *testing.T) 
 	if mounts != "[]" {
 		t.Fatalf("migrated token mounts = %q, want empty scope", mounts)
 	}
+	var readonly int
+	if err := db.QueryRow("SELECT readonly FROM api_tokens WHERE token_hash = 'first-hash'").Scan(&readonly); err != nil {
+		t.Fatal(err)
+	}
+	if readonly != 0 {
+		t.Fatalf("migrated token readonly = %d, want 0", readonly)
+	}
 }
 
 func TestInitializeDatabaseMigratesExistingAccountsToAdmin(t *testing.T) {

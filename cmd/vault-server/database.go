@@ -129,7 +129,8 @@ func initializeDatabase(db *sql.DB) error {
 			revoked_at INTEGER,
 			secret_prefixes TEXT NOT NULL DEFAULT '[]',
 			secret_mounts TEXT NOT NULL DEFAULT '[]',
-			created_by TEXT
+			created_by TEXT,
+			readonly INTEGER NOT NULL DEFAULT 0 CHECK (readonly IN (0, 1))
 		);
 		CREATE TABLE IF NOT EXISTS server_settings (
 			key TEXT PRIMARY KEY,
@@ -337,6 +338,11 @@ func ensureSecretMountColumns(db *sql.DB) error {
 	}
 	if !tokenColumns["created_by"] {
 		if _, err := db.Exec("ALTER TABLE api_tokens ADD COLUMN created_by TEXT"); err != nil {
+			return err
+		}
+	}
+	if !tokenColumns["readonly"] {
+		if _, err := db.Exec("ALTER TABLE api_tokens ADD COLUMN readonly INTEGER NOT NULL DEFAULT 0 CHECK (readonly IN (0, 1))"); err != nil {
 			return err
 		}
 	}

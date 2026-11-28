@@ -1510,6 +1510,7 @@ func (s *server) createAPIToken(w http.ResponseWriter, r *http.Request) {
 		Name          string   `json:"name"`
 		ExpiresInDays *int     `json:"expires_in_days"`
 		Mounts        []string `json:"mounts"`
+		Readonly      bool     `json:"readonly"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.recordAuditEvent(r, "create_token", "failure", s.auditRequestActor(r, "web"), "web", "api-token", "invalid_request")
@@ -1602,13 +1603,14 @@ func (s *server) createAPIToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := tx.Exec(
-		"INSERT INTO api_tokens(name, token_hash, created_at, expires_at, secret_mounts, created_by) VALUES (?, ?, ?, ?, ?, ?)",
+		"INSERT INTO api_tokens(name, token_hash, created_at, expires_at, secret_mounts, created_by, readonly) VALUES (?, ?, ?, ?, ?, ?, ?)",
 		req.Name,
 		hex.EncodeToString(tokenHash[:]),
 		createdAt.Unix(),
 		expiresAt.Unix(),
 		encodedMounts,
 		session.username,
+		req.Readonly,
 	)
 	if err != nil {
 		s.recordAuditEvent(r, "create_token", "failure", s.auditRequestActor(r, "web"), "web", "api-token", "storage_error")
@@ -1648,6 +1650,7 @@ func (s *server) createAPIToken(w http.ResponseWriter, r *http.Request) {
 		"created_at": createdAt.UTC().Format(time.RFC3339),
 		"expires_at": expiresAt.UTC().Format(time.RFC3339),
 		"mounts":     mounts,
+		"readonly":   req.Readonly,
 	}
 	if enforceMTLS {
 		response["client_certificate"] = issued.Certificate
@@ -1664,7 +1667,7 @@ func (s *server) listAPITokens(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	query := `
-		SELECT tokens.id, tokens.name, tokens.created_at, tokens.expires_at, tokens.revoked_at, tokens.secret_mounts,
+		SELECT tokens.id, tokens.name, tokens.created_at, tokens.expires_at, tokens.revoked_at, tokens.secret_mounts, tokens.readonly,
 		       MAX(certificates.not_after)
 		FROM api_tokens AS tokens
 		LEFT JOIN managed_client_certificates AS certificates
@@ -1676,7 +1679,7 @@ func (s *server) listAPITokens(w http.ResponseWriter, r *http.Request) {
 		args = append(args, session.username)
 	}
 	query += `
-		GROUP BY tokens.id, tokens.name, tokens.created_at, tokens.expires_at, tokens.revoked_at, tokens.secret_mounts
+		GROUP BY tokens.id, tokens.name, tokens.created_at, tokens.expires_at, tokens.revoked_at, tokens.secret_mounts, tokens.readonly
 		ORDER BY tokens.created_at DESC, tokens.id DESC`
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
@@ -1690,7 +1693,8 @@ func (s *server) listAPITokens(w http.ResponseWriter, r *http.Request) {
 		var id, createdAt, expiresAt int64
 		var revokedAt, certificateExpiresAt sql.NullInt64
 		var name, encodedMounts string
-		if err := rows.Scan(&id, &name, &createdAt, &expiresAt, &revokedAt, &encodedMounts, &certificateExpiresAt); err != nil {
+		var readonly bool
+		if err := rows.Scan(&id, &name, &createdAt, &expiresAt, &revokedAt, &encodedMounts, &readonly, &certificateExpiresAt); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read API tokens"})
 			return
 		}
@@ -1708,6 +1712,7 @@ func (s *server) listAPITokens(w http.ResponseWriter, r *http.Request) {
 			"revoked":         revokedAt.Valid,
 			"has_certificate": certificateExpiresAt.Valid && certificateExpiresAt.Int64 > time.Now().Unix(),
 			"mounts":          mounts,
+			"readonly":        readonly,
 		}
 		if certificateExpiresAt.Valid {
 			item["certificate_expires_at"] = time.Unix(certificateExpiresAt.Int64, 0).UTC().Format(time.RFC3339)
@@ -1889,6 +1894,9 @@ func (s *server) putKVSecret(w http.ResponseWriter, r *http.Request) {
 		denySecretScope(w)
 		return
 	}
+	if !s.requireWritableAPIAccess(w, r, access, "update", path) {
+		return
+	}
 	path = secretStoragePath(mount, path)
 	action := "create"
 	var currentVersion int64
@@ -1971,6 +1979,9 @@ func (s *server) deleteKVSecret(w http.ResponseWriter, r *http.Request) {
 	if !allowed {
 		s.recordAuditEvent(r, "delete", "failure", s.auditRequestActor(r, source), source, secretStoragePath(mount, path), "scope_denied")
 		denySecretScope(w)
+		return
+	}
+	if !s.requireWritableAPIAccess(w, r, access, "delete", path) {
 		return
 	}
 	path = secretStoragePath(mount, path)

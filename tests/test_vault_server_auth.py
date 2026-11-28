@@ -484,6 +484,10 @@ def main() -> None:
         max_expires = datetime.fromisoformat(max_token_data["expires_at"].replace("Z", "+00:00"))
         require(int((max_expires - max_created).total_seconds()) == 365 * 86400, "one-year API token maximum")
         require("client_certificate" not in max_token_data, "max-lifetime token has no certificate while mTLS is disabled")
+        readonly_token, _, readonly_token_data = server.create_api_token(
+            "readonly-agent", readonly=True
+        )
+        require(readonly_token_data["readonly"] is True, "create readonly API token")
         _, tokens = server.client.json("GET", f"{server.https_url}/v1/tokens")
         require(
             sum(token["name"] == "backup-agent" for token in tokens) == 1,
@@ -505,6 +509,20 @@ def main() -> None:
             "GET", f"{server.https_url}/api/v1/team-a/data/auth-test", headers=api_headers
         )
         assert_status(403, status, "deny API token access outside assigned mount")
+        status, denied = server.client.json(
+            "PUT",
+            f"{server.https_url}/api/v1/kv/data/token/readonly",
+            data={"data": {"managed": "readonly"}},
+            headers={"X-Vault-Token": readonly_token},
+        )
+        assert_status(403, status, "deny writes with readonly API token")
+        require("permission denied" in denied["error"], "explain readonly API token write denial")
+        status, _ = server.client.request(
+            "GET",
+            f"{server.https_url}/api/v1/kv/data/token/test",
+            headers={"X-Vault-Token": readonly_token},
+        )
+        assert_status(200, status, "allow reads with readonly API token")
         status, api_listing = server.client.json(
             "LIST", f"{server.https_url}/api/v1/kv/metadata/", headers=api_headers
         )

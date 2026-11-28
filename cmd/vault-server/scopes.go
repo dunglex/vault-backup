@@ -18,6 +18,7 @@ type secretMountAccess struct {
 	unrestricted bool
 	mounts       []string
 	encoded      string
+	readonly     bool
 }
 
 func normalizeSecretMounts(mounts []string) ([]string, error) {
@@ -49,17 +50,20 @@ func (access secretMountAccess) contains(mount string) bool {
 }
 
 func (access secretMountAccess) intersect(other secretMountAccess) secretMountAccess {
+	readonly := access.readonly || other.readonly
 	if access.unrestricted {
+		other.readonly = readonly
 		return other
 	}
 	if other.unrestricted {
+		access.readonly = readonly
 		return access
 	}
 	allowed := make(map[string]struct{}, len(other.mounts))
 	for _, mount := range other.mounts {
 		allowed[mount] = struct{}{}
 	}
-	result := secretMountAccess{mounts: make([]string, 0)}
+	result := secretMountAccess{mounts: make([]string, 0), readonly: readonly}
 	for _, mount := range access.mounts {
 		if _, ok := allowed[mount]; ok {
 			result.mounts = append(result.mounts, mount)
@@ -123,11 +127,12 @@ func (s *server) apiSecretAccessForRequest(w http.ResponseWriter, r *http.Reques
 	hash := sha256.Sum256([]byte(token))
 	var encoded string
 	var createdBy sql.NullString
+	var readonly int
 	_, err := measureDBQueryNamed(r, "token_scope_lookup", func() (struct{}, error) {
 		return struct{}{}, s.db.QueryRow(
-			"SELECT secret_mounts, created_by FROM api_tokens WHERE token_hash = ? AND revoked_at IS NULL AND expires_at >= ?",
+			"SELECT secret_mounts, created_by, readonly FROM api_tokens WHERE token_hash = ? AND revoked_at IS NULL AND expires_at >= ?",
 			hex.EncodeToString(hash[:]), time.Now().Unix(),
-		).Scan(&encoded, &createdBy)
+		).Scan(&encoded, &createdBy, &readonly)
 	})
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -144,7 +149,7 @@ func (s *server) apiSecretAccessForRequest(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not verify secret access"})
 		return secretMountAccess{}, false
 	}
-	access := secretMountAccess{mounts: mounts, encoded: encoded}
+	access := secretMountAccess{mounts: mounts, encoded: encoded, readonly: readonly != 0}
 	if createdBy.Valid {
 		var role, accountMounts string
 		var locked int
@@ -181,6 +186,15 @@ func (s *server) apiSecretAccessForRequest(w http.ResponseWriter, r *http.Reques
 		}
 	}
 	return access, true
+}
+
+func (s *server) requireWritableAPIAccess(w http.ResponseWriter, r *http.Request, access secretMountAccess, action, path string) bool {
+	if !access.readonly {
+		return true
+	}
+	s.recordAuditEvent(r, action, "failure", s.auditRequestActor(r, "api"), "api", path, "permission_denied;readonly_token")
+	writeJSON(w, http.StatusForbidden, map[string]string{"error": "permission denied: API token is read-only"})
+	return false
 }
 
 func (s *server) secretMountAllowed(access secretMountAccess, mount string) (bool, error) {

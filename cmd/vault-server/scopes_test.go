@@ -95,6 +95,115 @@ func TestAPITokenAccessIsIsolatedByMount(t *testing.T) {
 	}
 }
 
+func TestReadonlyAPITokenCannotMutateSecrets(t *testing.T) {
+	s := newOperatorTestServer(t)
+	encoded, err := encodeSecretMounts([]string{"kv"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.operatorDB.Exec(
+		"INSERT INTO accounts(username, password_hash, role, secret_mounts) VALUES (?, ?, ?, ?)",
+		"readonly-operator", "hash", "operator", encoded,
+	); err != nil {
+		t.Fatal(err)
+	}
+	hash := sha256.Sum256([]byte("readonly-token"))
+	if _, err := s.db.Exec(`
+		INSERT INTO api_tokens(name, token_hash, created_at, expires_at, secret_mounts, created_by, readonly)
+		VALUES (?, ?, ?, ?, ?, ?, 1)`,
+		"readonly-token", hex.EncodeToString(hash[:]), time.Now().Unix(), time.Now().Add(time.Hour).Unix(),
+		encoded, "readonly-operator",
+	); err != nil {
+		t.Fatal(err)
+	}
+	insertTestSecretRecord(t, s.secretsDB, "kv/team-a/database", testSecretCiphertext(t, s))
+
+	response := httptest.NewRecorder()
+	s.getKVSecret(response, apiScopeRequest(
+		http.MethodGet, "/api/v1/kv/data/team-a/database", "", "readonly-token",
+	))
+	if response.Code != http.StatusOK {
+		t.Fatalf("readonly token read = %d, body %s", response.Code, response.Body.String())
+	}
+
+	tests := []struct {
+		name    string
+		method  string
+		path    string
+		body    string
+		handler func(http.ResponseWriter, *http.Request)
+	}{
+		{"create or update", http.MethodPut, "/api/v1/kv/data/team-a/database", `{"data":{"value":"new"}}`, s.putKVSecret},
+		{"delete", http.MethodDelete, "/api/v1/kv/data/team-a/database", "", s.deleteKVSecret},
+		{"version delete", http.MethodPost, "/api/v1/kv/delete/team-a/database", `{"versions":[1]}`, s.changeKVVersionState},
+		{"version undelete", http.MethodPost, "/api/v1/kv/undelete/team-a/database", `{"versions":[1]}`, s.changeKVVersionState},
+		{"version destroy", http.MethodPost, "/api/v1/kv/destroy/team-a/database", `{"versions":[1]}`, s.changeKVVersionState},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := apiScopeRequest(test.method, test.path, test.body, "readonly-token")
+			response := httptest.NewRecorder()
+			test.handler(response, request)
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, body %s", response.Code, response.Body.String())
+			}
+			if !strings.Contains(response.Body.String(), "permission denied") {
+				t.Fatalf("response = %s, want permission denied", response.Body.String())
+			}
+		})
+	}
+}
+
+func TestCreateAPITokenReadonlyOption(t *testing.T) {
+	s := newOperatorTestServer(t)
+
+	readonlyRequest := operatorRequestWithSession(
+		http.MethodPost,
+		"/v1/tokens",
+		`{"name":"readonly-agent","mounts":["kv"],"readonly":true}`,
+		"admin-session",
+		true,
+	)
+	readonlyResponse := httptest.NewRecorder()
+	s.createAPIToken(readonlyResponse, readonlyRequest)
+	if readonlyResponse.Code != http.StatusCreated {
+		t.Fatalf("readonly token creation = %d, body %s", readonlyResponse.Code, readonlyResponse.Body.String())
+	}
+	if !strings.Contains(readonlyResponse.Body.String(), `"readonly":true`) {
+		t.Fatalf("readonly token response = %s", readonlyResponse.Body.String())
+	}
+
+	defaultRequest := operatorRequestWithSession(
+		http.MethodPost,
+		"/v1/tokens",
+		`{"name":"readwrite-agent","mounts":["kv"]}`,
+		"admin-session",
+		true,
+	)
+	defaultResponse := httptest.NewRecorder()
+	s.createAPIToken(defaultResponse, defaultRequest)
+	if defaultResponse.Code != http.StatusCreated {
+		t.Fatalf("default token creation = %d, body %s", defaultResponse.Code, defaultResponse.Body.String())
+	}
+	if !strings.Contains(defaultResponse.Body.String(), `"readonly":false`) {
+		t.Fatalf("default token response = %s", defaultResponse.Body.String())
+	}
+
+	listResponse := httptest.NewRecorder()
+	s.listAPITokens(listResponse, operatorRequestWithSession(
+		http.MethodGet, "/v1/tokens", "", "admin-session", true,
+	))
+	if listResponse.Code != http.StatusOK {
+		t.Fatalf("token list = %d, body %s", listResponse.Code, listResponse.Body.String())
+	}
+	if !strings.Contains(listResponse.Body.String(), `"name":"readonly-agent"`) ||
+		!strings.Contains(listResponse.Body.String(), `"readonly":true`) ||
+		!strings.Contains(listResponse.Body.String(), `"name":"readwrite-agent"`) ||
+		!strings.Contains(listResponse.Body.String(), `"readonly":false`) {
+		t.Fatalf("token list missing readonly state: %s", listResponse.Body.String())
+	}
+}
+
 func TestOperatorAndCreatedTokensAreLimitedByExactMountGrants(t *testing.T) {
 	s := newOperatorTestServer(t)
 	addActiveMount(t, s, "other")

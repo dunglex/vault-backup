@@ -289,11 +289,15 @@ class ServerTest:
         self.totp_secret = setup["secret"]
 
     def create_api_token(
-        self, name: str = "test-token", expires_in_days: int | None = None
+        self,
+        name: str = "test-token",
+        expires_in_days: int | None = None,
+        readonly: bool = False,
     ) -> tuple[str, int, dict]:
-        data: dict[str, str | int | list[str]] = {
+        data: dict[str, str | int | list[str] | bool] = {
             "name": name,
             "mounts": ["kv"],
+            "readonly": readonly,
         }
         if expires_in_days is not None:
             data["expires_in_days"] = expires_in_days

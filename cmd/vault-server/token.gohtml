@@ -60,6 +60,11 @@
       </select>
       <label for="tokenMounts">Allowed engines</label>
       <select id="tokenMounts" name="mounts" multiple required size="5"></select>
+      <label class="checkbox-label" for="tokenReadonly">
+        <input id="tokenReadonly" name="readonly" type="checkbox">
+        Read-only token
+      </label>
+      <p class="muted">Read-only tokens can read and list secrets, but cannot create, update, or delete them.</p>
       {{if not .IsAdmin}}<p class="muted">Only engines assigned to your operator account are available.</p>{{end}}
       <p class="muted">Each selected engine grants access to all its secret paths.</p>
       {{if .EnforceMTLS}}<p class="muted">The client certificate expires at the same time as the token.</p>{{end}}
@@ -240,7 +245,7 @@ function renderTokens() {
     const certificate = !enforceMTLS ? '' : token.has_certificate
       ? 'client cert expires ' + token.certificate_expires_at
       : 'no client certificate';
-    details.textContent = token.name + ' (' + state + ', token expires ' + token.expires_at
+    details.textContent = token.name + ' (' + state + (token.readonly ? ', read-only' : ', read/write') + ', token expires ' + token.expires_at
       + (certificate ? '; ' + certificate : '') + '; allowed engines: '
       + (token.mounts.length ? token.mounts.join(', ') : 'none') + ')';
     li.appendChild(details);
@@ -335,6 +340,7 @@ document.getElementById('finishCreateToken').addEventListener('click', closeWith
 createDialog.addEventListener('close', () => {
   document.getElementById('tokenName').value = '';
   document.getElementById('tokenLifetimeDays').value = '30';
+  document.getElementById('tokenReadonly').checked = false;
   setMountValues('tokenMounts', []);
   document.getElementById('credentialNotice').textContent = '';
   document.getElementById('credentialNotice').hidden = true;
@@ -381,7 +387,8 @@ document.getElementById('createTokenForm').addEventListener('submit', async even
       body:JSON.stringify({
         name,
         expires_in_days:Number(document.getElementById('tokenLifetimeDays').value),
-        mounts:readMountValues('tokenMounts')
+        mounts:readMountValues('tokenMounts'),
+        readonly:document.getElementById('tokenReadonly').checked
       })
     });
     document.getElementById('createTokenTitle').textContent = 'Token created';

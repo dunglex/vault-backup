@@ -261,8 +261,11 @@ The restore refuses to overwrite a non-empty destination unless `--replace` is s
 
 After logging in through the web UI at `/tokens.html`, an admin or enabled operator can
 create tokens in the add-token dialog, list, and revoke API tokens. Each token
-requires one or more active engines and can read, write, delete, and list
-secrets only within those engines. Operators can create and manage only their own
+requires one or more active engines and can read and list secrets only within
+those engines. By default tokens can also create, update, and delete secrets;
+enable **Read-only token** when creating a token to allow reads and listings
+only. Read-only API tokens receive HTTP 403 `permission denied` for all secret
+mutations. Operators can create and manage only their own
 tokens, and only for engines assigned to their account. Their tokens remain
 bounded by the Operator's current engines. Admins choose from all active engines;
 Operators choose from their assigned engines. The server enforces these limits
@@ -340,11 +343,13 @@ Create a token:
 ```bash
 curl --cookie cookies.txt \
   -H 'Content-Type: application/json' \
-  -d '{"name":"backup-agent","expires_in_days":365}' \
+  -d '{"name":"backup-agent","expires_in_days":365,"readonly":false}' \
   https://vault.example:8200/v1/tokens
 ```
 
 `expires_in_days` is optional (defaults to 30) and must be from 1 to 365. The
+`readonly` field is optional and defaults to `false`; existing tokens remain
+read/write after migration. The
 response includes client credentials only when mTLS enforcement is enabled;
 the certificate expires at the same time as its token.
 Token names are trimmed and must be unique; creating a duplicate name returns

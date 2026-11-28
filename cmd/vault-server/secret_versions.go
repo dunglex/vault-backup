@@ -337,34 +337,34 @@ func (s *server) apiTokenOwnerIsAdmin(r *http.Request) (bool, error) {
 	return role == "admin" && locked == 0, nil
 }
 
-func (s *server) authorizeVersionedAPIPath(w http.ResponseWriter, r *http.Request, action string) (string, string, bool) {
+func (s *server) authorizeVersionedAPIPath(w http.ResponseWriter, r *http.Request, action string) (string, string, secretMountAccess, bool) {
 	mount, path := r.PathValue("mount"), r.PathValue("path")
 	if !validSecretMount(mount) || !validSecretPath(path) {
 		s.recordAuditEvent(r, action, "failure", s.auditRequestActor(r, "api"), "api", path, "invalid_secret_path")
 		writeInvalidSecretPath(w)
-		return "", "", false
+		return "", "", secretMountAccess{}, false
 	}
 	access, ok := s.apiSecretAccessForRequest(w, r)
 	if !ok {
 		s.recordAuditEvent(r, action, "failure", s.auditRequestActor(r, "api"), "api", path, "unauthorized")
-		return "", "", false
+		return "", "", secretMountAccess{}, false
 	}
 	allowed, err := s.secretMountAllowedForRequest(r, access, mount)
 	if err != nil {
 		s.recordAuditEvent(r, action, "failure", s.auditRequestActor(r, "api"), "api", path, "scope_lookup_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not verify secret access"})
-		return "", "", false
+		return "", "", secretMountAccess{}, false
 	}
 	if !allowed {
 		s.recordAuditEvent(r, action, "failure", s.auditRequestActor(r, "api"), "api", secretStoragePath(mount, path), "scope_denied")
 		denySecretScope(w)
-		return "", "", false
+		return "", "", secretMountAccess{}, false
 	}
-	return secretStoragePath(mount, path), s.auditRequestActor(r, "api"), true
+	return secretStoragePath(mount, path), s.auditRequestActor(r, "api"), access, true
 }
 
 func (s *server) getKVMetadata(w http.ResponseWriter, r *http.Request) {
-	path, actor, ok := s.authorizeVersionedAPIPath(w, r, "read_metadata")
+	path, actor, _, ok := s.authorizeVersionedAPIPath(w, r, "read_metadata")
 	if !ok {
 		return
 	}
@@ -446,8 +446,11 @@ func (s *server) changeKVVersionState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	action := operation
-	path, actor, ok := s.authorizeVersionedAPIPath(w, r, action)
+	path, actor, access, ok := s.authorizeVersionedAPIPath(w, r, action)
 	if !ok {
+		return
+	}
+	if !s.requireWritableAPIAccess(w, r, access, action, path) {
 		return
 	}
 	if operation == "destroy" {
