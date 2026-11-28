@@ -136,7 +136,7 @@ function populateMountChoices(id) {
 function sampleCommand(mount) {
   return [
     'export VAULT_TOKEN="PASTE_COPIED_TOKEN_HERE"',
-    './bin/vault-backup \\',
+    'vault-backup \\',
     '  --url https://vault.example:8200/api \\',
     '  --token "$VAULT_TOKEN" \\',
     '  --ca_cert /path/to/vault-server-ca.pem \\',

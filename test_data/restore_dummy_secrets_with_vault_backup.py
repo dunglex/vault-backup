@@ -37,7 +37,7 @@ def main() -> None:
         "--binary",
         type=Path,
         default=ROOT / "bin" / "vault-backup",
-        help="vault-backup executable (default: ./bin/vault-backup)",
+        help="vault-backup executable (default: vault-backup)",
     )
     parser.add_argument("--tls-server-name", help="TLS server name override")
     parser.add_argument("--insecure-tls", action="store_true", help="skip TLS verification")

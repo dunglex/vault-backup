@@ -224,6 +224,76 @@ textarea {
   width: 100%;
 }
 
+.secret-access-details {
+  border-top: 0.1rem solid var(--border);
+  margin-top: 2.4rem;
+  padding-top: 2rem;
+}
+
+.secret-access-section + .secret-access-section {
+  margin-top: 2rem;
+}
+
+.secret-access-section h2 {
+  font-size: 2rem;
+  margin-bottom: 1rem;
+}
+
+.secret-access-item {
+  border-bottom: 0.1rem solid var(--border);
+  display: grid;
+  gap: 1.2rem;
+  grid-template-columns: minmax(18rem, 0.8fr) minmax(0, 1.6fr);
+  padding: 1.4rem 0;
+}
+
+.secret-access-item:last-child {
+  border-bottom: 0;
+}
+
+.secret-access-item h3,
+.secret-access-item p {
+  margin-bottom: 0.3rem;
+}
+
+.secret-access-item h3 {
+  font-size: 1.5rem;
+}
+
+.secret-access-item p {
+  color: var(--muted);
+  font-size: 1.3rem;
+}
+
+.secret-access-value {
+  align-items: center;
+  display: flex;
+  gap: 0.8rem;
+  min-width: 0;
+}
+
+.secret-access-value > code,
+.secret-access-command pre {
+  background: var(--surface-muted);
+  border-radius: 0.4rem;
+  flex: 1 1 auto;
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  padding: 1.2rem;
+  white-space: pre-wrap;
+}
+
+.secret-access-command pre {
+  overflow-x: auto;
+  word-break: break-word;
+}
+
+.secret-access-value button {
+  flex: 0 0 auto;
+  margin: 0;
+}
+
 .admin-dialog select[multiple] {
   background-image: none;
   height: auto;
@@ -876,6 +946,10 @@ pre {
     flex-direction: column;
   }
 
+  .secret-access-item {
+    grid-template-columns: 1fr;
+  }
+
   .secret-version-controls {
     flex: 0 1 auto;
     min-width: 0;
@@ -909,6 +983,11 @@ pre {
   .secret-editor-layout > section {
     grid-column: 1;
     grid-row: 1;
+  }
+
+  .secret-access-value {
+    align-items: stretch;
+    flex-direction: column;
   }
 }
 
