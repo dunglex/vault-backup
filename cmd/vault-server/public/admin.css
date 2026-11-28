@@ -669,6 +669,26 @@ table {
   min-width: 90rem;
 }
 
+.audit-detail-grid {
+  display: grid;
+  gap: 1rem 1.6rem;
+  grid-template-columns: minmax(10rem, 14rem) minmax(0, 1fr);
+  margin-bottom: 0;
+}
+
+.audit-detail-grid dt {
+  color: var(--muted);
+  font-weight: 600;
+  margin: 0;
+}
+
+.audit-detail-grid dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
 .success {
   color: var(--success);
 }
@@ -916,6 +936,15 @@ pre {
 
   .filters {
     grid-template-columns: 1fr;
+  }
+
+  .audit-detail-grid {
+    gap: 0.4rem;
+    grid-template-columns: 1fr;
+  }
+
+  .audit-detail-grid dd {
+    margin-bottom: 1.2rem;
   }
 
   .audit-filter-disclosure .filters {

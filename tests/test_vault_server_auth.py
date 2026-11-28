@@ -519,6 +519,7 @@ def main() -> None:
                 "auto_block_login_bruteforce_ip": True,
                 "enforce_mfa": False,
                 "file_logging": False,
+                "disable_access_log": False,
                 "allow_operator_audit": False,
             },
             "security settings after disabling operator audit",

@@ -50,11 +50,28 @@
     </details>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Time (UTC)</th><th>Actor</th><th>Action</th><th>Outcome</th><th>Source</th><th>Client IP</th><th>Resource / detail</th></tr></thead>
+        <thead><tr><th>Time (UTC)</th><th>Actor</th><th>Action</th><th>Outcome</th><th>Source</th><th>Client IP</th><th>Resource / detail</th><th>Details</th></tr></thead>
         <tbody id="events"></tbody>
       </table>
     </div>
     <div class="pager"><span id="summary"></span><div class="row-actions"><button id="previous" class="button-outline">Previous</button><button id="next" class="button-outline">Next</button></div></div>
+    <dialog id="auditDetailDialog" class="admin-dialog" aria-labelledby="auditDetailTitle">
+      <div class="admin-dialog-heading">
+        <h2 id="auditDetailTitle">Audit event detail</h2>
+        <button id="closeAuditDetail" class="button button-outline" type="button">Close</button>
+      </div>
+      <dl class="audit-detail-grid">
+        <dt>Event ID</dt><dd id="auditDetailId"></dd>
+        <dt>Time (UTC)</dt><dd id="auditDetailTime"></dd>
+        <dt>Actor</dt><dd id="auditDetailActor"></dd>
+        <dt>Action</dt><dd id="auditDetailAction"></dd>
+        <dt>Outcome</dt><dd id="auditDetailOutcome"></dd>
+        <dt>Source</dt><dd id="auditDetailSource"></dd>
+        <dt>Client IP</dt><dd id="auditDetailClientIP"></dd>
+        <dt>Resource</dt><dd id="auditDetailResource"></dd>
+        <dt>Detail</dt><dd id="auditDetailText"></dd>
+      </dl>
+    </dialog>
   </section>
 </main>
 <script src="/notyf.js"></script>
@@ -67,6 +84,7 @@ const limit = 100;
 const yearSelect = document.getElementById('year');
 const auditFilters = document.getElementById('auditFilters');
 const auditFilterSummary = auditFilters.querySelector('summary');
+const auditDetailDialog = document.getElementById('auditDetailDialog');
 const mobileAuditFilters = window.matchMedia('(max-width: 52rem)');
 
 if (mobileAuditFilters.matches) auditFilters.open = false;
@@ -88,6 +106,25 @@ function textCell(row, value, className = '') {
   if (className) cell.className = className;
 }
 
+function openAuditDetail(event) {
+  const fields = {
+    auditDetailId: event.id,
+    auditDetailTime: event.created_at,
+    auditDetailActor: event.actor,
+    auditDetailAction: event.action,
+    auditDetailOutcome: event.outcome,
+    auditDetailSource: event.source,
+    auditDetailClientIP: event.client_ip,
+    auditDetailResource: event.resource,
+    auditDetailText: event.detail
+  };
+  for (const [id, value] of Object.entries(fields)) {
+    document.getElementById(id).textContent = value === '' || value === null || value === undefined ? '-' : String(value);
+  }
+  document.getElementById('auditDetailOutcome').className = event.outcome || '';
+  auditDetailDialog.showModal();
+}
+
 async function refresh() {
   try {
     const params = new URLSearchParams({year: yearSelect.value, limit, offset});
@@ -107,6 +144,14 @@ async function refresh() {
       textCell(row, event.source);
       textCell(row, event.client_ip);
       textCell(row, [event.resource, event.detail].filter(Boolean).join(' - '));
+      const actionCell = row.insertCell();
+      const detailButton = document.createElement('button');
+      detailButton.type = 'button';
+      detailButton.className = 'button button-outline';
+      detailButton.textContent = 'View detail';
+      detailButton.setAttribute('aria-label', `View audit event ${event.id} detail`);
+      detailButton.addEventListener('click', () => openAuditDetail(event));
+      actionCell.append(detailButton);
     }
     document.getElementById('summary').textContent = `${result.total} event${result.total === 1 ? '' : 's'}; showing ${result.events.length}`;
     document.getElementById('previous').disabled = offset === 0;
@@ -156,12 +201,15 @@ document.getElementById('filter').onclick = () => {
 };
 document.getElementById('previous').onclick = () => { offset = Math.max(0, offset - limit); refresh(); };
 document.getElementById('next').onclick = () => { offset += limit; refresh(); };
+document.getElementById('closeAuditDetail').onclick = () => auditDetailDialog.close();
 yearSelect.onchange = () => { offset = 0; updateDateBounds(); refresh(); };
 document.addEventListener('keydown', event => {
-  if (event.key === 'Escape' && mobileAuditFilters.matches && auditFilters.open) {
+  if (event.key === 'Escape' && auditDetailDialog.open) {
+    return;
+  } else if (event.key === 'Escape' && mobileAuditFilters.matches && auditFilters.open) {
     auditFilters.open = false;
     auditFilterSummary.focus();
-  } else if (event.key === 'Enter' && event.target !== auditFilterSummary) {
+  } else if (event.key === 'Enter' && event.target !== auditFilterSummary && !event.target.closest('button, dialog')) {
     offset = 0;
     refresh();
   }
