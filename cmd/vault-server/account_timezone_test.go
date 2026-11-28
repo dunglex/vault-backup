@@ -99,6 +99,7 @@ func TestProtectedPagesReceiveAccountTimezone(t *testing.T) {
 	}{
 		{"audit", s.serveAudit},
 		{"tokens", s.serveTokens},
+		{"secret", s.serveSecrets},
 	} {
 		t.Run(page.name, func(t *testing.T) {
 			request := totpRequest(http.MethodGet, "/"+page.name+".html", "")

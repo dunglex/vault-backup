@@ -224,10 +224,74 @@ textarea {
   width: 100%;
 }
 
-.secret-access-details {
-  border-top: 0.1rem solid var(--border);
-  margin-top: 2.4rem;
-  padding-top: 2rem;
+.secret-tabs {
+  border-bottom: 0.1rem solid var(--border);
+  display: flex;
+  gap: 0.4rem;
+  margin: 1.6rem 0 2rem;
+}
+
+.secret-tab {
+  background: transparent;
+  border: 0;
+  border-bottom: 0.3rem solid transparent;
+  border-radius: 0;
+  color: var(--muted);
+  height: auto;
+  line-height: 1.4;
+  margin: 0;
+  padding: 1rem 1.4rem;
+}
+
+.secret-tab:hover,
+.secret-tab:focus {
+  background: var(--surface-muted);
+  color: var(--text);
+}
+
+.secret-tab[aria-selected='true'] {
+  background: transparent;
+  border-bottom-color: var(--primary);
+  color: var(--primary);
+  font-weight: 700;
+}
+
+.secret-tab-panel {
+  margin: 0;
+}
+
+.secret-tab-panel.secret-access-details {
+  padding: 0;
+}
+
+.secret-metadata h2,
+.secret-metadata > p {
+  margin-bottom: 0.6rem;
+}
+
+.secret-metadata-grid {
+  display: grid;
+  gap: 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 1.6rem 0 0;
+}
+
+.secret-metadata-grid > div {
+  border-bottom: 0.1rem solid var(--border);
+  display: grid;
+  gap: 0.8rem;
+  grid-template-columns: minmax(11rem, 0.7fr) minmax(0, 1.3fr);
+  padding: 1.2rem 1.2rem 1.2rem 0;
+}
+
+.secret-metadata-grid dt {
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.secret-metadata-grid dd {
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 
 .secret-access-section + .secret-access-section {
@@ -237,6 +301,131 @@ textarea {
 .secret-access-section h2 {
   font-size: 2rem;
   margin-bottom: 1rem;
+}
+
+.secret-version-history-heading {
+  align-items: center;
+  display: flex;
+  gap: 1.6rem;
+  justify-content: space-between;
+}
+
+.secret-version-history-heading h2,
+.secret-version-history-heading p {
+  margin-bottom: 0.4rem;
+}
+
+.secret-version-history-heading p {
+  color: var(--muted);
+}
+
+.secret-version-count {
+  color: var(--muted);
+  flex: 0 0 auto;
+  font-size: 1.3rem;
+}
+
+.secret-version-table-wrap {
+  margin-top: 1.2rem;
+  overflow: visible;
+}
+
+.secret-version-table-wrap table {
+  margin-bottom: 0;
+  min-width: 0;
+  table-layout: fixed;
+  width: 100%;
+}
+
+.secret-version-table-wrap th,
+.secret-version-table-wrap td {
+  overflow-wrap: anywhere;
+  vertical-align: middle;
+  white-space: normal;
+}
+
+.secret-version-table-wrap th:first-child {
+  width: 22%;
+}
+
+.secret-version-table-wrap th:nth-child(2) {
+  width: 44%;
+}
+
+.secret-version-table-wrap th:nth-child(3) {
+  width: 34%;
+}
+
+.secret-version-table-wrap tr.is-selected {
+  background: var(--surface-muted);
+}
+
+.secret-version-link {
+  background: transparent;
+  border: 0;
+  color: var(--primary);
+  font-size: inherit;
+  font-weight: 700;
+  height: auto;
+  line-height: inherit;
+  margin: 0;
+  padding: 0;
+  text-align: left;
+  text-transform: none;
+}
+
+.secret-version-link:hover,
+.secret-version-link:focus {
+  background: transparent;
+  color: var(--primary-dark);
+  text-decoration: underline;
+}
+
+.secret-version-link:disabled {
+  color: var(--muted);
+  cursor: default;
+  opacity: 1;
+  text-decoration: none;
+}
+
+.secret-version-badge {
+  border-radius: 999px;
+  display: inline-block;
+  font-size: 1.1rem;
+  font-weight: 700;
+  line-height: 1.8;
+  padding: 0 0.8rem;
+  text-transform: uppercase;
+}
+
+.secret-version-badge.available {
+  background: var(--surface-muted);
+  color: var(--muted);
+}
+
+.secret-version-badge.current {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.secret-version-badge.deleted {
+  background: #fff6e8;
+  color: #8a5a00;
+}
+
+.secret-version-badge.destroyed {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.visually-hidden {
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  height: 0.1rem;
+  overflow: hidden;
+  position: absolute;
+  white-space: nowrap;
+  width: 0.1rem;
 }
 
 .secret-access-item {
@@ -1026,6 +1215,18 @@ pre {
   .secret-editor-heading {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .secret-tabs {
+    overflow-x: auto;
+  }
+
+  .secret-metadata-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .secret-tab {
+    flex: 1 0 auto;
   }
 
   .secret-access-item {

@@ -2100,7 +2100,7 @@ func (s *server) getSecret(w http.ResponseWriter, r *http.Request) {
 	}
 	path = secretStoragePath(mount, path)
 	if r.URL.Query().Get("metadata") == "true" {
-		current, versions, err := s.secretVersionSummaries(path)
+		current, createdAt, updatedAt, versions, err := s.secretVersionSummaries(path)
 		if err != nil {
 			detail := "storage_error"
 			status := http.StatusInternalServerError
@@ -2120,6 +2120,8 @@ func (s *server) getSecret(w http.ResponseWriter, r *http.Request) {
 		)
 		writeJSON(w, http.StatusOK, map[string]any{
 			"current_version": current,
+			"created_at":      createdAt,
+			"updated_at":      updatedAt,
 			"versions":        versions,
 		})
 		return

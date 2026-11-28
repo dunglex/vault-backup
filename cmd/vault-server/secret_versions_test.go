@@ -118,6 +118,15 @@ func TestSecretVersionsCASDeleteRestoreAndDestroy(t *testing.T) {
 	if err != nil || version != 2 || created {
 		t.Fatalf("second write = version %d, created %v, error %v", version, created, err)
 	}
+	_, createdAt, updatedAt, summaries, err := s.secretVersionSummaries("kv/app/key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(summaries) != 2 || summaries[0].Version != 2 ||
+		createdAt == "" || updatedAt == "" ||
+		summaries[0].CreatedAt == "" || summaries[0].CreatedBy != "admin" {
+		t.Fatalf("version summaries = %#v, want newest version with creation metadata", summaries)
+	}
 	if _, _, err := s.writeSecretVersion("kv/app/key", first, "admin", &expected); !errors.Is(err, errSecretCASMismatch) {
 		t.Fatalf("stale CAS write error = %v, want mismatch", err)
 	}

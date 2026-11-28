@@ -27,9 +27,13 @@ type secretVersionRecord struct {
 }
 
 type secretVersionSummary struct {
-	Version   int64 `json:"version"`
-	Deleted   bool  `json:"deleted"`
-	Destroyed bool  `json:"destroyed"`
+	Version     int64  `json:"version"`
+	CreatedAt   string `json:"created_at"`
+	CreatedBy   string `json:"created_by,omitempty"`
+	DeletedAt   string `json:"deleted_at,omitempty"`
+	DestroyedAt string `json:"destroyed_at,omitempty"`
+	Deleted     bool   `json:"deleted"`
+	Destroyed   bool   `json:"destroyed"`
 }
 
 func (s *server) writeSecretVersion(path, encrypted, actor string, cas *int64) (int64, bool, error) {
@@ -167,37 +171,52 @@ func (s *server) readSecretVersion(path string, requestedVersion *int64) (secret
 	return record, nil
 }
 
-func (s *server) secretVersionSummaries(path string) (int64, []secretVersionSummary, error) {
-	var current int64
+func (s *server) secretVersionSummaries(path string) (int64, string, string, []secretVersionSummary, error) {
+	var current, createdAt, updatedAt int64
 	if err := s.secretsDB.QueryRow(
-		"SELECT current_version FROM secrets WHERE path = ?", path,
-	).Scan(&current); err != nil {
-		return 0, nil, err
+		"SELECT current_version, created_at, updated_at FROM secrets WHERE path = ?", path,
+	).Scan(&current, &createdAt, &updatedAt); err != nil {
+		return 0, "", "", nil, err
 	}
 	rows, err := s.secretsDB.Query(`
-		SELECT version, deleted_at, destroyed_at
+		SELECT version, created_at, created_by, deleted_at, destroyed_at
 		FROM secret_versions
 		WHERE path = ?
 		ORDER BY version DESC`, path)
 	if err != nil {
-		return 0, nil, err
+		return 0, "", "", nil, err
 	}
 	defer rows.Close()
 	summaries := make([]secretVersionSummary, 0)
 	for rows.Next() {
 		var summary secretVersionSummary
+		var createdAt int64
+		var createdBy sql.NullString
 		var deletedAt, destroyedAt sql.NullInt64
-		if err := rows.Scan(&summary.Version, &deletedAt, &destroyedAt); err != nil {
-			return 0, nil, err
+		if err := rows.Scan(&summary.Version, &createdAt, &createdBy, &deletedAt, &destroyedAt); err != nil {
+			return 0, "", "", nil, err
+		}
+		summary.CreatedAt = time.Unix(createdAt, 0).UTC().Format(time.RFC3339)
+		if createdBy.Valid {
+			summary.CreatedBy = createdBy.String
 		}
 		summary.Deleted = deletedAt.Valid
+		if deletedAt.Valid {
+			summary.DeletedAt = time.Unix(deletedAt.Int64, 0).UTC().Format(time.RFC3339)
+		}
 		summary.Destroyed = destroyedAt.Valid
+		if destroyedAt.Valid {
+			summary.DestroyedAt = time.Unix(destroyedAt.Int64, 0).UTC().Format(time.RFC3339)
+		}
 		summaries = append(summaries, summary)
 	}
 	if err := rows.Err(); err != nil {
-		return 0, nil, err
+		return 0, "", "", nil, err
 	}
-	return current, summaries, nil
+	return current,
+		time.Unix(createdAt, 0).UTC().Format(time.RFC3339),
+		time.Unix(updatedAt, 0).UTC().Format(time.RFC3339),
+		summaries, nil
 }
 
 func (s *server) softDeleteCurrentSecret(path string) (int64, bool, error) {
