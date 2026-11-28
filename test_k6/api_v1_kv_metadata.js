@@ -38,7 +38,7 @@ export const options = {
     },
     api_load: {
       executor: 'constant-arrival-rate',
-      rate: Number(__ENV.RATE || 200),
+      rate: Number(__ENV.RATE || 1000),
       timeUnit: '1s',
       duration: __ENV.DURATION || '30s',
       preAllocatedVUs: Number(__ENV.PREALLOCATED_VUS || 100),
