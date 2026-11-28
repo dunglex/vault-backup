@@ -5,6 +5,7 @@
 *.log
 __pycache__/
 *.pyc
+k6
 /backup/
 /bin/
 /data/
