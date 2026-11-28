@@ -400,6 +400,10 @@ func (s *server) loadAccountTOTP(username string, roles ...string) (accountTOTPS
 }
 
 func (s *server) verifyAccountSecondFactor(username, secret, code string, roles ...string) (bool, error) {
+	return s.verifyAccountSecondFactorForRequest(nil, username, secret, code, roles...)
+}
+
+func (s *server) verifyAccountSecondFactorForRequest(r *http.Request, username, secret, code string, roles ...string) (bool, error) {
 	if verifyTOTP(secret, code, time.Now()) {
 		return true, nil
 	}
@@ -407,10 +411,14 @@ func (s *server) verifyAccountSecondFactor(username, secret, code string, roles 
 	if len(roles) != 0 {
 		role = roles[0]
 	}
-	return s.consumeRecoveryCode(username, code, role)
+	return s.consumeRecoveryCodeForRequest(r, username, code, role)
 }
 
 func (s *server) consumeRecoveryCode(username, code string, roles ...string) (bool, error) {
+	return s.consumeRecoveryCodeForRequest(nil, username, code, roles...)
+}
+
+func (s *server) consumeRecoveryCodeForRequest(r *http.Request, username, code string, roles ...string) (bool, error) {
 	role := "admin"
 	if len(roles) != 0 {
 		role = roles[0]
@@ -420,17 +428,25 @@ func (s *server) consumeRecoveryCode(username, code string, roles ...string) (bo
 		return false, sql.ErrNoRows
 	}
 	candidate := hashRecoveryCode(code)
-	tx, err := db.Begin()
+	var tx *sql.Tx
+	err := measureDBOperation(r, func() error {
+		var err error
+		tx, err = db.Begin()
+		return err
+	})
 	if err != nil {
 		return false, err
 	}
 	defer tx.Rollback()
 
 	var encodedHashes string
-	if err := tx.QueryRow(
-		"SELECT totp_recovery_codes FROM accounts WHERE username = ? AND totp_enabled = 1",
-		username,
-	).Scan(&encodedHashes); err != nil {
+	_, err = measureDBQuery(r, func() (struct{}, error) {
+		return struct{}{}, tx.QueryRow(
+			"SELECT totp_recovery_codes FROM accounts WHERE username = ? AND totp_enabled = 1",
+			username,
+		).Scan(&encodedHashes)
+	})
+	if err != nil {
 		if err == sql.ErrNoRows {
 			return false, nil
 		}
@@ -454,14 +470,16 @@ func (s *server) consumeRecoveryCode(username, code string, roles ...string) (bo
 	if err != nil {
 		return false, err
 	}
-	if _, err := tx.Exec(
-		"UPDATE accounts SET totp_recovery_codes = ? WHERE username = ? AND totp_enabled = 1",
-		string(updatedHashes),
-		username,
-	); err != nil {
+	if _, err := measureDBQuery(r, func() (sql.Result, error) {
+		return tx.Exec(
+			"UPDATE accounts SET totp_recovery_codes = ? WHERE username = ? AND totp_enabled = 1",
+			string(updatedHashes),
+			username,
+		)
+	}); err != nil {
 		return false, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := measureDBOperation(r, tx.Commit); err != nil {
 		return false, err
 	}
 	return true, nil

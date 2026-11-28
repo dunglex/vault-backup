@@ -255,8 +255,8 @@ func TestFileLoggingSecuritySettingPersistsAndControlsLogger(t *testing.T) {
 	writer := newServerLogWriter(io.Discard, filepath.Join(t.TempDir(), "vault-server"))
 	s.logWriter = writer
 	t.Cleanup(func() {
-		if err := writer.DisableFileLogging(); err != nil {
-			t.Errorf("disable file logging: %v", err)
+		if err := writer.Close(); err != nil {
+			t.Errorf("close log writer: %v", err)
 		}
 	})
 
@@ -312,5 +312,65 @@ func TestFileLoggingSecuritySettingPersistsAndControlsLogger(t *testing.T) {
 	}
 	if writer.file != nil {
 		t.Fatal("file logging remained enabled")
+	}
+}
+
+func TestAccessLogDisableSecuritySettingPersistsAndControlsLogger(t *testing.T) {
+	s := newOperatorTestServer(t)
+	writer := newServerLogWriter(io.Discard, filepath.Join(t.TempDir(), "vault-server"))
+	s.logWriter = writer
+	t.Cleanup(func() {
+		if err := writer.Close(); err != nil {
+			t.Errorf("close log writer: %v", err)
+		}
+	})
+
+	disabled, err := readAccessLogDisabledSetting(s.db)
+	if err != nil || disabled {
+		t.Fatalf("access log disabled setting = %t, error %v; want false by default", disabled, err)
+	}
+	settingsResponse := httptest.NewRecorder()
+	s.getSettings(settingsResponse, operatorRequestWithSession(
+		http.MethodGet,
+		"/v1/settings",
+		"",
+		"admin-session",
+		true,
+	))
+	if settingsResponse.Code != http.StatusOK ||
+		!strings.Contains(settingsResponse.Body.String(), `"disable_access_log":false`) {
+		t.Fatalf("read default access log setting = %d, body %s", settingsResponse.Code, settingsResponse.Body.String())
+	}
+
+	disable := httptest.NewRecorder()
+	s.updateSettings(disable, operatorRequestWithSession(
+		http.MethodPut,
+		"/v1/settings",
+		`{"disable_access_log":true}`,
+		"admin-session",
+		true,
+	))
+	if disable.Code != http.StatusOK || !strings.Contains(disable.Body.String(), `"disable_access_log":true`) {
+		t.Fatalf("disable access logging = %d, body %s", disable.Code, disable.Body.String())
+	}
+	disabled, err = readAccessLogDisabledSetting(s.db)
+	if err != nil || !disabled || writer.accessLoggingEnabled() {
+		t.Fatalf("disabled access log setting = %t, enabled logger = %t, error %v", disabled, writer.accessLoggingEnabled(), err)
+	}
+
+	enable := httptest.NewRecorder()
+	s.updateSettings(enable, operatorRequestWithSession(
+		http.MethodPut,
+		"/v1/settings",
+		`{"disable_access_log":false}`,
+		"admin-session",
+		true,
+	))
+	if enable.Code != http.StatusOK || !strings.Contains(enable.Body.String(), `"disable_access_log":false`) {
+		t.Fatalf("enable access logging = %d, body %s", enable.Code, enable.Body.String())
+	}
+	disabled, err = readAccessLogDisabledSetting(s.db)
+	if err != nil || disabled || !writer.accessLoggingEnabled() {
+		t.Fatalf("enabled access log setting = %t, enabled logger = %t, error %v", disabled, writer.accessLoggingEnabled(), err)
 	}
 }

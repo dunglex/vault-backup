@@ -164,7 +164,7 @@ func main() {
 	logWriter := newServerLogWriter(os.Stdout, filepath.Join("logs", "vault-server"))
 	log.SetOutput(logWriter)
 	defer func() {
-		if err := logWriter.DisableFileLogging(); err != nil {
+		if err := logWriter.Close(); err != nil {
 			log.Printf("ERROR: could not close file logging cleanly: %v", err)
 		}
 	}()
@@ -305,6 +305,11 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	accessLogDisabled, err := readAccessLogDisabledSetting(db)
+	if err != nil {
+		log.Fatal(err)
+	}
+	logWriter.setAccessLoggingEnabled(!accessLogDisabled)
 	if fileLogging {
 		if err := logWriter.EnableFileLogging(); err != nil {
 			log.Fatal(err)
@@ -559,7 +564,7 @@ func main() {
 
 	mux.HandleFunc("/", s.serveHome)
 
-	handler := withAccessLogging(s.middleware(mux), logWriter)
+	handler := withAccessLogging(s.middleware(mux), logWriter, config.LogAPIDBMetrics, logWriter.accessLoggingEnabled)
 	tlsConfig := &tls.Config{
 		MinVersion: tls.VersionTLS12,
 		ClientAuth: tls.VerifyClientCertIfGiven,
@@ -753,23 +758,35 @@ func (s *server) health(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	checks := []func(context.Context) error{
 		func(ctx context.Context) error {
-			return checkDatabaseHealth(ctx, s.db)
+			_, err := measureDBQueryNamed(r, "health_check", func() (struct{}, error) {
+				return struct{}{}, checkDatabaseHealth(ctx, s.db)
+			})
+			return err
 		},
 		func(ctx context.Context) error {
-			return checkDatabaseHealth(ctx, s.secretsDB)
+			_, err := measureDBQueryNamed(r, "health_check", func() (struct{}, error) {
+				return struct{}{}, checkDatabaseHealth(ctx, s.secretsDB)
+			})
+			return err
 		},
 		func(ctx context.Context) error {
 			if s.auditStore == nil {
 				return errors.New("audit database unavailable")
 			}
-			return s.auditStore.withYear(time.Now().UTC().Year(), func(db *sql.DB) error {
-				return checkDatabaseHealth(ctx, db)
+			_, err := measureDBQueryNamed(r, "health_check", func() (struct{}, error) {
+				return struct{}{}, s.auditStore.withYear(time.Now().UTC().Year(), func(db *sql.DB) error {
+					return checkDatabaseHealth(ctx, db)
+				})
 			})
+			return err
 		},
 	}
 	if s.operatorDB != nil {
 		checks = append(checks, func(ctx context.Context) error {
-			return checkDatabaseHealth(ctx, s.operatorDB)
+			_, err := measureDBQueryNamed(r, "health_check", func() (struct{}, error) {
+				return struct{}{}, checkDatabaseHealth(ctx, s.operatorDB)
+			})
+			return err
 		})
 	}
 	results := make(chan error, len(checks))
@@ -1106,7 +1123,7 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "account is locked"})
 		return
 	}
-	enforceMFA, err := s.mfaEnforcementEnabled()
+	enforceMFA, err := s.mfaEnforcementEnabledForRequest(r)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read MFA settings"})
 		return
@@ -1152,7 +1169,7 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		ttl:                sessionTTL,
 		mustChangePassword: account.mustChangePassword == 1,
 	}
-	if err := s.storeSession(token, session); err != nil {
+	if err := s.storeSessionForRequest(r, token, session); err != nil {
 		s.recordAuditEvent(r, "login", "failure", req.Username, "web", "", "session_storage_error")
 		log.Printf("ERROR: could not store web session: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not create session"})
@@ -1211,7 +1228,7 @@ func (s *server) loginLDAP(w http.ResponseWriter, r *http.Request) {
 	if s.delayLoginAction(w, r) {
 		return
 	}
-	account, _, err := s.loadAccount(username)
+	account, _, err := s.loadAccountForRequest(r, username)
 	if err != nil {
 		s.recordLoginFailure(r, "api")
 		s.recordAuditEvent(r, "login", "failure", username, "api", "", "invalid_credentials")
@@ -1237,7 +1254,7 @@ func (s *server) loginLDAP(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	enforceMFA, err := s.mfaEnforcementEnabled()
+	enforceMFA, err := s.mfaEnforcementEnabledForRequest(r)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read MFA settings"})
 		return
@@ -1261,7 +1278,7 @@ func (s *server) loginLDAP(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authentication code required"})
 			return
 		}
-		valid, err := s.verifyAccountSecondFactor(username, account.totpSecret.String, req.TOTPCode, account.role)
+		valid, err := s.verifyAccountSecondFactorForRequest(r, username, account.totpSecret.String, req.TOTPCode, account.role)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not verify authentication code"})
 			return
@@ -1285,7 +1302,7 @@ func (s *server) loginLDAP(w http.ResponseWriter, r *http.Request) {
 		expiresAt: time.Now().Add(defaultSessionTTL),
 		ttl:       defaultSessionTTL,
 	}
-	if err := s.storeSession(token, session); err != nil {
+	if err := s.storeSessionForRequest(r, token, session); err != nil {
 		s.recordAuditEvent(r, "login", "failure", username, "api", "", "session_storage_error")
 		log.Printf("ERROR: could not store LDAP login session: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not create session"})
@@ -1313,7 +1330,7 @@ func (s *server) recordAuditEvent(r *http.Request, action, outcome, actor, sourc
 	if len(detail) > 1024 {
 		detail = detail[:1024]
 	}
-	err := s.auditStore.Record(time.Now().UTC().Unix(), action, outcome, actor, s.clientIP(r), source, resource, detail)
+	err := s.auditStore.recordForRequest(r, time.Now().UTC().Unix(), action, outcome, actor, s.clientIP(r), source, resource, detail)
 	if err != nil {
 		log.Printf("WARNING: could not write audit event %s/%s: %v", action, outcome, err)
 	}
@@ -1426,7 +1443,7 @@ func (s *server) sessionFromRequest(r *http.Request) (sessionInfo, bool) {
 	if err != nil {
 		return sessionInfo{}, false
 	}
-	return s.sessionForToken(cookie.Value)
+	return s.sessionForTokenForRequest(r, cookie.Value)
 }
 
 func (s *server) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
@@ -1445,10 +1462,10 @@ func (s *server) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 func (s *server) authorizedAPI(r *http.Request) bool {
 	token := apiTokenFromRequest(r)
 	var tokenID int64
-	if err := s.lookupActiveAPIToken(token, &tokenID); err != nil {
+	if err := s.lookupActiveAPITokenForRequest(r, token, &tokenID); err != nil {
 		return false
 	}
-	enforced, err := s.mtlsSettings()
+	enforced, err := s.mtlsSettingsForRequest(r)
 	if err != nil {
 		return false
 	}
@@ -1787,7 +1804,7 @@ func (s *server) getKVSecret(w http.ResponseWriter, r *http.Request) {
 		s.recordAuditEvent(r, "read", "failure", s.auditRequestActor(r, source), source, path, "unauthorized")
 		return
 	}
-	allowed, err := s.secretMountAllowed(access, mount)
+	allowed, err := s.secretMountAllowedForRequest(r, access, mount)
 	if err != nil {
 		s.recordAuditEvent(r, "read", "failure", s.auditRequestActor(r, source), source, path, "scope_lookup_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not verify secret access"})
@@ -1809,7 +1826,9 @@ func (s *server) getKVSecret(w http.ResponseWriter, r *http.Request) {
 		}
 		requestedVersion = &version
 	}
-	versionRecord, err := s.readSecretVersion(path, requestedVersion)
+	versionRecord, err := measureDBQuery(r, func() (secretVersionRecord, error) {
+		return s.readSecretVersion(path, requestedVersion)
+	})
 	if err != nil {
 		version := versionRecord.Version
 		if version == 0 && requestedVersion != nil {
@@ -1859,7 +1878,7 @@ func (s *server) putKVSecret(w http.ResponseWriter, r *http.Request) {
 		s.recordAuditEvent(r, "update", "failure", s.auditRequestActor(r, source), source, path, "unauthorized")
 		return
 	}
-	allowed, err := s.secretMountAllowed(access, mount)
+	allowed, err := s.secretMountAllowedForRequest(r, access, mount)
 	if err != nil {
 		s.recordAuditEvent(r, "update", "failure", s.auditRequestActor(r, source), source, path, "scope_lookup_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not verify secret access"})
@@ -1873,9 +1892,12 @@ func (s *server) putKVSecret(w http.ResponseWriter, r *http.Request) {
 	path = secretStoragePath(mount, path)
 	action := "create"
 	var currentVersion int64
-	if err := s.secretsDB.QueryRow("SELECT current_version FROM secrets WHERE path = ?", path).Scan(&currentVersion); err == nil {
+	_, currentVersionErr := measureDBQuery(r, func() (struct{}, error) {
+		return struct{}{}, s.secretsDB.QueryRow("SELECT current_version FROM secrets WHERE path = ?", path).Scan(&currentVersion)
+	})
+	if currentVersionErr == nil {
 		action = "update"
-	} else if err != sql.ErrNoRows {
+	} else if currentVersionErr != sql.ErrNoRows {
 		s.recordAuditEvent(r, action, "failure", s.auditRequestActor(r, source), source, path, "storage_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not store secret"})
 		return
@@ -1903,7 +1925,7 @@ func (s *server) putKVSecret(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not store secret"})
 		return
 	}
-	version, created, err := s.writeSecretVersion(path, encrypted, s.auditRequestActor(r, source), req.Options.CAS)
+	version, created, err := s.writeSecretVersionForRequest(r, path, encrypted, s.auditRequestActor(r, source), req.Options.CAS)
 	if err != nil {
 		if errors.Is(err, errSecretCASMismatch) {
 			detail := "cas_mismatch"
@@ -1940,7 +1962,7 @@ func (s *server) deleteKVSecret(w http.ResponseWriter, r *http.Request) {
 		s.recordAuditEvent(r, "delete", "failure", s.auditRequestActor(r, source), source, path, "unauthorized")
 		return
 	}
-	allowed, err := s.secretMountAllowed(access, mount)
+	allowed, err := s.secretMountAllowedForRequest(r, access, mount)
 	if err != nil {
 		s.recordAuditEvent(r, "delete", "failure", s.auditRequestActor(r, source), source, path, "scope_lookup_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not verify secret access"})
@@ -1952,7 +1974,7 @@ func (s *server) deleteKVSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	path = secretStoragePath(mount, path)
-	version, found, err := s.softDeleteCurrentSecret(path)
+	version, found, err := s.softDeleteCurrentSecretForRequest(r, path)
 	if err != nil {
 		s.recordAuditEvent(r, "delete", "failure", s.auditRequestActor(r, source), source, path, "storage_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not delete secret"})
@@ -1978,7 +2000,7 @@ func (s *server) listKVMetadata(w http.ResponseWriter, r *http.Request) {
 		s.recordAuditEvent(r, "list", "failure", s.auditRequestActor(r, source), source, path, "unauthorized")
 		return
 	}
-	allowed, err := s.secretMountAllowed(access, mount)
+	allowed, err := s.secretMountAllowedForRequest(r, access, mount)
 	if err != nil {
 		s.recordAuditEvent(r, "list", "failure", s.auditRequestActor(r, source), source, path, "scope_lookup_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not verify secret access"})
@@ -1994,21 +2016,31 @@ func (s *server) listKVMetadata(w http.ResponseWriter, r *http.Request) {
 		prefix = path + "/"
 	}
 	storagePrefix := mount + "/" + prefix
-	rows, err := s.secretsDB.Query(`
-		SELECT child_key
-		FROM secret_listing
-		WHERE parent_path = ?
-		ORDER BY child_key`, strings.TrimSuffix(storagePrefix, "/"))
+	rows, err := trackDBRowsNamed(r, "metadata_listing", func() (*sql.Rows, error) {
+		return s.secretsDB.Query(`
+			SELECT child_key
+			FROM secret_listing
+			WHERE parent_path = ?
+			ORDER BY child_key`, strings.TrimSuffix(storagePrefix, "/"))
+	})
 	if err != nil {
 		s.recordAuditEvent(r, "list", "failure", s.auditRequestActor(r, source), source, path, "storage_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not list secret metadata"})
 		return
 	}
-	defer rows.Close()
+	rowsOpen := true
+	closeRows := func() {
+		if rowsOpen {
+			_ = rows.Close()
+			rowsOpen = false
+		}
+	}
+	defer closeRows()
 	keys := make([]string, 0)
 	for rows.Next() {
 		var key string
 		if err := rows.Scan(&key); err != nil {
+			closeRows()
 			s.recordAuditEvent(r, "list", "failure", s.auditRequestActor(r, source), source, path, "storage_error")
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read secret metadata"})
 			return
@@ -2016,10 +2048,12 @@ func (s *server) listKVMetadata(w http.ResponseWriter, r *http.Request) {
 		keys = append(keys, key)
 	}
 	if err := rows.Err(); err != nil {
+		closeRows()
 		s.recordAuditEvent(r, "list", "failure", s.auditRequestActor(r, source), source, path, "storage_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not list secret metadata"})
 		return
 	}
+	closeRows()
 	s.recordAuditEvent(r, "list", "success", s.auditRequestActor(r, source), source, secretStoragePath(mount, path), "")
 	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"keys": keys}})
 }

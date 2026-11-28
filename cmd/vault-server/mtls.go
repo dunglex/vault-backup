@@ -213,8 +213,14 @@ func (s *server) saveClientCertificate(tx *sql.Tx, tokenID int64, issued issuedC
 }
 
 func (s *server) mtlsSettings() (bool, error) {
+	return s.mtlsSettingsForRequest(nil)
+}
+
+func (s *server) mtlsSettingsForRequest(r *http.Request) (bool, error) {
 	var enforced string
-	err := s.db.QueryRow("SELECT value FROM server_settings WHERE key = 'enforce_mtls'").Scan(&enforced)
+	_, err := measureDBQueryNamed(r, "mtls_settings", func() (struct{}, error) {
+		return struct{}{}, s.db.QueryRow("SELECT value FROM server_settings WHERE key = 'enforce_mtls'").Scan(&enforced)
+	})
 	if err != nil && err != sql.ErrNoRows {
 		return false, err
 	}
@@ -222,8 +228,14 @@ func (s *server) mtlsSettings() (bool, error) {
 }
 
 func (s *server) mfaEnforcementEnabled() (bool, error) {
+	return s.mfaEnforcementEnabledForRequest(nil)
+}
+
+func (s *server) mfaEnforcementEnabledForRequest(r *http.Request) (bool, error) {
 	var value string
-	err := s.db.QueryRow("SELECT value FROM server_settings WHERE key = ?", enforceMFASetting).Scan(&value)
+	_, err := measureDBQueryNamed(r, "mfa_settings", func() (struct{}, error) {
+		return struct{}{}, s.db.QueryRow("SELECT value FROM server_settings WHERE key = ?", enforceMFASetting).Scan(&value)
+	})
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
@@ -243,19 +255,21 @@ func (s *server) certificateTokenID(r *http.Request) (int64, bool) {
 	}
 	serial := r.TLS.PeerCertificates[0].SerialNumber.Text(16)
 	var tokenID int64
-	err := s.db.QueryRow(`
-		SELECT certificates.token_id
-		FROM managed_client_certificates AS certificates
-		JOIN api_tokens ON api_tokens.id = certificates.token_id
-		WHERE certificates.serial_number = ?
-		  AND certificates.revoked_at IS NULL
-		  AND certificates.not_after > ?
-		  AND api_tokens.revoked_at IS NULL
-		  AND api_tokens.expires_at >= ?`,
-		serial,
-		time.Now().Unix(),
-		time.Now().Unix(),
-	).Scan(&tokenID)
+	_, err := measureDBQueryNamed(r, "client_certificate_validation", func() (struct{}, error) {
+		return struct{}{}, s.db.QueryRow(`
+			SELECT certificates.token_id
+			FROM managed_client_certificates AS certificates
+			JOIN api_tokens ON api_tokens.id = certificates.token_id
+			WHERE certificates.serial_number = ?
+			  AND certificates.revoked_at IS NULL
+			  AND certificates.not_after > ?
+			  AND api_tokens.revoked_at IS NULL
+			  AND api_tokens.expires_at >= ?`,
+			serial,
+			time.Now().Unix(),
+			time.Now().Unix(),
+		).Scan(&tokenID)
+	})
 	return tokenID, err == nil
 }
 
@@ -271,15 +285,22 @@ func apiTokenFromRequest(r *http.Request) string {
 }
 
 func (s *server) lookupActiveAPIToken(token string, tokenID *int64) error {
+	return s.lookupActiveAPITokenForRequest(nil, token, tokenID)
+}
+
+func (s *server) lookupActiveAPITokenForRequest(r *http.Request, token string, tokenID *int64) error {
 	if token == "" {
 		return sql.ErrNoRows
 	}
 	hash := sha256.Sum256([]byte(token))
-	return s.db.QueryRow(
-		"SELECT id FROM api_tokens WHERE token_hash = ? AND revoked_at IS NULL AND expires_at >= ?",
-		hex.EncodeToString(hash[:]),
-		time.Now().Unix(),
-	).Scan(tokenID)
+	_, err := measureDBQueryNamed(r, "api_token_validation", func() (struct{}, error) {
+		return struct{}{}, s.db.QueryRow(
+			"SELECT id FROM api_tokens WHERE token_hash = ? AND revoked_at IS NULL AND expires_at >= ?",
+			hex.EncodeToString(hash[:]),
+			time.Now().Unix(),
+		).Scan(tokenID)
+	})
+	return err
 }
 
 func (s *server) getSettings(w http.ResponseWriter, r *http.Request) {
@@ -306,6 +327,11 @@ func (s *server) getSettings(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read settings"})
 		return
 	}
+	accessLogDisabled, err := readAccessLogDisabledSetting(s.db)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read settings"})
+		return
+	}
 	operatorAudit, err := s.operatorAuditEnabled()
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read settings"})
@@ -316,6 +342,7 @@ func (s *server) getSettings(w http.ResponseWriter, r *http.Request) {
 		"auto_block_login_bruteforce_ip": autoBlock,
 		"enforce_mfa":                    enforceMFA,
 		"file_logging":                   fileLogging,
+		"disable_access_log":             accessLogDisabled,
 		"allow_operator_audit":           operatorAudit,
 	})
 }
@@ -333,6 +360,7 @@ func (s *server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		AutoBlockLoginBruteforceIP *bool `json:"auto_block_login_bruteforce_ip"`
 		EnforceMFA                 *bool `json:"enforce_mfa"`
 		FileLogging                *bool `json:"file_logging"`
+		DisableAccessLog           *bool `json:"disable_access_log"`
 		AllowOperatorAudit         *bool `json:"allow_operator_audit"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -344,7 +372,8 @@ func (s *server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if request.EnforceMTLS == nil && request.AutoBlockLoginBruteforceIP == nil &&
-		request.EnforceMFA == nil && request.FileLogging == nil && request.AllowOperatorAudit == nil {
+		request.EnforceMFA == nil && request.FileLogging == nil && request.DisableAccessLog == nil &&
+		request.AllowOperatorAudit == nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no settings provided"})
 		return
 	}
@@ -368,6 +397,11 @@ func (s *server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read settings"})
 		return
 	}
+	accessLogDisabled, err := readAccessLogDisabledSetting(s.db)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read settings"})
+		return
+	}
 	operatorAudit, err := s.operatorAuditEnabled()
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read settings"})
@@ -386,10 +420,17 @@ func (s *server) updateSettings(w http.ResponseWriter, r *http.Request) {
 	if request.FileLogging != nil {
 		fileLogging = *request.FileLogging
 	}
+	if request.DisableAccessLog != nil {
+		accessLogDisabled = *request.DisableAccessLog
+	}
 	if request.AllowOperatorAudit != nil {
 		operatorAudit = *request.AllowOperatorAudit
 	}
 	enableFileLogging := request.FileLogging != nil && *request.FileLogging && !fileLoggingWasEnabled
+	if request.DisableAccessLog != nil && s.logWriter == nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "access logging is unavailable"})
+		return
+	}
 	preparedFileLogging := false
 	if enableFileLogging && s.logWriter == nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "file logging is unavailable"})
@@ -455,6 +496,16 @@ func (s *server) updateSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if request.DisableAccessLog != nil {
+		if _, err := tx.Exec(
+			"INSERT INTO server_settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+			serverAccessLogDisabledSetting,
+			strconv.FormatBool(accessLogDisabled),
+		); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not save settings"})
+			return
+		}
+	}
 	if request.AllowOperatorAudit != nil {
 		if _, err := tx.Exec(
 			"INSERT INTO server_settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -470,6 +521,9 @@ func (s *server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fileLoggingSaved = preparedFileLogging
+	if request.DisableAccessLog != nil && s.logWriter != nil {
+		s.logWriter.setAccessLoggingEnabled(!accessLogDisabled)
+	}
 	if request.FileLogging != nil && !*request.FileLogging && s.logWriter != nil {
 		if err := s.logWriter.DisableFileLogging(); err != nil {
 			log.Printf("ERROR: could not disable file logging cleanly: %v", err)
@@ -487,6 +541,12 @@ func (s *server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		detail += serverFileLoggingSetting + "=" + strconv.FormatBool(fileLogging)
 	}
+	if request.DisableAccessLog != nil {
+		if detail != "" {
+			detail += ","
+		}
+		detail += serverAccessLogDisabledSetting + "=" + strconv.FormatBool(accessLogDisabled)
+	}
 	if request.AllowOperatorAudit != nil {
 		if detail != "" {
 			detail += ","
@@ -499,6 +559,7 @@ func (s *server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		"auto_block_login_bruteforce_ip": autoBlock,
 		"enforce_mfa":                    enforceMFA,
 		"file_logging":                   fileLogging,
+		"disable_access_log":             accessLogDisabled,
 		"allow_operator_audit":           operatorAudit,
 	})
 }

@@ -23,8 +23,14 @@ type blockedLoginIP struct {
 }
 
 func (s *server) autoBlockLoginIPEnabled() (bool, error) {
+	return s.autoBlockLoginIPEnabledForRequest(nil)
+}
+
+func (s *server) autoBlockLoginIPEnabledForRequest(r *http.Request) (bool, error) {
 	var value string
-	err := s.db.QueryRow("SELECT value FROM server_settings WHERE key = ?", autoBlockLoginIPSetting).Scan(&value)
+	_, err := measureDBQuery(r, func() (struct{}, error) {
+		return struct{}{}, s.db.QueryRow("SELECT value FROM server_settings WHERE key = ?", autoBlockLoginIPSetting).Scan(&value)
+	})
 	if err == sql.ErrNoRows {
 		return true, nil
 	}
@@ -39,7 +45,11 @@ func (s *server) autoBlockLoginIPEnabled() (bool, error) {
 }
 
 func (s *server) loginIPBlocked(clientIP string) (bool, error) {
-	enabled, err := s.autoBlockLoginIPEnabled()
+	return s.loginIPBlockedForRequest(nil, clientIP)
+}
+
+func (s *server) loginIPBlockedForRequest(r *http.Request, clientIP string) (bool, error) {
+	enabled, err := s.autoBlockLoginIPEnabledForRequest(r)
 	if err != nil || !enabled {
 		return false, err
 	}
@@ -48,7 +58,9 @@ func (s *server) loginIPBlocked(clientIP string) (bool, error) {
 		return false, fmt.Errorf("invalid client IP address %q", clientIP)
 	}
 	var exists int
-	err = s.db.QueryRow("SELECT 1 FROM blocked_login_ips WHERE client_ip = ?", ip.String()).Scan(&exists)
+	_, err = measureDBQuery(r, func() (struct{}, error) {
+		return struct{}{}, s.db.QueryRow("SELECT 1 FROM blocked_login_ips WHERE client_ip = ?", ip.String()).Scan(&exists)
+	})
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
@@ -59,7 +71,11 @@ func (s *server) loginIPBlocked(clientIP string) (bool, error) {
 }
 
 func (s *server) recordFailedLoginIP(clientIP string, now time.Time) (bool, error) {
-	enabled, err := s.autoBlockLoginIPEnabled()
+	return s.recordFailedLoginIPForRequest(nil, clientIP, now)
+}
+
+func (s *server) recordFailedLoginIPForRequest(r *http.Request, clientIP string, now time.Time) (bool, error) {
+	enabled, err := s.autoBlockLoginIPEnabledForRequest(r)
 	if err != nil || !enabled {
 		return false, err
 	}
@@ -69,58 +85,80 @@ func (s *server) recordFailedLoginIP(clientIP string, now time.Time) (bool, erro
 	}
 	clientIP = ip.String()
 
-	tx, err := s.db.Begin()
+	var tx *sql.Tx
+	err = measureDBOperation(r, func() error {
+		var err error
+		tx, err = s.db.Begin()
+		return err
+	})
 	if err != nil {
 		return false, fmt.Errorf("begin failed-login transaction: %w", err)
 	}
 	defer tx.Rollback()
 
 	cutoff := now.UTC().Add(-loginIPFailureWindow).Unix()
-	if _, err := tx.Exec("DELETE FROM login_ip_failures WHERE failed_at <= ?", cutoff); err != nil {
+	if _, err := measureDBQuery(r, func() (sql.Result, error) {
+		return tx.Exec("DELETE FROM login_ip_failures WHERE failed_at <= ?", cutoff)
+	}); err != nil {
 		return false, fmt.Errorf("expire old failed-login records: %w", err)
 	}
-	if _, err := tx.Exec("INSERT INTO login_ip_failures(client_ip, failed_at) VALUES (?, ?)", clientIP, now.UTC().Unix()); err != nil {
+	if _, err := measureDBQuery(r, func() (sql.Result, error) {
+		return tx.Exec("INSERT INTO login_ip_failures(client_ip, failed_at) VALUES (?, ?)", clientIP, now.UTC().Unix())
+	}); err != nil {
 		return false, fmt.Errorf("record failed login: %w", err)
 	}
 	var failures int
-	if err := tx.QueryRow(
-		"SELECT COUNT(*) FROM login_ip_failures WHERE client_ip = ? AND failed_at > ?",
-		clientIP, cutoff,
-	).Scan(&failures); err != nil {
+	_, err = measureDBQuery(r, func() (struct{}, error) {
+		return struct{}{}, tx.QueryRow(
+			"SELECT COUNT(*) FROM login_ip_failures WHERE client_ip = ? AND failed_at > ?",
+			clientIP, cutoff,
+		).Scan(&failures)
+	})
+	if err != nil {
 		return false, fmt.Errorf("count failed logins: %w", err)
 	}
 	if failures < loginAttemptLimit {
-		if err := tx.Commit(); err != nil {
+		if err := measureDBOperation(r, tx.Commit); err != nil {
 			return false, fmt.Errorf("commit failed-login record: %w", err)
 		}
 		return false, nil
 	}
-	result, err := tx.Exec(
-		"INSERT OR IGNORE INTO blocked_login_ips(client_ip, blocked_at, failure_count) VALUES (?, ?, ?)",
-		clientIP, now.UTC().Unix(), failures,
-	)
+	result, err := measureDBQuery(r, func() (sql.Result, error) {
+		return tx.Exec(
+			"INSERT OR IGNORE INTO blocked_login_ips(client_ip, blocked_at, failure_count) VALUES (?, ?, ?)",
+			clientIP, now.UTC().Unix(), failures,
+		)
+	})
 	if err != nil {
 		return false, fmt.Errorf("block login IP: %w", err)
 	}
-	if _, err := tx.Exec("DELETE FROM login_ip_failures WHERE client_ip = ?", clientIP); err != nil {
+	if _, err := measureDBQuery(r, func() (sql.Result, error) {
+		return tx.Exec("DELETE FROM login_ip_failures WHERE client_ip = ?", clientIP)
+	}); err != nil {
 		return false, fmt.Errorf("clear blocked IP failure records: %w", err)
 	}
 	inserted, err := result.RowsAffected()
 	if err != nil {
 		return false, fmt.Errorf("check blocked IP result: %w", err)
 	}
-	if err := tx.Commit(); err != nil {
+	if err := measureDBOperation(r, tx.Commit); err != nil {
 		return false, fmt.Errorf("commit blocked IP: %w", err)
 	}
 	return inserted != 0, nil
 }
 
 func (s *server) clearLoginIPFailures(clientIP string) error {
+	return s.clearLoginIPFailuresForRequest(nil, clientIP)
+}
+
+func (s *server) clearLoginIPFailuresForRequest(r *http.Request, clientIP string) error {
 	ip := net.ParseIP(clientIP)
 	if ip == nil {
 		return fmt.Errorf("invalid client IP address %q", clientIP)
 	}
-	if _, err := s.db.Exec("DELETE FROM login_ip_failures WHERE client_ip = ?", ip.String()); err != nil {
+	if _, err := measureDBQuery(r, func() (sql.Result, error) {
+		return s.db.Exec("DELETE FROM login_ip_failures WHERE client_ip = ?", ip.String())
+	}); err != nil {
 		return fmt.Errorf("clear failed-login records: %w", err)
 	}
 	return nil
@@ -158,7 +196,7 @@ func (s *server) blockedLoginIPs() ([]blockedLoginIP, error) {
 
 func (s *server) rejectBlockedLoginIP(w http.ResponseWriter, r *http.Request, source string) bool {
 	clientIP := s.clientIP(r)
-	blocked, err := s.loginIPBlocked(clientIP)
+	blocked, err := s.loginIPBlockedForRequest(r, clientIP)
 	if err != nil {
 		logLoginBlockError("check blocked login IP", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not check login IP block"})
@@ -174,7 +212,7 @@ func (s *server) rejectBlockedLoginIP(w http.ResponseWriter, r *http.Request, so
 
 func (s *server) recordLoginFailure(r *http.Request, source string) {
 	clientIP := s.clientIP(r)
-	blocked, err := s.recordFailedLoginIP(clientIP, time.Now().UTC())
+	blocked, err := s.recordFailedLoginIPForRequest(r, clientIP, time.Now().UTC())
 	if err != nil {
 		logLoginBlockError("record failed login", err)
 		return
@@ -185,7 +223,7 @@ func (s *server) recordLoginFailure(r *http.Request, source string) {
 }
 
 func (s *server) resetLoginFailuresAfterSuccess(r *http.Request) {
-	if err := s.clearLoginIPFailures(s.clientIP(r)); err != nil {
+	if err := s.clearLoginIPFailuresForRequest(r, s.clientIP(r)); err != nil {
 		logLoginBlockError("reset failed logins after successful login", err)
 	}
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"errors"
+	"net/http"
 	"strings"
 )
 
@@ -79,23 +80,33 @@ func initializeSecretListingCache(db *sql.DB) error {
 }
 
 func currentSecretIsVisible(tx *sql.Tx, path string) (bool, error) {
+	return currentSecretIsVisibleForRequest(nil, tx, path)
+}
+
+func currentSecretIsVisibleForRequest(r *http.Request, tx *sql.Tx, path string) (bool, error) {
 	var visible bool
-	err := tx.QueryRow(`
-		SELECT EXISTS(
-			SELECT 1
-			FROM secrets s
-			JOIN secret_versions v
-			  ON v.path = s.path AND v.version = s.current_version
-			WHERE s.path = ?
-			  AND v.deleted_at IS NULL
-			  AND v.destroyed_at IS NULL
-		)`, path,
-	).Scan(&visible)
+	_, err := measureDBQuery(r, func() (struct{}, error) {
+		return struct{}{}, tx.QueryRow(`
+			SELECT EXISTS(
+				SELECT 1
+				FROM secrets s
+				JOIN secret_versions v
+				  ON v.path = s.path AND v.version = s.current_version
+				WHERE s.path = ?
+				  AND v.deleted_at IS NULL
+				  AND v.destroyed_at IS NULL
+			)`, path,
+		).Scan(&visible)
+	})
 	return visible, err
 }
 
 func syncSecretListingVisibility(tx *sql.Tx, path string, wasVisible bool) error {
-	isVisible, err := currentSecretIsVisible(tx, path)
+	return syncSecretListingVisibilityForRequest(nil, tx, path, wasVisible)
+}
+
+func syncSecretListingVisibilityForRequest(r *http.Request, tx *sql.Tx, path string, wasVisible bool) error {
+	isVisible, err := currentSecretIsVisibleForRequest(r, tx, path)
 	if err != nil {
 		return err
 	}
@@ -103,12 +114,16 @@ func syncSecretListingVisibility(tx *sql.Tx, path string, wasVisible bool) error
 		return nil
 	}
 	if isVisible {
-		return updateSecretListingPath(tx, path, 1)
+		return updateSecretListingPathForRequest(r, tx, path, 1)
 	}
-	return updateSecretListingPath(tx, path, -1)
+	return updateSecretListingPathForRequest(r, tx, path, -1)
 }
 
 func updateSecretListingPath(tx *sql.Tx, path string, delta int) error {
+	return updateSecretListingPathForRequest(nil, tx, path, delta)
+}
+
+func updateSecretListingPathForRequest(r *http.Request, tx *sql.Tx, path string, delta int) error {
 	if delta != 1 && delta != -1 {
 		return errors.New("invalid secret listing update")
 	}
@@ -129,21 +144,26 @@ func updateSecretListingPath(tx *sql.Tx, path string, delta int) error {
 			key += "/"
 		}
 		if delta > 0 {
-			if _, err := tx.Exec(`
-				INSERT INTO secret_listing(parent_path, child_key, ref_count)
-				VALUES (?, ?, 1)
-				ON CONFLICT(parent_path, child_key)
-				DO UPDATE SET ref_count = ref_count + 1`,
-				parent, key,
-			); err != nil {
+			_, err := measureDBQuery(r, func() (sql.Result, error) {
+				return tx.Exec(`
+					INSERT INTO secret_listing(parent_path, child_key, ref_count)
+					VALUES (?, ?, 1)
+					ON CONFLICT(parent_path, child_key)
+					DO UPDATE SET ref_count = ref_count + 1`,
+					parent, key,
+				)
+			})
+			if err != nil {
 				return err
 			}
 		} else {
-			result, err := tx.Exec(`
-				DELETE FROM secret_listing
-				WHERE parent_path = ? AND child_key = ? AND ref_count = 1`,
-				parent, key,
-			)
+			result, err := measureDBQuery(r, func() (sql.Result, error) {
+				return tx.Exec(`
+					DELETE FROM secret_listing
+					WHERE parent_path = ? AND child_key = ? AND ref_count = 1`,
+					parent, key,
+				)
+			})
 			if err != nil {
 				return err
 			}
@@ -152,12 +172,14 @@ func updateSecretListingPath(tx *sql.Tx, path string, delta int) error {
 				return err
 			}
 			if affected == 0 {
-				result, err = tx.Exec(`
-					UPDATE secret_listing
-					SET ref_count = ref_count - 1
-					WHERE parent_path = ? AND child_key = ? AND ref_count > 1`,
-					parent, key,
-				)
+				result, err = measureDBQuery(r, func() (sql.Result, error) {
+					return tx.Exec(`
+						UPDATE secret_listing
+						SET ref_count = ref_count - 1
+						WHERE parent_path = ? AND child_key = ? AND ref_count > 1`,
+						parent, key,
+					)
+				})
 				if err != nil {
 					return err
 				}

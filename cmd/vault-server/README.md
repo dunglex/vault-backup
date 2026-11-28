@@ -182,7 +182,38 @@ page; file logging is disabled by default and duplicates the stdout logs. Files
 are written to `logs/vault-server-YYYY-MM-DD.log` under the server's working
 directory, rotated daily, restricted to mode `0600`, and cleaned up after seven
 days. The `logs` directory is created with mode `0700` when needed. Access logs
-record the request path but omit query strings.
+record the request path but omit query strings. Administrators can disable
+HTTP access lines on the Security page; the option is off by default, so access
+logging remains enabled unless changed. Server error logs and security audit
+events are unaffected. `request_duration` is the
+request's elapsed handling time. Detailed database metrics are disabled by
+default to keep access logs concise and avoid collecting per-request DB
+metrics. Enable them with `--log-api-db-metrics` or
+`VAULT_SERVER_LOG_API_DB_METRICS=true`.
+File log copies are queued and batched in the background (up to 64 KiB or
+10 ms per batch); stdout logging remains immediate. The bounded queue applies
+backpressure rather than dropping log entries, and disabling file logging or
+shutting down waits for queued entries to be written.
+When enabled, `db_duration` is the sum of instrumented database operation
+durations for the request, including connection waits, statement execution,
+row processing, and audit-store lock waits. `db_query_count` counts SQL
+statements for the request. Metrics are request-scoped and cover `/api/`
+handlers and middleware, including token authentication, scope checks, and
+audit writes. Since `db_duration` sums operation durations, concurrent
+database operations can make it exceed `request_duration`.
+`db_operation_durations` reports cumulative time by operation label; KV read
+labels include `host_domain_settings`,
+`mtls_settings`, `mount_resolution`, `api_token_validation`,
+`token_scope_lookup`, `token_owner_lookup`, `mount_access_check`,
+`metadata_listing`, `audit_queue_wait`, and `audit_batch_write` (including
+transaction setup, SQL pool wait, inserts, and commit). Audit database
+rotation is reported as `audit_store_rotation`. Instrumented operations
+without a specific label are grouped under `other`.
+
+Audit writes use synchronous group commit: requests are acknowledged only
+after their audit transaction commits. The writer batches up to 64 events or
+waits up to 2 ms to collect a batch. Its bounded queue applies backpressure
+rather than dropping audit events.
 
 Web and LDAP-compatible username/password endpoints apply a cryptographically
 random 3-5 second delay before credential verification for attempts admitted

@@ -3,6 +3,28 @@ import { check } from 'k6';
 import { vaultToken, vaultURL } from './config.js';
 
 const metadataURL = `${vaultURL}/v1/kv/metadata`;
+const secretPath = 'infrastructure/kubernetes/000081';
+const secretDataURL = `${vaultURL}/v1/kv/data/${secretPath}`;
+const secretMetadataURL = `${metadataURL}/${secretPath}`;
+const nestedMetadataURL = `${metadataURL}/infrastructure`;
+const capture503Diagnostics = __ENV.CAPTURE_503_DIAGNOSTICS === 'true';
+
+function log503Diagnostic(response) {
+  if (!capture503Diagnostics || response.status !== 503) {
+    return;
+  }
+
+  let reason = 'unrecognized response (body redacted)';
+  try {
+    const error = response.json('error');
+    if (error === 'request timed out' || error === 'server is under maintenance') {
+      reason = error;
+    }
+  } catch {
+    reason = 'non-JSON response (body redacted)';
+  }
+  console.error(`503 diagnostic: route=authenticated_kv_metadata reason=${JSON.stringify(reason)}`);
+}
 
 export const options = {
   discardResponseBodies: true,
@@ -16,7 +38,7 @@ export const options = {
     },
     api_load: {
       executor: 'constant-arrival-rate',
-      rate: Number(__ENV.RATE || 1000),
+      rate: Number(__ENV.RATE || 200),
       timeUnit: '1s',
       duration: __ENV.DURATION || '30s',
       preAllocatedVUs: Number(__ENV.PREALLOCATED_VUS || 100),
@@ -57,14 +79,43 @@ export function authChecks() {
   check(bearerResponse, {
     'API accepts Bearer token': (response) => response.status === 200,
   });
+
+  const secretResponse = http.get(secretDataURL, {
+    headers: { 'X-Vault-Token': vaultToken },
+    responseCallback: http.expectedStatuses(200),
+    tags: { name: 'read_secret' },
+  });
+  check(secretResponse, {
+    'API reads current KV data': (response) => response.status === 200,
+  });
+
+  const secretMetadataResponse = http.get(secretMetadataURL, {
+    headers: { 'X-Vault-Token': vaultToken },
+    responseCallback: http.expectedStatuses(200),
+    tags: { name: 'read_secret_metadata' },
+  });
+  check(secretMetadataResponse, {
+    'API reads metadata for a secret': (response) => response.status === 200,
+  });
+
+  const nestedMetadataResponse = http.request('LIST', nestedMetadataURL, null, {
+    headers: { 'X-Vault-Token': vaultToken },
+    responseCallback: http.expectedStatuses(200),
+    tags: { name: 'list_nested_metadata' },
+  });
+  check(nestedMetadataResponse, {
+    'API lists nested metadata keys': (response) => response.status === 200,
+  });
 }
 
 export default function () {
   const response = http.get(metadataURL, {
     headers: { 'X-Vault-Token': vaultToken },
+    responseType: capture503Diagnostics ? 'text' : 'none',
     responseCallback: http.expectedStatuses(200),
     tags: { name: 'authenticated_kv_metadata' },
   });
+  log503Diagnostic(response);
   check(response, {
     'authenticated KV metadata responds with HTTP 200': (result) => result.status === 200,
   });

@@ -29,6 +29,7 @@ type serverConfig struct {
 	TLSKeyPath         string
 	DBPassword         string
 	AllowPlaintextDB   bool
+	LogAPIDBMetrics    bool
 	EnvFilePath        string
 	MTLSCACertPath     string
 	MTLSCAPool         *x509.CertPool
@@ -63,6 +64,7 @@ func loadServerConfig(args []string) (serverConfig, error) {
 	flags.StringVar(&config.TLSKeyPath, "tls-key", envDefault("VAULT_SERVER_TLS_KEY", ""), "path to TLS private key PEM")
 	flags.StringVar(&config.DBPassword, "db-password", envDefault("VAULT_SERVER_DB_PASSWORD", ""), "password used to decrypt the database key file")
 	flags.BoolVar(&config.AllowPlaintextDB, "allow-plaintext-db", envBool("VAULT_SERVER_ALLOW_PLAINTEXT_DB", false), "allow an existing plaintext SQLite database (insecure)")
+	flags.BoolVar(&config.LogAPIDBMetrics, "log-api-db-metrics", envBool("VAULT_SERVER_LOG_API_DB_METRICS", false), "include detailed database metrics in API access logs")
 	flags.StringVar(&config.EnvFilePath, "env-file", envDefault("VAULT_SERVER_ENV_FILE", ".env"), "path to .env configuration file")
 	flags.StringVar(&config.MTLSCACertPath, "mtls-ca-cert", envDefault("VAULT_SERVER_MTLS_CA_CERT", ""), "CA certificate PEM used to verify HTTPS client certificates")
 	trustedProxies := flags.String("trusted-proxies", envDefault("VAULT_SERVER_TRUSTED_PROXIES", ""), "comma-separated proxy IP/CIDR ranges allowed to set forwarding headers")

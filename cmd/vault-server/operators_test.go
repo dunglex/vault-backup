@@ -449,6 +449,9 @@ func TestOperatorManagementIsAdminOnlyAndRevokesDeletedSessions(t *testing.T) {
 	if !strings.Contains(adminSecurity.Body.String(), `id="fileLogging"`) {
 		t.Fatal("admin Security page is missing file logging setting")
 	}
+	if !strings.Contains(adminSecurity.Body.String(), `id="disableAccessLog"`) {
+		t.Fatal("admin Security page is missing access logging setting")
+	}
 	if strings.Contains(adminSecurity.Body.String(), `id="operatorForm"`) {
 		t.Fatal("Security page contains operator management")
 	}

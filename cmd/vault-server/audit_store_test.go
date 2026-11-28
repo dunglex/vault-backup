@@ -1,9 +1,13 @@
 package main
 
 import (
+	"context"
 	"database/sql"
+	"fmt"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -97,5 +101,73 @@ func TestAnnualAuditStoreRecordsInCurrentYearFile(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestAuditRecordMeasuresQueueAndBatchWrite(t *testing.T) {
+	store, err := openAnnualAuditStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	metrics := &requestDBMetrics{}
+	request := httptest.NewRequest("GET", "/api/v1/kv/metadata", nil).
+		WithContext(context.WithValue(context.Background(), requestDBMetricsKey{}, metrics))
+	now := time.Now().UTC().Unix()
+	if err := store.recordForRequest(request, now, "list", "success", "admin", "127.0.0.1", "api", "kv", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	metrics.mu.Lock()
+	defer metrics.mu.Unlock()
+	if metrics.queryCount != 1 {
+		t.Fatalf("audit SQL query count = %d, want 1", metrics.queryCount)
+	}
+	for _, operation := range []string{"audit_queue_wait", "audit_batch_write"} {
+		if _, ok := metrics.operations[operation]; !ok {
+			t.Errorf("missing %q duration in request metrics", operation)
+		}
+	}
+}
+
+func TestAuditStoreSynchronouslyPersistsConcurrentRecords(t *testing.T) {
+	store, err := openAnnualAuditStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	const eventCount = 32
+	now := time.Now().UTC().Unix()
+	errors := make(chan error, eventCount)
+	var writers sync.WaitGroup
+	for index := 0; index < eventCount; index++ {
+		writers.Add(1)
+		go func(index int) {
+			defer writers.Done()
+			errors <- store.Record(now, "batch_test", "success", fmt.Sprintf("actor-%d", index), "127.0.0.1", "api", "kv", "")
+		}(index)
+	}
+	writers.Wait()
+	close(errors)
+	for err := range errors {
+		if err != nil {
+			t.Errorf("write concurrent audit event: %v", err)
+		}
+	}
+
+	year := time.Unix(now, 0).UTC().Year()
+	if err := store.withYear(year, func(db *sql.DB) error {
+		var count int
+		if err := db.QueryRow("SELECT COUNT(*) FROM audit_events WHERE action = 'batch_test'").Scan(&count); err != nil {
+			return err
+		}
+		if count != eventCount {
+			t.Errorf("persisted audit event count = %d, want %d", count, eventCount)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("read persisted audit events: %v", err)
 	}
 }

@@ -33,18 +33,29 @@ type secretVersionSummary struct {
 }
 
 func (s *server) writeSecretVersion(path, encrypted, actor string, cas *int64) (int64, bool, error) {
-	tx, err := s.secretsDB.Begin()
+	return s.writeSecretVersionForRequest(nil, path, encrypted, actor, cas)
+}
+
+func (s *server) writeSecretVersionForRequest(r *http.Request, path, encrypted, actor string, cas *int64) (int64, bool, error) {
+	var tx *sql.Tx
+	err := measureDBOperation(r, func() error {
+		var err error
+		tx, err = s.secretsDB.Begin()
+		return err
+	})
 	if err != nil {
 		return 0, false, err
 	}
 	defer tx.Rollback()
 
-	wasVisible, err := currentSecretIsVisible(tx, path)
+	wasVisible, err := currentSecretIsVisibleForRequest(r, tx, path)
 	if err != nil {
 		return 0, false, err
 	}
 	var current int64
-	err = tx.QueryRow("SELECT current_version FROM secrets WHERE path = ?", path).Scan(&current)
+	_, err = measureDBQuery(r, func() (struct{}, error) {
+		return struct{}{}, tx.QueryRow("SELECT current_version FROM secrets WHERE path = ?", path).Scan(&current)
+	})
 	created := err == sql.ErrNoRows
 	if err != nil && !created {
 		return 0, false, err
@@ -61,17 +72,21 @@ func (s *server) writeSecretVersion(path, encrypted, actor string, cas *int64) (
 	next := current + 1
 	now := time.Now().UTC().Unix()
 	if created {
-		if _, err := tx.Exec(
-			"INSERT INTO secrets(path, current_version, created_at, updated_at) VALUES (?, ?, ?, ?)",
-			path, next, now, now,
-		); err != nil {
+		if _, err := measureDBQuery(r, func() (sql.Result, error) {
+			return tx.Exec(
+				"INSERT INTO secrets(path, current_version, created_at, updated_at) VALUES (?, ?, ?, ?)",
+				path, next, now, now,
+			)
+		}); err != nil {
 			return 0, false, err
 		}
 	} else {
-		result, err := tx.Exec(
-			"UPDATE secrets SET current_version = ?, updated_at = ? WHERE path = ? AND current_version = ?",
-			next, now, path, current,
-		)
+		result, err := measureDBQuery(r, func() (sql.Result, error) {
+			return tx.Exec(
+				"UPDATE secrets SET current_version = ?, updated_at = ? WHERE path = ? AND current_version = ?",
+				next, now, path, current,
+			)
+		})
 		if err != nil {
 			return 0, false, err
 		}
@@ -83,16 +98,18 @@ func (s *server) writeSecretVersion(path, encrypted, actor string, cas *int64) (
 			return 0, false, errSecretCASMismatch
 		}
 	}
-	if _, err := tx.Exec(
-		"INSERT INTO secret_versions(path, version, data, created_at, created_by) VALUES (?, ?, ?, ?, ?)",
-		path, next, encrypted, now, nullableString(actor),
-	); err != nil {
+	if _, err := measureDBQuery(r, func() (sql.Result, error) {
+		return tx.Exec(
+			"INSERT INTO secret_versions(path, version, data, created_at, created_by) VALUES (?, ?, ?, ?, ?)",
+			path, next, encrypted, now, nullableString(actor),
+		)
+	}); err != nil {
 		return 0, false, err
 	}
-	if err := syncSecretListingVisibility(tx, path, wasVisible); err != nil {
+	if err := syncSecretListingVisibilityForRequest(r, tx, path, wasVisible); err != nil {
 		return 0, false, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := measureDBOperation(r, tx.Commit); err != nil {
 		return 0, false, err
 	}
 	return next, created, nil
@@ -184,49 +201,71 @@ func (s *server) secretVersionSummaries(path string) (int64, []secretVersionSumm
 }
 
 func (s *server) softDeleteCurrentSecret(path string) (int64, bool, error) {
-	tx, err := s.secretsDB.Begin()
+	return s.softDeleteCurrentSecretForRequest(nil, path)
+}
+
+func (s *server) softDeleteCurrentSecretForRequest(r *http.Request, path string) (int64, bool, error) {
+	var tx *sql.Tx
+	err := measureDBOperation(r, func() error {
+		var err error
+		tx, err = s.secretsDB.Begin()
+		return err
+	})
 	if err != nil {
 		return 0, false, err
 	}
 	defer tx.Rollback()
 	var currentVersion int64
-	err = tx.QueryRow("SELECT current_version FROM secrets WHERE path = ?", path).Scan(&currentVersion)
+	_, err = measureDBQuery(r, func() (struct{}, error) {
+		return struct{}{}, tx.QueryRow("SELECT current_version FROM secrets WHERE path = ?", path).Scan(&currentVersion)
+	})
 	if err == sql.ErrNoRows {
 		return 0, false, nil
 	}
 	if err != nil {
 		return 0, false, err
 	}
-	wasVisible, err := currentSecretIsVisible(tx, path)
+	wasVisible, err := currentSecretIsVisibleForRequest(r, tx, path)
 	if err != nil {
 		return 0, false, err
 	}
-	if _, err := tx.Exec(`
-		UPDATE secret_versions
-		SET deleted_at = ?
-		WHERE path = ?
-		  AND version = ?
-		  AND deleted_at IS NULL
-		  AND destroyed_at IS NULL
-	`, time.Now().UTC().Unix(), path, currentVersion); err != nil {
+	if _, err := measureDBQuery(r, func() (sql.Result, error) {
+		return tx.Exec(`
+			UPDATE secret_versions
+			SET deleted_at = ?
+			WHERE path = ?
+			  AND version = ?
+			  AND deleted_at IS NULL
+			  AND destroyed_at IS NULL
+		`, time.Now().UTC().Unix(), path, currentVersion)
+	}); err != nil {
 		return 0, false, err
 	}
-	if err := syncSecretListingVisibility(tx, path, wasVisible); err != nil {
+	if err := syncSecretListingVisibilityForRequest(r, tx, path, wasVisible); err != nil {
 		return 0, false, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := measureDBOperation(r, tx.Commit); err != nil {
 		return 0, false, err
 	}
 	return currentVersion, true, nil
 }
 
 func (s *server) updateSecretVersions(path, operation string, versions []int64) error {
-	tx, err := s.secretsDB.Begin()
+	return s.updateSecretVersionsForRequest(nil, path, operation, versions)
+}
+
+func (s *server) updateSecretVersionsForRequest(r *http.Request, path, operation string, versions []int64) error {
+	var tx *sql.Tx
+	err := measureDBOperation(r, func() error {
+		var err error
+		tx, err = s.secretsDB.Begin()
+		return err
+	})
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	wasVisible, err := currentSecretIsVisible(tx, path)
+	wasVisible, err := currentSecretIsVisibleForRequest(r, tx, path)
 	if err != nil {
 		return err
 	}
@@ -234,20 +273,26 @@ func (s *server) updateSecretVersions(path, operation string, versions []int64) 
 	for _, version := range versions {
 		switch operation {
 		case "delete":
-			_, err = tx.Exec(
-				"UPDATE secret_versions SET deleted_at = ? WHERE path = ? AND version = ? AND destroyed_at IS NULL AND deleted_at IS NULL",
-				now, path, version,
-			)
+			_, err = measureDBQuery(r, func() (sql.Result, error) {
+				return tx.Exec(
+					"UPDATE secret_versions SET deleted_at = ? WHERE path = ? AND version = ? AND destroyed_at IS NULL AND deleted_at IS NULL",
+					now, path, version,
+				)
+			})
 		case "undelete":
-			_, err = tx.Exec(
-				"UPDATE secret_versions SET deleted_at = NULL WHERE path = ? AND version = ? AND destroyed_at IS NULL AND deleted_at IS NOT NULL",
-				path, version,
-			)
+			_, err = measureDBQuery(r, func() (sql.Result, error) {
+				return tx.Exec(
+					"UPDATE secret_versions SET deleted_at = NULL WHERE path = ? AND version = ? AND destroyed_at IS NULL AND deleted_at IS NOT NULL",
+					path, version,
+				)
+			})
 		case "destroy":
-			_, err = tx.Exec(
-				"UPDATE secret_versions SET data = NULL, deleted_at = COALESCE(deleted_at, ?), destroyed_at = ? WHERE path = ? AND version = ? AND destroyed_at IS NULL",
-				now, now, path, version,
-			)
+			_, err = measureDBQuery(r, func() (sql.Result, error) {
+				return tx.Exec(
+					"UPDATE secret_versions SET data = NULL, deleted_at = COALESCE(deleted_at, ?), destroyed_at = ? WHERE path = ? AND version = ? AND destroyed_at IS NULL",
+					now, now, path, version,
+				)
+			})
 		default:
 			return fmt.Errorf("unsupported secret version operation")
 		}
@@ -255,19 +300,22 @@ func (s *server) updateSecretVersions(path, operation string, versions []int64) 
 			return err
 		}
 	}
-	if err := syncSecretListingVisibility(tx, path, wasVisible); err != nil {
+	if err := syncSecretListingVisibilityForRequest(r, tx, path, wasVisible); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return measureDBOperation(r, tx.Commit)
 }
 
 func (s *server) apiTokenOwnerIsAdmin(r *http.Request) (bool, error) {
 	hash := sha256.Sum256([]byte(apiTokenFromRequest(r)))
 	var createdBy sql.NullString
-	if err := s.db.QueryRow(
-		"SELECT created_by FROM api_tokens WHERE token_hash = ? AND revoked_at IS NULL AND expires_at >= ?",
-		hex.EncodeToString(hash[:]), time.Now().Unix(),
-	).Scan(&createdBy); err != nil {
+	_, err := measureDBQuery(r, func() (struct{}, error) {
+		return struct{}{}, s.db.QueryRow(
+			"SELECT created_by FROM api_tokens WHERE token_hash = ? AND revoked_at IS NULL AND expires_at >= ?",
+			hex.EncodeToString(hash[:]), time.Now().Unix(),
+		).Scan(&createdBy)
+	})
+	if err != nil {
 		return false, err
 	}
 	if !createdBy.Valid {
@@ -275,9 +323,12 @@ func (s *server) apiTokenOwnerIsAdmin(r *http.Request) (bool, error) {
 	}
 	var role string
 	var locked int
-	if err := s.db.QueryRow(
-		"SELECT role, locked FROM accounts WHERE username = ?", createdBy.String,
-	).Scan(&role, &locked); err != nil {
+	_, err = measureDBQuery(r, func() (struct{}, error) {
+		return struct{}{}, s.db.QueryRow(
+			"SELECT role, locked FROM accounts WHERE username = ?", createdBy.String,
+		).Scan(&role, &locked)
+	})
+	if err != nil {
 		if err == sql.ErrNoRows {
 			return false, nil
 		}
@@ -298,7 +349,7 @@ func (s *server) authorizeVersionedAPIPath(w http.ResponseWriter, r *http.Reques
 		s.recordAuditEvent(r, action, "failure", s.auditRequestActor(r, "api"), "api", path, "unauthorized")
 		return "", "", false
 	}
-	allowed, err := s.secretMountAllowed(access, mount)
+	allowed, err := s.secretMountAllowedForRequest(r, access, mount)
 	if err != nil {
 		s.recordAuditEvent(r, action, "failure", s.auditRequestActor(r, "api"), "api", path, "scope_lookup_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not verify secret access"})
@@ -319,9 +370,11 @@ func (s *server) getKVMetadata(w http.ResponseWriter, r *http.Request) {
 	}
 	var current int64
 	var createdAt, updatedAt int64
-	err := s.secretsDB.QueryRow(
-		"SELECT current_version, created_at, updated_at FROM secrets WHERE path = ?", path,
-	).Scan(&current, &createdAt, &updatedAt)
+	_, err := measureDBQuery(r, func() (struct{}, error) {
+		return struct{}{}, s.secretsDB.QueryRow(
+			"SELECT current_version, created_at, updated_at FROM secrets WHERE path = ?", path,
+		).Scan(&current, &createdAt, &updatedAt)
+	})
 	if err != nil {
 		if err != sql.ErrNoRows {
 			s.recordAuditEvent(r, "read_metadata", "failure", actor, "api", path, "storage_error")
@@ -332,20 +385,30 @@ func (s *server) getKVMetadata(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"errors": []string{"secret not found"}})
 		return
 	}
-	rows, err := s.secretsDB.Query(`
-		SELECT version, created_at, deleted_at, destroyed_at
-		FROM secret_versions WHERE path = ? ORDER BY version`, path)
+	rows, err := trackDBRowsNamed(r, "secret_metadata_versions", func() (*sql.Rows, error) {
+		return s.secretsDB.Query(`
+			SELECT version, created_at, deleted_at, destroyed_at
+			FROM secret_versions WHERE path = ? ORDER BY version`, path)
+	})
 	if err != nil {
 		s.recordAuditEvent(r, "read_metadata", "failure", actor, "api", path, "storage_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read secret metadata"})
 		return
 	}
-	defer rows.Close()
+	rowsOpen := true
+	closeRows := func() {
+		if rowsOpen {
+			_ = rows.Close()
+			rowsOpen = false
+		}
+	}
+	defer closeRows()
 	versions := make(map[string]any)
 	for rows.Next() {
 		var version, versionCreatedAt int64
 		var deletedAt, destroyedAt sql.NullInt64
 		if err := rows.Scan(&version, &versionCreatedAt, &deletedAt, &destroyedAt); err != nil {
+			closeRows()
 			s.recordAuditEvent(r, "read_metadata", "failure", actor, "api", path, "storage_error")
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read secret metadata"})
 			return
@@ -361,10 +424,12 @@ func (s *server) getKVMetadata(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err := rows.Err(); err != nil {
+		closeRows()
 		s.recordAuditEvent(r, "read_metadata", "failure", actor, "api", path, "storage_error")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read secret metadata"})
 		return
 	}
+	closeRows()
 	s.recordAuditEvent(r, "read_metadata", "success", actor, "api", path, fmt.Sprintf("current_version=%d", current))
 	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{
 		"current_version": current,
@@ -423,7 +488,7 @@ func (s *server) changeKVVersionState(w http.ResponseWriter, r *http.Request) {
 		versions = append(versions, version)
 	}
 	detail := auditVersionsDetail(versions)
-	if err := s.updateSecretVersions(path, operation, versions); err != nil {
+	if err := s.updateSecretVersionsForRequest(r, path, operation, versions); err != nil {
 		s.recordAuditEvent(r, action, "failure", actor, "api", path, "storage_error;"+detail)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not update secret versions"})
 		return

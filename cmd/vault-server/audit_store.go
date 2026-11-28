@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -13,11 +14,46 @@ import (
 	"time"
 )
 
+const (
+	auditBatchMaxEvents = 64
+	auditBatchWindow    = 2 * time.Millisecond
+	auditQueueCapacity  = 1024
+	auditInsertSQL      = `INSERT INTO audit_events(created_at, action, outcome, actor, client_ip, source, resource, detail)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+)
+
 type auditStore struct {
 	mu         sync.Mutex
+	submitMu   sync.RWMutex
+	closeOnce  sync.Once
 	basePath   string
 	activeDB   *sql.DB
 	activeYear int
+	writeQueue chan *auditWriteRequest
+	writerDone chan struct{}
+	closed     bool
+	closeErr   error
+}
+
+type auditWriteRequest struct {
+	createdAt int64
+	action    string
+	outcome   string
+	actor     string
+	clientIP  string
+	source    string
+	resource  string
+	detail    string
+	queuedAt  time.Time
+	result    chan auditWriteResult
+}
+
+type auditWriteResult struct {
+	err          error
+	queueWait    time.Duration
+	rotationTime time.Duration
+	writeTime    time.Duration
+	queryCount   int
 }
 
 func openAnnualAuditStore(basePath string) (*auditStore, error) {
@@ -39,7 +75,14 @@ func openAnnualAuditStore(basePath string) (*auditStore, error) {
 		return nil, fmt.Errorf("restrict active audit database permissions: %w", err)
 	}
 
-	store := &auditStore{basePath: basePath, activeDB: db, activeYear: year}
+	store := &auditStore{
+		basePath:   basePath,
+		activeDB:   db,
+		activeYear: year,
+		writeQueue: make(chan *auditWriteRequest, auditQueueCapacity),
+		writerDone: make(chan struct{}),
+	}
+	go store.runAuditWriter()
 	if err := store.sealOlderDatabases(year); err != nil {
 		_ = store.Close()
 		return nil, err
@@ -369,40 +412,182 @@ func (s *auditStore) rotateLocked(year int) error {
 }
 
 func (s *auditStore) Record(createdAt int64, action, outcome, actor, clientIP, source, resource, detail string) error {
+	return s.recordForRequest(nil, createdAt, action, outcome, actor, clientIP, source, resource, detail)
+}
+
+func (s *auditStore) recordForRequest(r *http.Request, createdAt int64, action, outcome, actor, clientIP, source, resource, detail string) error {
+	request := &auditWriteRequest{
+		createdAt: createdAt,
+		action:    action,
+		outcome:   outcome,
+		actor:     actor,
+		clientIP:  clientIP,
+		source:    source,
+		resource:  resource,
+		detail:    detail,
+		queuedAt:  time.Now(),
+		result:    make(chan auditWriteResult, 1),
+	}
+	s.submitMu.RLock()
+	if s.closed {
+		s.submitMu.RUnlock()
+		return fmt.Errorf("audit store is closed")
+	}
+	s.writeQueue <- request
+	s.submitMu.RUnlock()
+
+	result := <-request.result
+	recordDBOperationMetrics(r, result.queueWait, 0, "audit_queue_wait")
+	if result.rotationTime > 0 {
+		recordDBOperationMetrics(r, result.rotationTime, 0, "audit_store_rotation")
+	}
+	recordDBOperationMetrics(r, result.writeTime, result.queryCount, "audit_batch_write")
+	return result.err
+}
+
+func (s *auditStore) runAuditWriter() {
+	defer close(s.writerDone)
+	for first := range s.writeQueue {
+		batch := []*auditWriteRequest{first}
+		timer := time.NewTimer(auditBatchWindow)
+		collecting := true
+		for collecting && len(batch) < auditBatchMaxEvents {
+			select {
+			case request, ok := <-s.writeQueue:
+				if !ok {
+					collecting = false
+					continue
+				}
+				batch = append(batch, request)
+			case <-timer.C:
+				collecting = false
+			}
+		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		s.writeAuditBatch(batch)
+	}
+}
+
+func (s *auditStore) writeAuditBatch(batch []*auditWriteRequest) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	year := time.Unix(createdAt, 0).UTC().Year()
-	if s.activeDB == nil || s.activeYear != year {
-		if err := s.rotateLocked(year); err != nil {
-			return err
+
+	for start := 0; start < len(batch); {
+		year := time.Unix(batch[start].createdAt, 0).UTC().Year()
+		end := start + 1
+		for end < len(batch) && time.Unix(batch[end].createdAt, 0).UTC().Year() == year {
+			end++
+		}
+
+		group := batch[start:end]
+		writeStarted := time.Now()
+		rotationTime := time.Duration(0)
+		var err error
+		if s.activeDB == nil || s.activeYear != year {
+			rotationStarted := time.Now()
+			err = s.rotateLocked(year)
+			rotationTime = time.Since(rotationStarted)
+		}
+
+		transactionTime := time.Duration(0)
+		queryCounts := make([]int, len(group))
+		if err == nil {
+			transactionStarted := time.Now()
+			queryCounts, err = s.insertAuditEvents(group)
+			transactionTime = time.Since(transactionStarted)
+		}
+
+		for index, request := range group {
+			request.result <- auditWriteResult{
+				err:          err,
+				queueWait:    writeStarted.Sub(request.queuedAt),
+				rotationTime: rotationTime,
+				writeTime:    transactionTime,
+				queryCount:   queryCounts[index],
+			}
+		}
+		start = end
+	}
+}
+
+func (s *auditStore) insertAuditEvents(batch []*auditWriteRequest) ([]int, error) {
+	queryCounts := make([]int, len(batch))
+	tx, err := s.activeDB.Begin()
+	if err != nil {
+		return queryCounts, fmt.Errorf("begin audit batch transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	statement, err := tx.Prepare(auditInsertSQL)
+	if err != nil {
+		return queryCounts, fmt.Errorf("prepare audit batch insert: %w", err)
+	}
+	statementOpen := true
+	defer func() {
+		if statementOpen {
+			_ = statement.Close()
+		}
+	}()
+
+	for index, request := range batch {
+		queryCounts[index] = 1
+		if _, err := statement.Exec(
+			request.createdAt,
+			request.action,
+			request.outcome,
+			request.actor,
+			request.clientIP,
+			request.source,
+			request.resource,
+			request.detail,
+		); err != nil {
+			return queryCounts, fmt.Errorf("insert audit event: %w", err)
 		}
 	}
-	_, err := s.activeDB.Exec(`
-		INSERT INTO audit_events(created_at, action, outcome, actor, client_ip, source, resource, detail)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		createdAt, action, outcome, actor, clientIP, source, resource, detail,
-	)
-	return err
+	if err := statement.Close(); err != nil {
+		statementOpen = false
+		return queryCounts, fmt.Errorf("close audit batch insert: %w", err)
+	}
+	statementOpen = false
+	if err := tx.Commit(); err != nil {
+		return queryCounts, fmt.Errorf("commit audit batch: %w", err)
+	}
+	return queryCounts, nil
 }
 
 func (s *auditStore) Close() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.activeDB == nil {
-		return nil
-	}
-	if _, err := s.activeDB.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
-		_ = s.activeDB.Close()
+	s.closeOnce.Do(func() {
+		s.submitMu.Lock()
+		s.closed = true
+		close(s.writeQueue)
+		s.submitMu.Unlock()
+
+		<-s.writerDone
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if s.activeDB == nil {
+			return
+		}
+		if _, err := s.activeDB.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+			_ = s.activeDB.Close()
+			s.activeDB = nil
+			s.closeErr = fmt.Errorf("checkpoint active audit database: %w", err)
+			return
+		}
+		if err := s.activeDB.Close(); err != nil {
+			s.activeDB = nil
+			s.closeErr = fmt.Errorf("close active audit database: %w", err)
+			return
+		}
 		s.activeDB = nil
-		return fmt.Errorf("checkpoint active audit database: %w", err)
-	}
-	if err := s.activeDB.Close(); err != nil {
-		s.activeDB = nil
-		return fmt.Errorf("close active audit database: %w", err)
-	}
-	s.activeDB = nil
-	if err := os.Chmod(annualAuditPath(s.basePath, s.activeYear), 0400); err != nil {
-		return fmt.Errorf("make stopped audit database read-only: %w", err)
-	}
-	return nil
+		if err := os.Chmod(annualAuditPath(s.basePath, s.activeYear), 0400); err != nil {
+			s.closeErr = fmt.Errorf("make stopped audit database read-only: %w", err)
+		}
+	})
+	return s.closeErr
 }

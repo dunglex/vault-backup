@@ -184,10 +184,13 @@ func (s *server) mfaEnrollmentGuard(next http.Handler) http.Handler {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 			return
 		}
-		if err := db.QueryRow(
-			"SELECT totp_enabled FROM accounts WHERE username = ?",
-			session.username,
-		).Scan(&totpEnabled); err != nil {
+		_, err := measureDBQuery(r, func() (struct{}, error) {
+			return struct{}{}, db.QueryRow(
+				"SELECT totp_enabled FROM accounts WHERE username = ?",
+				session.username,
+			).Scan(&totpEnabled)
+		})
+		if err != nil {
 			log.Printf("ERROR: could not read MFA enrollment state: %v", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not verify MFA enrollment"})
 			return
@@ -196,7 +199,7 @@ func (s *server) mfaEnrollmentGuard(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		enforced, err := s.mfaEnforcementEnabled()
+		enforced, err := s.mfaEnforcementEnabledForRequest(r)
 		if err != nil {
 			log.Printf("ERROR: could not read MFA enforcement setting: %v", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not verify MFA enforcement"})
@@ -260,7 +263,7 @@ func (s *server) hostOriginGuard(next http.Handler) http.Handler {
 			return
 		}
 
-		domains, err := loadConfiguredServerDomains(s.db)
+		domains, err := loadConfiguredServerDomainsForRequest(r, s.db)
 		if err != nil {
 			log.Printf("ERROR: could not load allowed request domains: %v", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not validate request host"})
@@ -327,7 +330,7 @@ func (s *server) apiClientCertificateGuard(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		enforced, err := s.mtlsSettings()
+		enforced, err := s.mtlsSettingsForRequest(r)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not read mTLS settings"})
 			return
@@ -343,7 +346,7 @@ func (s *server) apiClientCertificateGuard(next http.Handler) http.Handler {
 		token := apiTokenFromRequest(r)
 		var expectedID int64
 		if token != "" {
-			if err := s.lookupActiveAPIToken(token, &expectedID); err != nil {
+			if err := s.lookupActiveAPITokenForRequest(r, token, &expectedID); err != nil {
 				if errors.Is(err, sql.ErrNoRows) {
 					writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid API token"})
 					return

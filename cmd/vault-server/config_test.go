@@ -23,6 +23,7 @@ func TestLoadServerConfigAppliesEnvFileEnvironmentAndFlagPrecedence(t *testing.T
 		"VAULT_SERVER_AUDIT_DB=" + filepath.Join(dir, "audit.db"),
 		"VAULT_SERVER_OPERATOR_DB=" + filepath.Join(dir, "operators.db"),
 		"VAULT_SERVER_ALLOW_PLAINTEXT_DB=true",
+		"VAULT_SERVER_LOG_API_DB_METRICS=true",
 		"VAULT_SERVER_TRUSTED_PROXIES=10.10.0.0/16",
 		"VAULT_SERVER_SETUP_KEY=from-file",
 	}, "\n")
@@ -58,7 +59,7 @@ func TestLoadServerConfigAppliesEnvFileEnvironmentAndFlagPrecedence(t *testing.T
 	if config.DBPassword != "from-process" || config.SetupKey != "process-setup-key" {
 		t.Fatalf("process environment precedence failed: password %q, setup key %q", config.DBPassword, config.SetupKey)
 	}
-	if !config.AllowPlaintextDB || config.EnvFilePath != envPath {
+	if !config.AllowPlaintextDB || !config.LogAPIDBMetrics || config.EnvFilePath != envPath {
 		t.Fatalf("boolean or env-file config was not loaded: %#v", config)
 	}
 	if len(config.TrustedProxyRanges) != 1 || !config.TrustedProxyRanges[0].Contains(net.ParseIP("10.10.2.3")) {
@@ -149,6 +150,7 @@ func unsetServerConfigEnvironment(t *testing.T) {
 		"VAULT_SERVER_TLS_KEY",
 		"VAULT_SERVER_DB_PASSWORD",
 		"VAULT_SERVER_ALLOW_PLAINTEXT_DB",
+		"VAULT_SERVER_LOG_API_DB_METRICS",
 		"VAULT_SERVER_ENV_FILE",
 		"VAULT_SERVER_MTLS_CA_CERT",
 		"VAULT_SERVER_TRUSTED_PROXIES",

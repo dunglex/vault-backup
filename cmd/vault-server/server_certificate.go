@@ -282,14 +282,18 @@ func normalizeServerHost(host string) (string, error) {
 }
 
 func loadConfiguredServerDomains(db *sql.DB) ([]string, error) {
-	main, err := readServerSetting(db, serverSettingMainDomain)
+	return loadConfiguredServerDomainsForRequest(nil, db)
+}
+
+func loadConfiguredServerDomainsForRequest(r *http.Request, db *sql.DB) ([]string, error) {
+	main, err := readServerSettingForRequest(r, db, serverSettingMainDomain)
 	if err != nil {
 		return nil, err
 	}
 	if main == "" {
 		return nil, nil
 	}
-	aliasesJSON, err := readServerSetting(db, serverSettingAliasDomains)
+	aliasesJSON, err := readServerSettingForRequest(r, db, serverSettingAliasDomains)
 	if err != nil {
 		return nil, err
 	}
@@ -544,8 +548,14 @@ func pathExists(path string) (bool, error) {
 }
 
 func readServerSetting(db *sql.DB, key string) (string, error) {
+	return readServerSettingForRequest(nil, db, key)
+}
+
+func readServerSettingForRequest(r *http.Request, db *sql.DB, key string) (string, error) {
 	var value string
-	err := db.QueryRow("SELECT value FROM server_settings WHERE key = ?", key).Scan(&value)
+	_, err := measureDBQueryNamed(r, "host_domain_settings", func() (struct{}, error) {
+		return struct{}{}, db.QueryRow("SELECT value FROM server_settings WHERE key = ?", key).Scan(&value)
+	})
 	if err == sql.ErrNoRows {
 		return "", nil
 	}

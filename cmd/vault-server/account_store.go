@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"net/http"
 
 	"vault-backup/internal/operator"
 )
@@ -30,23 +31,29 @@ func (s *server) accountDatabase(role string) *sql.DB {
 }
 
 func (s *server) loadAccount(username string) (accountRecord, *sql.DB, error) {
+	return s.loadAccountForRequest(nil, username)
+}
+
+func (s *server) loadAccountForRequest(r *http.Request, username string) (accountRecord, *sql.DB, error) {
 	var account accountRecord
-	err := s.db.QueryRow(`
-		SELECT username, password_hash, role, secret_mounts, locked, must_change_password,
-		       totp_secret, totp_enabled, totp_recovery_codes
-		FROM accounts WHERE username = ? AND role = 'admin'`,
-		username,
-	).Scan(
-		&account.username,
-		&account.passwordHash,
-		&account.role,
-		&account.secretMounts,
-		&account.locked,
-		&account.mustChangePassword,
-		&account.totpSecret,
-		&account.totpEnabled,
-		&account.totpRecoveryCodes,
-	)
+	_, err := measureDBQuery(r, func() (struct{}, error) {
+		return struct{}{}, s.db.QueryRow(`
+			SELECT username, password_hash, role, secret_mounts, locked, must_change_password,
+			       totp_secret, totp_enabled, totp_recovery_codes
+			FROM accounts WHERE username = ? AND role = 'admin'`,
+			username,
+		).Scan(
+			&account.username,
+			&account.passwordHash,
+			&account.role,
+			&account.secretMounts,
+			&account.locked,
+			&account.mustChangePassword,
+			&account.totpSecret,
+			&account.totpEnabled,
+			&account.totpRecoveryCodes,
+		)
+	})
 	if err == nil {
 		return account, s.db, nil
 	}
@@ -56,7 +63,9 @@ func (s *server) loadAccount(username string) (accountRecord, *sql.DB, error) {
 	if s.operatorDB == nil {
 		return accountRecord{}, nil, sql.ErrNoRows
 	}
-	operatorAccount, err := operator.LoadAccount(s.operatorDB, username)
+	operatorAccount, err := measureDBQuery(r, func() (operator.Account, error) {
+		return operator.LoadAccount(s.operatorDB, username)
+	})
 	if err != nil {
 		return accountRecord{}, nil, err
 	}

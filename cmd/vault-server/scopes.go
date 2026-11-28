@@ -123,10 +123,12 @@ func (s *server) apiSecretAccessForRequest(w http.ResponseWriter, r *http.Reques
 	hash := sha256.Sum256([]byte(token))
 	var encoded string
 	var createdBy sql.NullString
-	err := s.db.QueryRow(
-		"SELECT secret_mounts, created_by FROM api_tokens WHERE token_hash = ? AND revoked_at IS NULL AND expires_at >= ?",
-		hex.EncodeToString(hash[:]), time.Now().Unix(),
-	).Scan(&encoded, &createdBy)
+	_, err := measureDBQueryNamed(r, "token_scope_lookup", func() (struct{}, error) {
+		return struct{}{}, s.db.QueryRow(
+			"SELECT secret_mounts, created_by FROM api_tokens WHERE token_hash = ? AND revoked_at IS NULL AND expires_at >= ?",
+			hex.EncodeToString(hash[:]), time.Now().Unix(),
+		).Scan(&encoded, &createdBy)
+	})
 	if err != nil {
 		if err == sql.ErrNoRows {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
@@ -146,15 +148,19 @@ func (s *server) apiSecretAccessForRequest(w http.ResponseWriter, r *http.Reques
 	if createdBy.Valid {
 		var role, accountMounts string
 		var locked int
-		err := s.db.QueryRow(
-			"SELECT role, locked, secret_mounts FROM accounts WHERE username = ? AND role = 'admin'",
-			createdBy.String,
-		).Scan(&role, &locked, &accountMounts)
-		if err == sql.ErrNoRows && s.operatorDB != nil {
-			err = s.operatorDB.QueryRow(
-				"SELECT role, locked, secret_mounts FROM accounts WHERE username = ? AND role = 'operator'",
+		_, err := measureDBQueryNamed(r, "token_owner_lookup", func() (struct{}, error) {
+			return struct{}{}, s.db.QueryRow(
+				"SELECT role, locked, secret_mounts FROM accounts WHERE username = ? AND role = 'admin'",
 				createdBy.String,
 			).Scan(&role, &locked, &accountMounts)
+		})
+		if err == sql.ErrNoRows && s.operatorDB != nil {
+			_, err = measureDBQueryNamed(r, "token_owner_lookup", func() (struct{}, error) {
+				return struct{}{}, s.operatorDB.QueryRow(
+					"SELECT role, locked, secret_mounts FROM accounts WHERE username = ? AND role = 'operator'",
+					createdBy.String,
+				).Scan(&role, &locked, &accountMounts)
+			})
 		}
 		if err != nil && err != sql.ErrNoRows {
 			log.Printf("ERROR: could not read API token owner access: %v", err)
@@ -182,6 +188,19 @@ func (s *server) secretMountAllowed(access secretMountAccess, mount string) (boo
 		return false, nil
 	}
 	return s.mountExists(mount, false)
+}
+
+func (s *server) secretMountAllowedForRequest(r *http.Request, access secretMountAccess, mount string) (bool, error) {
+	if !access.allows(mount) {
+		return false, nil
+	}
+	var allowed bool
+	_, err := measureDBQueryNamed(r, "mount_access_check", func() (struct{}, error) {
+		var err error
+		allowed, err = s.mountExists(mount, false)
+		return struct{}{}, err
+	})
+	return allowed, err
 }
 
 func (s *server) visibleSecretPaths(access secretMountAccess, mount string) (*sql.Rows, error) {

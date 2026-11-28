@@ -42,25 +42,31 @@ func (s *server) mountExists(mount string, includeDeleted bool) (bool, error) {
 }
 
 func (s *server) activeMountNames() ([]string, error) {
-	rows, err := s.secretsDB.Query("SELECT name FROM secret_mounts WHERE deleted_at IS NULL ORDER BY name")
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	mounts := make([]string, 0)
-	for rows.Next() {
-		var mount string
-		if err := rows.Scan(&mount); err != nil {
+	return s.activeMountNamesForRequest(nil)
+}
+
+func (s *server) activeMountNamesForRequest(r *http.Request) ([]string, error) {
+	return measureDBQueryNamed(r, "mount_resolution", func() ([]string, error) {
+		rows, err := s.secretsDB.Query("SELECT name FROM secret_mounts WHERE deleted_at IS NULL ORDER BY name")
+		if err != nil {
 			return nil, err
 		}
-		mounts = append(mounts, mount)
-	}
-	return mounts, rows.Err()
+		defer rows.Close()
+		mounts := make([]string, 0)
+		for rows.Next() {
+			var mount string
+			if err := rows.Scan(&mount); err != nil {
+				return nil, err
+			}
+			mounts = append(mounts, mount)
+		}
+		return mounts, rows.Err()
+	})
 }
 
 func (s *server) routeKVAPI(w http.ResponseWriter, r *http.Request) {
 	route := strings.Trim(r.PathValue("route"), "/")
-	mounts, err := s.activeMountNames()
+	mounts, err := s.activeMountNamesForRequest(r)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not resolve secret mount"})
 		return
