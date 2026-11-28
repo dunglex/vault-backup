@@ -184,7 +184,8 @@ func TestListServerBackupsRequiresAdminAndReturnsMetadata(t *testing.T) {
 		!body.Backups[0].CreatedAt.Equal(createdAt) ||
 		body.Backups[0].Operators == nil || *body.Backups[0].Operators != 1 ||
 		body.Backups[0].Secrets == nil || *body.Backups[0].Secrets != 2 ||
-		body.Backups[0].APITokens == nil || *body.Backups[0].APITokens != 3 {
+		body.Backups[0].APITokens == nil || *body.Backups[0].APITokens != 3 ||
+		body.Backups[0].SizeBytes <= 0 {
 		t.Fatalf("listed backups = %+v", body.Backups)
 	}
 }

@@ -60,6 +60,7 @@ type Metadata struct {
 type Summary struct {
 	Name      string    `json:"name"`
 	CreatedAt time.Time `json:"created_at"`
+	SizeBytes int64     `json:"size_bytes"`
 	Operators *int      `json:"operators"`
 	Secrets   *int      `json:"secrets"`
 	APITokens *int      `json:"api_tokens"`
@@ -223,6 +224,7 @@ func List(directory string) ([]Summary, error) {
 		if err != nil {
 			return nil, err
 		}
+		summary.SizeBytes = info.Size()
 		backups = append(backups, summary)
 	}
 	sort.Slice(backups, func(i, j int) bool {

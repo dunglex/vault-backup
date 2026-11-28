@@ -112,7 +112,7 @@ function textCell(row, value, className = '') {
 function openAuditDetail(event) {
   const fields = {
     auditDetailId: event.id,
-    auditDetailTime: window.vaultFormatCompactDateTime(event.created_at),
+    auditDetailTime: window.vaultFormatDateTime(event.created_at),
     auditDetailActor: event.actor,
     auditDetailAction: event.action,
     auditDetailOutcome: event.outcome,

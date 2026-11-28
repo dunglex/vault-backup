@@ -39,6 +39,7 @@ func TestCreateAndRestoreServerDataArchive(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dataDir, "nested"), 0700); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := os.WriteFile(filepath.Join(dataDir, "vault.db"), []byte("database"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -62,5 +63,33 @@ func TestCreateAndRestoreServerDataArchive(t *testing.T) {
 	state, err := os.ReadFile(filepath.Join(dataDir, "nested", "state"))
 	if err != nil || string(state) != "state" {
 		t.Fatalf("restored state = %q, err %v", state, err)
+	}
+}
+
+func TestListReportsBackupArchiveSize(t *testing.T) {
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "data")
+	backupDir := filepath.Join(root, "backups")
+	if err := os.MkdirAll(dataDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "vault.db"), []byte("database"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	archivePath, err := Create(dataDir, backupDir, time.Date(2026, 11, 26, 2, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	backups, err := List(backupDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(backups) != 1 || backups[0].SizeBytes != info.Size() {
+		t.Fatalf("listed backup size = %+v, want %d bytes", backups, info.Size())
 	}
 }

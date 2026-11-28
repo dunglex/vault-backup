@@ -43,7 +43,7 @@
     <p class="muted">Last successful backup: <span id="lastServerBackup">None</span></p>
     <p id="s3Status" class="muted" role="status"></p>
     <table>
-      <thead><tr><th>Name</th><th>Created</th><th>Operators</th><th>Secrets</th><th>API tokens</th><th>Actions</th></tr></thead>
+      <thead><tr><th>Name</th><th>File size</th><th>Created</th><th>Operators</th><th>Secrets</th><th>API tokens</th><th>Actions</th></tr></thead>
       <tbody id="backups"></tbody>
     </table>
     <p id="backupsEmpty" class="muted" hidden>No server backups found.</p>
@@ -146,13 +146,23 @@ async function loadSettings() {
   document.getElementById('s3SessionToken').placeholder = settings.s3_session_token_configured ? 'Leave blank to keep the saved token' : 'Session token';
   document.getElementById('s3PathStyle').checked = settings.s3_path_style;
 }
+function formatFileSize(bytes) {
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+  let size = bytes;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  return `${unit === 0 ? size : size.toFixed(1)} ${units[unit]}`;
+}
 async function refreshBackups() {
   const body = document.getElementById('backups');
   body.replaceChildren();
   const result = await api('/v1/backup');
   for (const backup of result.backups) {
     const row = body.insertRow();
-    [backup.name, new Date(backup.created_at).toLocaleString(), backup.operators ?? 'N/A', backup.secrets ?? 'N/A', backup.api_tokens ?? 'N/A'].forEach(value => {
+    [backup.name, formatFileSize(backup.size_bytes), new Date(backup.created_at).toLocaleString(), backup.operators ?? 'N/A', backup.secrets ?? 'N/A', backup.api_tokens ?? 'N/A'].forEach(value => {
       row.insertCell().textContent = String(value);
     });
     const action = row.insertCell();

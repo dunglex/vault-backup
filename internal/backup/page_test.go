@@ -35,6 +35,8 @@ func TestRenderPageUsesDialogForScheduledBackupSettings(t *testing.T) {
 		`<dialog id="backupSettingsDialog"`,
 		`id="backupSettingsForm"`,
 		`id="lastServerBackup"`,
+		`<th>File size</th>`,
+		`formatFileSize(backup.size_bytes)`,
 		`backupSettingsDialog.showModal()`,
 	} {
 		if !strings.Contains(page.String(), marker) {
